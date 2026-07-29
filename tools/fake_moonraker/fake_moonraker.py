@@ -2,16 +2,15 @@
 """
 Fake Moonraker WS-server для проверки iHeater Link Moonraker integration.
 Слушает ws://0.0.0.0:7125/websocket, отвечает на JSON-RPC и шлёт
-notify_status_update с VIRTUAL_CHAMBER target.
+notify_status_update с setpoint стола heater_bed.
 
 Сценарий:
   1) Запустить:  python3 /tmp/fake_moonraker.py
-  2) В портале → Moonraker integration: host=<mac IP>, port=7125, enabled:true
-  3) ESP подключается → printer.objects.subscribe → SDK.onVirtualChamberUpdate
-     → auto_heat → s_output (RMT pulse).
+  2) В локальном /setup выбрать Moonraker: host=<mac IP>, port=7125.
+  3) ESP подключается → printer.objects.subscribe → SDK status callback
+     → bed-setpoint auto-control → s_output (RMT pulse).
   4) Логи в Serial:
-       [HEATER] VIRTUAL_CHAMBER: ... target=70.0 → output=ON
-       [RMT→status] mode=Drying target=70.0
+       [REMOTE] moonraker auto target=60.0C ...
 """
 import asyncio, json, logging, sys
 
@@ -28,12 +27,13 @@ except ImportError:
     print("pip3 install websockets", file=sys.stderr)
     sys.exit(1)
 
-# Текущее значение VIRTUAL_CHAMBER target (°C).
+# Текущие значения виртуальной камеры и setpoint стола (°C).
 chamber_target = 0.0
+bed_target = 0.0
 clients = set()
 
 
-async def broadcast_status(target_temp: float):
+async def broadcast_status(target_temp: float, bed_setpoint: float):
     """Шлём notify_status_update всем подписчикам."""
     msg = {
         "jsonrpc": "2.0",
@@ -45,6 +45,7 @@ async def broadcast_status(target_temp: float):
                     "temperature": -1,
                     "has_sensor":  0,
                 },
+                "heater_bed": {"temperature": 25.0, "target": bed_setpoint},
             },
             # eventtime
             123456.0,
@@ -53,22 +54,22 @@ async def broadcast_status(target_temp: float):
     payload = json.dumps(msg)
     if not clients:
         return
-    log.info(f"→ notify VIRTUAL_CHAMBER.target={target_temp}")
+    log.info(f"→ notify heater_bed.target={bed_setpoint}")
     await asyncio.gather(
         *[c.send(payload) for c in clients], return_exceptions=True
     )
 
 
 async def heartbeat():
-    """Лестница температур: 70→65→60→55→50→55→60→65→70 ... по 30 сек на ступень."""
-    global chamber_target
-    pattern = [70.0, 65.0, 60.0, 55.0, 50.0, 55.0, 60.0, 65.0]
+    """Переключает setpoint стола: ниже/выше авто-порога каждые 10 секунд."""
+    global chamber_target, bed_target
+    pattern = [0.0, 100.0]
     idx = 0
     while True:
-        chamber_target = pattern[idx % len(pattern)]
-        await broadcast_status(chamber_target)
+        bed_target = pattern[idx % len(pattern)]
+        await broadcast_status(chamber_target, bed_target)
         idx += 1
-        await asyncio.sleep(30)
+        await asyncio.sleep(10)
 
 
 async def handle(ws):
@@ -98,7 +99,7 @@ async def handle(ws):
                     "moonraker_version": "fake-1.0.0",
                 }
             elif method == "printer.objects.list":
-                result = {"objects": ["gcode_macro VIRTUAL_CHAMBER"]}
+                result = {"objects": ["gcode_macro VIRTUAL_CHAMBER", "heater_bed"]}
             elif method == "printer.objects.subscribe":
                 # Сразу отдаём текущее состояние + статус.
                 result = {
@@ -108,7 +109,8 @@ async def handle(ws):
                             "target":      chamber_target,
                             "temperature": -1,
                             "has_sensor":  0,
-                        }
+                        },
+                        "heater_bed": {"temperature": 25.0, "target": bed_target},
                     },
                 }
             else:
@@ -120,7 +122,7 @@ async def handle(ws):
 
             # После subscribe — сразу пушим notify, чтобы ESP отработал.
             if method == "printer.objects.subscribe":
-                await broadcast_status(chamber_target)
+                await broadcast_status(chamber_target, bed_target)
     except websockets.ConnectionClosed:
         pass
     finally:

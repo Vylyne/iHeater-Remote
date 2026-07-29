@@ -14,15 +14,19 @@ upstream source layout close enough to make future syncs practical.
 This project is based on:
 
 - [pavluchenkor/iHeater-Link](https://github.com/pavluchenkor/iHeater-Link)
+- [plastikman/DragonBreath v0.8.0-rc3](https://github.com/plastikman/DragonBreath/releases/tag/v0.8.0-rc3)
+  for the local control-source and setup UX model.
 
 The iHeater controller firmware and safety behavior remain the
 controller's responsibility. iHeater Remote only sends the setpoint pulse
 train.
 
-## What It Does
+## What the Local Remote Does
 
-- Runs without iDryer cloud, portal MQTT, Bambu, Moonraker, or Home
-  Assistant integrations.
+- Runs without iDryer cloud, portal MQTT, or Home Assistant.
+- Can bind directly to one local printer source: Bambu Lab LAN MQTT or
+  Moonraker/Klipper. The selected source and its credentials live in ESP32
+  NVS; no portal account, cloud broker, or Internet connection is involved.
 - Serves a local web UI for selecting the heater mode.
 - Creates a captive-portal access point if it cannot join configured
   Wi-Fi.
@@ -142,15 +146,28 @@ BOOT button:
 Web UI:
 
 - Open the device IP, or `http://192.168.4.1/` in AP mode.
-- Tap a mode button or Off.
-- Pick a timer preset, or enter a custom duration in minutes. `0` means
-  Until Off.
+- The touch-first dashboard has Home, Heat, Timer, and Settings views, with
+  compact cards and a navigation rail inspired by DragonBreath's local SPA.
+- **Setup** follows DragonBreath RC3’s local-source model: choose Manual,
+  Bambu LAN, or Moonraker; only one source is active. Non-secret fields are
+  prefilled, while a blank access code/API key preserves the stored secret.
+  Wi-Fi changes and source changes share the same page without requiring an
+  Internet connection or overwriting Wi-Fi accidentally.
+- Bambu and Moonraker use the same local auto rule: the iHeater applies the
+  configured target (45–80 °C) only while the printer bed **setpoint** meets
+  the configured threshold (40–120 °C). Bambu is read-only: no printer control
+  commands are sent.
+- Tap a mode button or Stop, then choose a timer preset or a custom duration.
+  `0` means Until Off.
 - Selecting a mode starts the current timer from that moment. Changing
   the timer while heating restarts the countdown from that moment.
 - Upload a `*-firmware.bin` release asset to update over the air. The
   device turns heating off before writing the update, then reboots.
-- The UI polls status and shows mode, target, timer, remaining time,
-  network mode, and pulse code.
+- The UI shows only directly knowable state: commanded target, timer,
+  pulse code, and network status. It deliberately does not claim to display
+  a current temperature or safety-chain state because this controller has
+  neither local temperature sensing nor an independently attestable safety
+  chain.
 
 LED:
 
