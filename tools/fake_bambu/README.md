@@ -8,11 +8,11 @@
 Bambu Lab принтер изнутри запускает MQTT-broker на TLS-порту 8883
 с user=`bblp` / pass=`<LAN access code>`. iHeater Link подключается
 к нему как клиент, подписывается на `device/{serial}/report` и читает
-`chamber_target` / `ams.tray[].tray_type`.
+`bed_target_temper` / `ams.tray[].tray_type`.
 
 Эта связка `mosquitto + publisher.py` слушает ESP-коннекту и шлёт
-в `device/{serial}/report` лестницу `chamber_target`:
-`70 → 65 → 60 → 55 → 50 → 55 → 60 → 65 → ...` по 30 сек.
+в `device/{serial}/report` setpoint стола `bed_target_temper`:
+`100 → 0` через состояния печати, чтобы проверить порог авто-режима.
 
 ## Зависимости
 
@@ -48,16 +48,18 @@ python3 publisher.py
 | `FAKE_BAMBU_TRAY`    | `PETG`           | тип филамента в vt_tray (PLA / PETG / ABS)  |
 | `FAKE_BAMBU_CERT`    | `./cert.pem`     | путь к CA cert                              |
 
-## Настройка интеграции в портале
+## Настройка локальной интеграции
 
-iHeater Link → Settings → Bambu:
+Откройте `http://<iHeater-IP>/setup`, выберите **Bambu (LAN)** и укажите:
 
 | Поле              | Значение            |
 | ----------------- | ------------------- |
-| ip                | `<IP вашего мака>`  |
+| printer IP        | `<IP вашего мака>`  |
 | serial            | `FAKE_BAMBU_001`    |
 | lan access code   | `12345678`          |
-| enabled           | on                  |
+| auto target / bed threshold | значения для проверки авто-режима |
+
+Это полностью локальная настройка: портал и облачный MQTT не используются.
 
 IP мака:
 
@@ -72,8 +74,7 @@ ipconfig getifaddr en0
 [INFO ] BAMBU: connect attempt: 192.168.0.171:8883 (user=bblp)
 [INFO ] BAMBU: connected
 [INFO ] BAMBU: subscribed to device/FAKE_BAMBU_001/report
-[HEATER] Bambu: chamber_target=70 → output=ON
-[RMT→status] mode=Drying target=70.0
+[REMOTE] bambu auto target=60.0C
 ```
 
 ## Диагностика

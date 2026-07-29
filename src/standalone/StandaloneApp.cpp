@@ -1,14 +1,20 @@
 #include "standalone/StandaloneApp.h"
+#include "standalone/RemoteDashboard.h"
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <DNSServer.h>
 #include <IPAddress.h>
+#include <LittleFS.h>
 #include <Preferences.h>
 #include <Update.h>
 #include <WebServer.h>
 #include <WiFi.h>
 #include <string.h>
+
+#include <hal/hal_arduino.h>
+#include <integrations/common/link_integrations_manager.h>
+#include <integrations/common/link_integrations_store.h>
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -16,6 +22,7 @@
 
 #include "controller/RmtOutputAdapter.h"
 #include "wifi_tx_power.h"
+#include "version.h"
 
 namespace iheaterlink {
 namespace standalone {
@@ -55,6 +62,8 @@ constexpr size_t kMaxWifiPasswordLen = 64;
 const char *kPrefsNamespace = "iheater-remote";
 const char *kWifiSsidKey = "ssid";
 const char *kWifiPasswordKey = "pass";
+const char *kAutoTargetKey = "auto-target";
+const char *kAutoBedThresholdKey = "auto-bed";
 
 const IPAddress kApIp(192, 168, 4, 1);
 const IPAddress kApGateway(192, 168, 4, 1);
@@ -67,6 +76,11 @@ const float kModeTempsC[] = {
 DNSServer s_dnsServer;
 WebServer s_server(80);
 RmtOutputAdapter s_output{RmtOutputConfig{}};
+idryer::cloud::LinkIntegrationsStore s_integrationStore;
+// The integration manager treats this as an optional publisher. Passing null
+// keeps Bambu LAN MQTT and Moonraker entirely on the local network.
+idryer::cloud::LinkIntegrationsManager s_integrations(nullptr,
+                                                      &s_integrationStore);
 
 uint8_t s_mode = 0;
 bool s_apMode = false;
@@ -80,6 +94,8 @@ bool s_otaActive = false;
 bool s_otaOk = false;
 size_t s_otaBytesWritten = 0;
 String s_otaError;
+float s_autoTargetC = 60.0f;
+uint8_t s_autoBedThresholdC = 100;
 
 bool s_buttonStableDown = false;
 bool s_buttonLastRawDown = false;
@@ -94,6 +110,50 @@ uint8_t s_ledFlashesDone = 0;
 uint32_t s_ledNextAtMs = 0;
 
 bool ledEnabled() { return IHEATER_STATUS_LED_PIN != 0xFF; }
+void resetLedPattern();
+
+bool autoHeatAllowed(float bedTargetC) {
+  return bedTargetC >= static_cast<float>(s_autoBedThresholdC);
+}
+
+void applyIntegrationTarget(float targetTempC, const char *source) {
+  ControllerOutputCommand cmd{};
+  if (targetTempC > 0.0f) {
+    cmd.mode = ControllerOutputMode::TargetTemperature;
+    cmd.targetTempC = targetTempC;
+  } else {
+    cmd.mode = ControllerOutputMode::Off;
+  }
+  s_mode = 0; // Integration targets are not one of the seven manual modes.
+  s_timerOffAtMs = 0;
+  s_output.apply(cmd);
+  s_output.forceFrame();
+  resetLedPattern();
+  Serial.printf("[REMOTE] %s target=%.1fC pulse=%u\n", source,
+                (double)cmd.targetTempC, s_output.getLastPulseCode());
+}
+
+void onMoonrakerVirtualChamber(
+    void *, const idryer::cloud::VirtualChamberData &data) {
+  // Kept only as a compatibility callback for older Moonraker installations.
+  // RC3-style control below is driven by the bed *setpoint* in the full status.
+  (void)data;
+}
+
+void onMoonrakerStatus(void *, const idryer::cloud::MoonrakerStatus &status) {
+  if (s_integrations.getActive() != idryer::cloud::ActiveIntegration::Moonraker)
+    return;
+  applyIntegrationTarget(autoHeatAllowed(status.bedTarget) ? s_autoTargetC : 0.0f,
+                         "moonraker auto");
+}
+
+void onBambuPrinterStatus(
+    void *, const idryer::cloud::BambuPrinterStatus &status) {
+  if (s_integrations.getActive() != idryer::cloud::ActiveIntegration::Bambu)
+    return;
+  applyIntegrationTarget(autoHeatAllowed(status.bedTarget) ? s_autoTargetC : 0.0f,
+                         "bambu auto");
+}
 
 void writeLed(bool on) {
   if (!ledEnabled())
@@ -116,6 +176,8 @@ void applyMode(uint8_t mode, const char *source) {
   if (mode > kMaxMode)
     mode = kMaxMode;
 
+  if (s_integrations.getActive() != idryer::cloud::ActiveIntegration::None)
+    s_integrations.setActive(idryer::cloud::ActiveIntegration::None);
   s_mode = mode;
   if (mode == 0) {
     s_timerOffAtMs = 0;
@@ -222,6 +284,35 @@ bool clearStoredWifiCredentials() {
   return true;
 }
 
+void loadAutoSettings() {
+  Preferences prefs;
+  if (!prefs.begin(kPrefsNamespace, true))
+    return;
+  const float target = prefs.getFloat(kAutoTargetKey, 60.0f);
+  const uint8_t threshold = prefs.getUChar(kAutoBedThresholdKey, 100);
+  prefs.end();
+  if (target >= 45.0f && target <= 80.0f)
+    s_autoTargetC = target;
+  if (threshold >= 40 && threshold <= 120)
+    s_autoBedThresholdC = threshold;
+}
+
+bool saveAutoSettings(float target, int threshold) {
+  if (target < 45.0f || target > 80.0f || threshold < 40 || threshold > 120)
+    return false;
+  Preferences prefs;
+  if (!prefs.begin(kPrefsNamespace, false))
+    return false;
+  const bool ok = prefs.putFloat(kAutoTargetKey, target) > 0 &&
+                  prefs.putUChar(kAutoBedThresholdKey, threshold) > 0;
+  prefs.end();
+  if (ok) {
+    s_autoTargetC = target;
+    s_autoBedThresholdC = static_cast<uint8_t>(threshold);
+  }
+  return ok;
+}
+
 void scheduleRestart() { s_restartAtMs = millis() + kRestartDelayMs; }
 
 void updateRestart() {
@@ -258,13 +349,64 @@ bool captiveRedirectIfNeeded() {
   return true;
 }
 
+String htmlEscape(const char *raw) {
+  String out;
+  for (const char *p = raw ? raw : ""; *p; ++p) {
+    switch (*p) {
+    case '&': out += "&amp;"; break;
+    case '<': out += "&lt;"; break;
+    case '>': out += "&gt;"; break;
+    case '\"': out += "&quot;"; break;
+    case '\'': out += "&#39;"; break;
+    default: out += *p; break;
+    }
+  }
+  return out;
+}
+
+void handleSetupPage() {
+  if (captiveRedirectIfNeeded())
+    return;
+  const auto active = s_integrations.getActive();
+  const auto &bambu = s_integrations.bambuConfig();
+  const auto &moon = s_integrations.moonrakerConfig();
+  const String source = active == idryer::cloud::ActiveIntegration::Bambu
+      ? "bambu" : active == idryer::cloud::ActiveIntegration::Moonraker
+      ? "moonraker" : "manual";
+  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--m)}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>All binding configuration stays on this device. Blank password/access-code fields preserve their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option><option value=bambu __BAMBU__>Bambu (LAN)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port type=number value="__MOON_PORT__" min=1 max=65535></label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div><div id=bambu><label>Printer IP<input name=ip value="__BAMBU_IP__" maxlength=15></label><label>Serial<input name=serial value="__BAMBU_SERIAL__" maxlength=19></label><label>LAN access code<input name=lanAccessCode type=password placeholder="(unchanged)" maxlength=15></label><p class=note>Enable LAN Only Mode on the printer and use its access code.</p></div></section><section class=card><h2>Auto control</h2><p class=note>With a printer source selected, heat engages when its bed setpoint reaches this threshold.</p><label>iHeater target (45–80 C)<input name=autoTargetC type=number value="__AUTO_TARGET__" min=45 max=80></label><label>Bed threshold (40–120 C)<input name=autoBedThresholdC type=number value="__AUTO_BED__" min=40 max=120></label></section><button>Save local setup</button></form></main><script>function showSource(){let s=document.getElementById('source').value;document.getElementById('moon').style.display=s==='moonraker'?'block':'none';document.getElementById('bambu').style.display=s==='bambu'?'block':'none'}showSource()</script></html>)HTML";
+  page.replace("__SSID__", htmlEscape(s_stationSsid.c_str()));
+  page.replace("__MOON_HOST__", htmlEscape(moon.host));
+  page.replace("__MOON_PORT__", String(moon.port));
+  page.replace("__BAMBU_IP__", htmlEscape(bambu.ip));
+  page.replace("__BAMBU_SERIAL__", htmlEscape(bambu.serial));
+  page.replace("__AUTO_TARGET__", String(s_autoTargetC, 0));
+  page.replace("__AUTO_BED__", String(s_autoBedThresholdC));
+  page.replace("<h1>Wi-Fi &amp; printer setup</h1>",
+               "<div style='font-size:23px;font-weight:800;letter-spacing:-1px'><span style='color:#5ba9ff'>i</span>Dryer</div><h1>Wi-Fi &amp; printer setup</h1>");
+  page.replace("</form></main>",
+               String("</form><p class=note><a href='/fw'>Firmware update</a> · iHeater Remote v") + VERSION_STR + "</p></main>");
+  page.replace("__MANUAL__", source == "manual" ? "selected" : "");
+  page.replace("__MOON__", source == "moonraker" ? "selected" : "");
+  page.replace("__BAMBU__", source == "bambu" ? "selected" : "");
+  s_server.send(200, "text/html", page);
+}
+
+void handleFirmwarePage() {
+  if (captiveRedirectIfNeeded())
+    return;
+  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iDryer firmware update</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;--bad:#ff8893;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:560px;margin:auto;padding:36px 15px}.logo{font-size:24px;font-weight:800;letter-spacing:-1px}.logo i{font-style:normal;color:var(--a)}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:18px;margin:16px 0}h1{font-size:22px;margin:14px 0 7px}.note{color:var(--m);font-size:13px;line-height:1.5}input,button{box-sizing:border-box;width:100%;min-height:45px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:8px;margin:8px 0}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;cursor:pointer}.warning{color:var(--bad)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><div class=logo><i>i</i>Dryer</div><h1>Firmware update</h1><p class=note>Installed: iHeater Remote v__VERSION__</p><section class=card><p class="note warning"><strong>Heating is stopped before the update is written.</strong> Do not disconnect power while the upload is in progress.</p><input id=file accept=".bin,application/octet-stream" type=file><button id=install>Install update</button><p class=note id=msg></p></section></main><script>const f=document.getElementById('file'),m=document.getElementById('msg');document.getElementById('install').onclick=()=>{let file=f.files[0];if(!file){m.textContent='Choose a firmware .bin first.';return}let x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST','/api/ota');x.upload.onprogress=e=>m.textContent=e.lengthComputable?'Uploading '+Math.round(e.loaded/e.total*100)+'%':'Uploading…';x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=200&&x.status<300){m.textContent='Update written. Rebooting…';setTimeout(waitForDevice,1500)}else m.textContent=r.error||'Update failed.'};x.onerror=()=>m.textContent='Update failed.';x.send(d)};function waitForDevice(){let end=Date.now()+120000,t=setInterval(async()=>{try{let r=await fetch('/api/status',{cache:'no-store'});if(r.ok){clearInterval(t);location.href='/'}}catch(_){}if(Date.now()>end){clearInterval(t);m.textContent='The device is restarting. Reopen the dashboard when it is back online.'}},1000)}</script></main>)HTML";
+  page.replace("__VERSION__", VERSION_STR);
+  s_server.send(200, "text/html", page);
+}
+
 void sendJsonStatus() {
   updateHeatTimer();
 
   StaticJsonDocument<1024> doc;
   doc["mode"] = s_mode;
-  doc["targetTempC"] = kModeTempsC[s_mode];
-  doc["heating"] = s_mode != 0;
+  const auto output = s_output.getLastCommand();
+  doc["targetTempC"] = output.targetTempC;
+  doc["heating"] = output.mode == ControllerOutputMode::TargetTemperature;
   doc["timerMinutes"] = s_timerMinutes;
   doc["timerActive"] = s_mode != 0 && s_timerOffAtMs != 0;
   doc["timerRemainingSeconds"] = timerRemainingSeconds();
@@ -281,6 +423,16 @@ void sendJsonStatus() {
   doc["otaBytesWritten"] = s_otaBytesWritten;
   doc["otaError"] = s_otaError;
   doc["uptimeMs"] = millis();
+  doc["firmwareVersion"] = VERSION_STR;
+  doc["integration"] = idryer::cloud::activeIntegrationToString(
+      s_integrations.getActive());
+  doc["bambuState"] = idryer::cloud::bambuConnectionStateToString(
+      s_integrations.bambuState());
+  doc["moonrakerState"] = idryer::cloud::moonrakerConnectionStateToString(
+      s_integrations.moonrakerState());
+  const auto &bambu = s_integrations.bambuPrinterStatus();
+  doc["bambuFilament"] = bambu.trayType;
+  doc["bambuPrintState"] = bambu.gcodeState;
 
   String out;
   serializeJson(doc, out);
@@ -324,6 +476,108 @@ void handleTimerPost() {
 
   Serial.printf("[REMOTE] web timer=%umin\n", s_timerMinutes);
   sendJsonStatus();
+}
+
+bool applySetupForm(String &error) {
+  const String type = s_server.arg("type");
+  StaticJsonDocument<384> doc;
+  doc["type"] = type;
+
+  if (type == "bambu") {
+    const auto &old = s_integrations.bambuConfig();
+    const String ip = s_server.arg("ip");
+    const String serial = s_server.arg("serial");
+    const String code = s_server.arg("lanAccessCode");
+    doc["enabled"] = true;
+    doc["ip"] = ip.length() ? ip : old.ip;
+    doc["serial"] = serial.length() ? serial : old.serial;
+    // Secrets are write-only: a blank field explicitly means keep the stored code.
+    doc["lanAccessCode"] = code.length() ? code : old.lanAccessCode;
+    s_integrations.handleLinkIntegrationCommand(doc.as<JsonObjectConst>());
+    if (!s_integrations.bambuConfig().configured()) {
+      error = "Bambu requires IP, serial number, and LAN access code.";
+      return false;
+    }
+    s_integrations.setActive(idryer::cloud::ActiveIntegration::Bambu);
+  } else if (type == "moonraker") {
+    const auto &old = s_integrations.moonrakerConfig();
+    const int port = s_server.arg("port").toInt();
+    const String host = s_server.arg("host");
+    const String key = s_server.arg("apiKey");
+    doc["enabled"] = true;
+    doc["host"] = host.length() ? host : old.host;
+    doc["port"] = port > 0 && port <= 65535 ? port : old.port;
+    doc["apiKey"] = key.length() ? key : old.apiKey;
+    doc["ssl"] = s_server.arg("ssl") == "1";
+    s_integrations.handleLinkIntegrationCommand(doc.as<JsonObjectConst>());
+    if (!s_integrations.moonrakerConfig().configured()) {
+      error = "Moonraker requires a host or IP address.";
+      return false;
+    }
+    s_integrations.setActive(idryer::cloud::ActiveIntegration::Moonraker);
+  } else if (type == "manual") {
+    s_integrations.setActive(idryer::cloud::ActiveIntegration::None);
+    applyIntegrationTarget(0.0f, "binding disabled");
+  } else {
+    error = "Unknown control source.";
+    return false;
+  }
+
+  const String target = s_server.arg("autoTargetC");
+  const String threshold = s_server.arg("autoBedThresholdC");
+  if ((target.length() || threshold.length()) &&
+      !saveAutoSettings(target.length() ? target.toFloat() : s_autoTargetC,
+                        threshold.length() ? threshold.toInt() : s_autoBedThresholdC)) {
+    error = "Auto target must be 45–80 C and bed threshold 40–120 C.";
+    return false;
+  }
+  return true;
+}
+
+void handleIntegrationPost() {
+  String error;
+  if (!applySetupForm(error)) {
+    s_server.send(400, "application/json", String("{\"error\":\"") + error + "\"}");
+    return;
+  }
+  sendJsonStatus();
+}
+
+void handleSetupPost() {
+  String error;
+  if (!applySetupForm(error)) {
+    s_server.send(400, "text/plain", error);
+    return;
+  }
+
+  String ssid = s_server.arg("ssid");
+  const String password = s_server.arg("password");
+  ssid.trim();
+  if (ssid.length()) {
+    if (ssid.length() > kMaxWifiSsidLen || password.length() > kMaxWifiPasswordLen ||
+        (password.length() && password.length() < 8)) {
+      s_server.send(400, "text/plain", "Invalid Wi-Fi credentials.");
+      return;
+    }
+    // An empty Wi-Fi password preserves the stored password only when the SSID
+    // is unchanged; a new network still needs its password.
+    if (!password.length() && ssid != s_stationSsid) {
+      s_server.send(400, "text/plain", "Enter the password for a new Wi-Fi network.");
+      return;
+    }
+    String storedPassword;
+    if (!password.length())
+      loadStoredWifiCredentials(s_stationSsid, storedPassword);
+    if (!saveStoredWifiCredentials(ssid, password.length() ? password : storedPassword)) {
+      s_server.send(500, "text/plain", "Could not save Wi-Fi credentials.");
+      return;
+    }
+    s_stationSsid = ssid;
+    s_wifiCredentialSource = "stored";
+    scheduleRestart();
+  }
+  s_server.sendHeader("Location", "/setup", true);
+  s_server.send(303, "text/plain", "Saved");
 }
 
 void handleWifiPost() {
@@ -449,6 +703,46 @@ void handleRoot() {
   if (captiveRedirectIfNeeded())
     return;
 
+  String page(FPSTR(kRemoteDashboardHtml));
+  page.replace(
+      "<div class=\"brand\" aria-label=\"iDryer\" style=\"width:60px;background:transparent;color:#eaf1fa;font-size:14px;letter-spacing:-1px\"><span style=\"color:#5ba9ff\">i</span>Dryer</div>",
+      "<img class=\"brand\" src=\"/logo.png\" alt=\"iDryer\">");
+  page.replace(
+      "</style>",
+      R"HTML(
+/* Desktop refinement: anchor the interface, use the available canvas, and
+   keep the navigation pictographic rather than repeating labels. */
+.main{width:100%;max-width:1440px;margin:0 auto;padding:30px 42px}
+.brand{object-fit:cover}
+.connection{display:none}
+.tab{font-size:0;position:relative;line-height:0}
+.tab::before{content:"";position:absolute;inset:0;margin:auto;display:block;width:23px;height:23px;background:currentColor}
+.tab[data-page=home]::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m3 10 9-7 9 7'/%3E%3Cpath d='M5 9v11h14V9'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m3 10 9-7 9 7'/%3E%3Cpath d='M5 9v11h14V9'/%3E%3C/svg%3E") center/contain no-repeat}
+.tab[data-page=heat]::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2c3 3 3 6 0 9'/%3E%3Cpath d='M7 5c3 3 3 7 0 11'/%3E%3Cpath d='M17 5c3 3 3 7 0 11'/%3E%3Cpath d='M4 19c4 2 12 2 16 0'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2c3 3 3 6 0 9'/%3E%3Cpath d='M7 5c3 3 3 7 0 11'/%3E%3Cpath d='M17 5c3 3 3 7 0 11'/%3E%3Cpath d='M4 19c4 2 12 2 16 0'/%3E%3C/svg%3E") center/contain no-repeat}
+.tab[data-page=timer]::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 7v5l3 2'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 7v5l3 2'/%3E%3C/svg%3E") center/contain no-repeat}
+.tab.settings::before{display:none}
+.grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start}
+.grid>.card:first-child{grid-column:auto;display:block}
+.grid>.card:first-child h2{margin-bottom:13px}
+.grid>.card:first-child .details{margin-top:18px;grid-template-columns:repeat(2,minmax(0,1fr))}
+.quick{grid-column:auto;align-self:stretch}
+.quick .actions{grid-template-columns:repeat(2,minmax(0,1fr));align-content:start}
+@media(max-width:900px){.main{padding:20px}.grid{grid-template-columns:1fr}.quick{grid-column:1/-1}.quick .actions{grid-template-columns:repeat(4,minmax(0,1fr))}}
+@media(max-width:650px){.rail{height:58px;padding:7px;gap:8px}.brand{width:37px;height:37px;border-radius:10px}.tab{width:42px;min-width:42px;height:39px;flex:0 0 42px;padding:0}.tab::before{width:21px;height:21px}.tab.settings{margin:0 0 0 auto;font-size:22px!important}.main{padding:15px}.quick .actions{grid-template-columns:repeat(2,minmax(0,1fr))}}
+</style>)HTML");
+  page.replace("<button class=\"tab\" data-page=\"home\" aria-selected=\"true\">HOME</button>",
+               "<button class=\"tab\" data-page=\"home\" aria-label=\"Dashboard\" title=\"Dashboard\" aria-selected=\"true\">HOME</button>");
+  page.replace("<button class=\"tab\" data-page=\"heat\">HEAT</button>",
+               "<button class=\"tab\" data-page=\"heat\" aria-label=\"Heat controls\" title=\"Heat controls\">HEAT</button>");
+  page.replace("<button class=\"tab\" data-page=\"timer\">TIMER</button>",
+               "<button class=\"tab\" data-page=\"timer\" aria-label=\"Timer\" title=\"Timer\">TIMER</button>");
+  page.replace(
+      "iDryer Remote <span id=\"version\">—</span> · This remote reports the command it sends to iHeater. Current temperatures and safety-chain state are not available on this hardware.",
+      "iHeater Remote <span id=\"version\">—</span>");
+  s_server.send(200, "text/html", page);
+  return; // The legacy dashboard remains below only for source-history context.
+
+#if 0
   static const char page[] PROGMEM = R"HTML(
 <!doctype html>
 <html lang="en">
@@ -663,13 +957,19 @@ setInterval(refresh,1000);
 </html>
 )HTML";
   s_server.send_P(200, "text/html", page);
+#endif
 }
 
 void configureRoutes() {
+  s_server.serveStatic("/logo.png", LittleFS, "/logo.png");
   s_server.on("/", HTTP_GET, handleRoot);
+  s_server.on("/setup", HTTP_GET, handleSetupPage);
+  s_server.on("/fw", HTTP_GET, handleFirmwarePage);
   s_server.on("/api/status", HTTP_GET, sendJsonStatus);
   s_server.on("/api/mode", HTTP_POST, handleModePost);
   s_server.on("/api/timer", HTTP_POST, handleTimerPost);
+  s_server.on("/api/integration", HTTP_POST, handleIntegrationPost);
+  s_server.on("/api/setup", HTTP_POST, handleSetupPost);
   s_server.on("/api/wifi", HTTP_POST, handleWifiPost);
   s_server.on("/api/wifi/clear", HTTP_POST, handleWifiClearPost);
   s_server.on("/api/ota", HTTP_POST, handleOtaPost, handleOtaUpload);
@@ -840,7 +1140,18 @@ void setup() {
   s_output.begin();
   applyMode(0, "boot");
 
+  if (!LittleFS.begin()) {
+    Serial.println("[REMOTE] LittleFS unavailable; logo asset will not load");
+  }
+
   configureWiFi();
+  loadAutoSettings();
+  idryer::hal::initArduinoHal(&Serial, false);
+  s_integrations.setDeviceType(idryer::UartDeviceType::IHeaterLink);
+  s_integrations.setVirtualChamberCallback(onMoonrakerVirtualChamber);
+  s_integrations.setMoonrakerStatusCallback(onMoonrakerStatus);
+  s_integrations.setBambuPrinterStatusCallback(onBambuPrinterStatus);
+  s_integrations.begin();
   configureRoutes();
   s_server.begin();
   Serial.printf("[REMOTE] Web UI: http://%s/\n",
@@ -855,6 +1166,7 @@ void loop() {
   updateHeatTimer();
   updateLed();
   updateRestart();
+  s_integrations.loop();
   delay(2);
 }
 

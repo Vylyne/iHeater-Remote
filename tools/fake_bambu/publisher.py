@@ -2,9 +2,8 @@
 """
 Fake Bambu publisher — шлёт report-payloads в device/{SERIAL}/report.
 
-Эмулирует реальный сценарий Bambu без датчика камеры (P1S/A1):
-chamber_target всегда 0 — целевая температура камеры берётся из типа
-филамента активного трея AMS, через menu.mat_<type> на iHeater-link.
+Эмулирует Bambu LAN для локального bed-setpoint авто-режима:
+при активной печати `bed_target_temper=100`, после FINISH — 0.
 
 Лестница по 15 сек:
   PREPARE (PLA) → RUNNING ams (PLA) → RUNNING vt_tray (PETG)
@@ -15,8 +14,8 @@ chamber_target всегда 0 — целевая температура каме
   RUNNING — печать идёт
   FINISH  — печать завершена, трей выгружен (tray_now="255")
 
-ESP-side auto_heat включает нагрев при PREPARE и RUNNING, выключает
-при FINISH (см. iHeater-link/src/heater/auto_heat.cpp::bambuShouldHeat).
+Локальный iHeater включает нагрев, когда bed setpoint достигает выбранного
+в `/setup` порога, и выключает его после FINISH.
 
 Зависимости: pip3 install --user paho-mqtt
 """
@@ -72,6 +71,7 @@ def make_payload(source: str, tray_type):
             "print": {
                 "command":     "push_status",
                 "gcode_state": "PREPARE",
+                "bed_target_temper": 100,
                 "mc_percent":  0,
                 "ams": {
                     "tray_now": "0",
@@ -94,6 +94,7 @@ def make_payload(source: str, tray_type):
             "print": {
                 "command":     "push_status",
                 "gcode_state": "RUNNING",
+                "bed_target_temper": 100,
                 "mc_percent":  42,
                 "ams": {
                     "tray_now": "0",
@@ -116,6 +117,7 @@ def make_payload(source: str, tray_type):
             "print": {
                 "command":     "push_status",
                 "gcode_state": "RUNNING",
+                "bed_target_temper": 100,
                 "mc_percent":  42,
                 "ams": {
                     "tray_now": "254",
@@ -131,6 +133,7 @@ def make_payload(source: str, tray_type):
             "print": {
                 "command":     "push_status",
                 "gcode_state": "RUNNING",
+                "bed_target_temper": 100,
                 "mc_percent":  42,
                 "ams": {
                     "tray_now": "128",
@@ -149,6 +152,7 @@ def make_payload(source: str, tray_type):
         "print": {
             "command":     "push_status",
             "gcode_state": "FINISH",
+            "bed_target_temper": 0,
             "ams": {"tray_now": "255"},
         }
     }
