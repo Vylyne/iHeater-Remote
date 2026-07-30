@@ -727,8 +727,9 @@ void handleRoot() {
 .grid>.card:first-child .details{margin-top:18px;grid-template-columns:repeat(2,minmax(0,1fr))}
 .quick{grid-column:auto;align-self:stretch}
 .quick .actions{grid-template-columns:repeat(2,minmax(0,1fr));align-content:start}
-@media(max-width:900px){.main{padding:20px}.grid{grid-template-columns:1fr}.quick{grid-column:1/-1}.quick .actions{grid-template-columns:repeat(4,minmax(0,1fr))}}
-@media(max-width:650px){.rail{height:58px;padding:7px;gap:8px}.brand{width:37px;height:37px;border-radius:10px}.tab{width:42px;min-width:42px;height:39px;flex:0 0 42px;padding:0}.tab::before{width:21px;height:21px}.tab.settings{margin:0 0 0 auto;font-size:22px!important}.main{padding:15px}.quick .actions{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.footer a{color:inherit;text-decoration:none}.footer a:hover{color:var(--accent)}
+@media(max-width:650px){.rail{height:58px;padding:7px;gap:8px}.brand{width:37px;height:37px;border-radius:10px}.tab{width:42px;min-width:42px;height:39px;flex:0 0 42px;padding:0}.tab::before{width:21px;height:21px}.tab.settings{margin:0 0 0 auto;font-size:22px!important}.main{padding:15px}.card{padding:13px}.state{font-size:22px}.details{gap:7px;margin-top:14px}.metric{padding:9px}.metric strong{font-size:18px}.quick .actions{gap:7px}}
+@media(max-width:560px){.grid{grid-template-columns:1fr}.quick{grid-column:1/-1}.quick .actions{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>)HTML");
   page.replace("<button class=\"tab\" data-page=\"home\" aria-selected=\"true\">HOME</button>",
                "<button class=\"tab\" data-page=\"home\" aria-label=\"Dashboard\" title=\"Dashboard\" aria-selected=\"true\">HOME</button>");
@@ -738,7 +739,7 @@ void handleRoot() {
                "<button class=\"tab\" data-page=\"timer\" aria-label=\"Timer\" title=\"Timer\">TIMER</button>");
   page.replace(
       "iDryer Remote <span id=\"version\">—</span> · This remote reports the command it sends to iHeater. Current temperatures and safety-chain state are not available on this hardware.",
-      "iHeater Remote <span id=\"version\">—</span>");
+      "<a href=\"https://github.com/justinh-rahb/iHeater-Remote\" target=\"_blank\" rel=\"noopener\">iHeater Remote <span id=\"version\">—</span></a>");
   s_server.send(200, "text/html", page);
   return; // The legacy dashboard remains below only for source-history context.
 
