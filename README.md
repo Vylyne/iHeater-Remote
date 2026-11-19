@@ -27,6 +27,9 @@ train.
 - Can bind directly to one local printer source: Bambu Lab LAN MQTT or
   Moonraker/Klipper. The selected source and its credentials live in ESP32
   NVS; no portal account, cloud broker, or Internet connection is involved.
+- With Klipper, can appear as a native chamber heater (`M141`/`M191`,
+  Mainsail target box) via the bundled
+  [Klipper module](klipper/README.md).
 - Serves a local web UI for selecting the heater mode.
 - Creates a captive-portal access point if it cannot join configured
   Wi-Fi.
@@ -155,10 +158,23 @@ Web UI:
   prefilled, while a blank access code/API key preserves the stored secret.
   Wi-Fi changes and source changes share the same page without requiring an
   Internet connection or overwriting Wi-Fi accidentally.
-- Bambu and Moonraker use the same local auto rule: the iHeater applies the
-  configured target (45–80 °C) only while the printer bed **setpoint** meets
-  the configured threshold (40–120 °C). Bambu is read-only: no printer control
-  commands are sent.
+- **Moonraker:** with the Klipper chamber heater installed
+  ([klipper/README.md](klipper/README.md)), the Klipper chamber target
+  (`M141`/`M191`, Mainsail) is followed directly, and `0` means off even if
+  the bed is hot. Without it, the bed rule below applies.
+- **Bed rule** (Bambu, and Moonraker without the chamber heater): the iHeater
+  applies the configured auto target only while the printer bed **setpoint**
+  meets the configured threshold (40–120 °C). Bambu is read-only: no printer
+  control commands are sent.
+- **iHeater target range** (Setup page, default Min 45 / Max 85): records
+  the range your iHeater firmware accepts. It does not change any setting
+  on the iHeater. Every target the Remote sends (Klipper, bed rule, manual
+  modes) is clamped to it. Stock v0.5.0 iHeater firmware accepts 45–90,
+  ignores other targets, and faults when the air reaches its
+  `MAX_AIR_TEMP` (90), so we recommend a Max no higher than 80.
+- **Moonraker watchdog:** if no Moonraker update arrives for 30 s while
+  connected (e.g. after a Klipper restart, which drops subscriptions), the
+  Remote turns heat off and reconnects.
 - Tap a mode button or Stop, then choose a timer preset or a custom duration.
   `0` means Until Off.
 - Selecting a mode starts the current timer from that moment. Changing
