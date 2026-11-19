@@ -35,3 +35,4 @@ apply-commit-messages.mjs
 img/.resize-hash
 package-lock.json
 package.json
+__pycache__/
