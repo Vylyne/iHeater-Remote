@@ -74,9 +74,91 @@ void test_stale_wraparound() {
   TEST_ASSERT_TRUE(moonrakerStale(30000, 0xFFFFFFF0u, 30000));
 }
 
+void test_wifi_connected_none() {
+  TEST_ASSERT_TRUE(wifiSupervisorAction(false, true, true, 100000, 0) == WifiAction::None);
+}
+
+void test_wifi_sta_reconnect_due() {
+  TEST_ASSERT_TRUE(wifiSupervisorAction(false, true, false, 30000, 0) == WifiAction::Reconnect);
+}
+
+void test_wifi_sta_reconnect_not_due() {
+  TEST_ASSERT_TRUE(wifiSupervisorAction(false, true, false, 29999, 0) == WifiAction::None);
+}
+
+void test_wifi_ap_retry_due() {
+  TEST_ASSERT_TRUE(wifiSupervisorAction(true, true, false, 120000, 0) == WifiAction::RetryFromAp);
+}
+
+void test_wifi_ap_retry_not_due() {
+  TEST_ASSERT_TRUE(wifiSupervisorAction(true, true, false, 119999, 0) == WifiAction::None);
+}
+
+void test_wifi_ap_no_credentials() {
+  TEST_ASSERT_TRUE(wifiSupervisorAction(true, false, false, 500000, 0) == WifiAction::None);
+}
+
+void test_wifi_wraparound() {
+  TEST_ASSERT_TRUE(wifiSupervisorAction(false, true, false, 5, 0xFFFFFFF0u) == WifiAction::None);
+  TEST_ASSERT_TRUE(wifiSupervisorAction(false, true, false, 30000, 0xFFFFFFF0u) ==
+                   WifiAction::Reconnect);
+}
+
+void test_link_loss_within_grace() {
+  TEST_ASSERT_FALSE(cutHeatForLinkLoss(true, true, false, 599999, 0, 600000));
+}
+
+void test_link_loss_after_grace() {
+  TEST_ASSERT_TRUE(cutHeatForLinkLoss(true, true, false, 600000, 0, 600000));
+}
+
+void test_link_loss_healthy() {
+  TEST_ASSERT_FALSE(cutHeatForLinkLoss(true, true, true, 10000000, 0, 600000));
+}
+
+void test_link_loss_not_heating() {
+  TEST_ASSERT_FALSE(cutHeatForLinkLoss(true, false, false, 10000000, 0, 600000));
+}
+
+void test_link_loss_manual() {
+  TEST_ASSERT_FALSE(cutHeatForLinkLoss(false, true, false, 10000000, 0, 600000));
+}
+
+void test_link_loss_wraparound() {
+  TEST_ASSERT_FALSE(cutHeatForLinkLoss(true, true, false, 5, 0xFFFFFFF0u, 600000));
+}
+
+void test_moonraker_reset_status() {
+  TEST_ASSERT_TRUE(moonrakerStatusIsReset(""));
+  TEST_ASSERT_TRUE(moonrakerStatusIsReset(nullptr));
+  TEST_ASSERT_FALSE(moonrakerStatusIsReset("standby"));
+}
+
+void test_tx_power_valid() {
+  const int valid[] = {34, 44, 52, 60, 68, 78};
+  for (int v : valid) TEST_ASSERT_TRUE(validTxPower(v));
+  const int invalid[] = {0, 33, 80, 84};
+  for (int v : invalid) TEST_ASSERT_FALSE(validTxPower(v));
+}
+
 void setup() {
   delay(2000);
   UNITY_BEGIN();
+  RUN_TEST(test_wifi_connected_none);
+  RUN_TEST(test_wifi_sta_reconnect_due);
+  RUN_TEST(test_wifi_sta_reconnect_not_due);
+  RUN_TEST(test_wifi_ap_retry_due);
+  RUN_TEST(test_wifi_ap_retry_not_due);
+  RUN_TEST(test_wifi_ap_no_credentials);
+  RUN_TEST(test_wifi_wraparound);
+  RUN_TEST(test_link_loss_within_grace);
+  RUN_TEST(test_link_loss_after_grace);
+  RUN_TEST(test_link_loss_healthy);
+  RUN_TEST(test_link_loss_not_heating);
+  RUN_TEST(test_link_loss_manual);
+  RUN_TEST(test_link_loss_wraparound);
+  RUN_TEST(test_moonraker_reset_status);
+  RUN_TEST(test_tx_power_valid);
   RUN_TEST(test_valid_range);
   RUN_TEST(test_clamp_off);
   RUN_TEST(test_clamp_low_to_min);
