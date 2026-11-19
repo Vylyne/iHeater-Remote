@@ -48,7 +48,7 @@ sensor: temperature_sensor chamber_hexa
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `sensor` | required | Existing sensor object whose reading is the chamber temperature (used by Mainsail and `M191`). |
-| `max_target` | `80` | Highest chamber target Klipper accepts (45–90). Higher requests are a gcode error. |
+| `max_target` | `80` | Highest chamber target Klipper accepts (45–90). Higher requests are a gcode error. Also published as `max_temp` so Mainsail/Fluidd limit their target box to it; do not set `max_temp` yourself. |
 | `mirror_macro` | `VIRTUAL_CHAMBER` | `gcode_macro` whose `target` / `temperature` / `has_sensor` variables the Remote reads. |
 
 The section name must start with `heater_`: Mainsail only offers a target

@@ -72,6 +72,9 @@ class FakeConfig:
         self.printer = printer
         self.name = name
         self.options = options
+        # Mirrors Klipper's access_tracking: what configfile.settings exposes
+        # (read options, plus defaults that are not None).
+        self.settings = {}
 
     def get_printer(self):
         return self.printer
@@ -81,10 +84,13 @@ class FakeConfig:
 
     def get(self, option, default=_MISSING):
         if option in self.options:
+            self.settings[option] = self.options[option]
             return self.options[option]
         if default is _MISSING:
             raise ConfigError("Option '%s' in section '%s' must be specified"
                               % (option, self.name))
+        if default is not None:
+            self.settings[option] = default
         return default
 
     def getfloat(self, option, default=_MISSING, minval=None, maxval=None):
@@ -150,8 +156,8 @@ class HeaterVirtualTest(unittest.TestCase):
         self.sensor.temp = sensor_temp
         opts = {'sensor': 'temperature_sensor chamber_hexa'}
         opts.update(options)
-        config = FakeConfig(self.printer, 'heater_virtual chamber', opts)
-        return heater_virtual.load_config_prefix(config)
+        self.config = FakeConfig(self.printer, 'heater_virtual chamber', opts)
+        return heater_virtual.load_config_prefix(self.config)
 
     def make_connected(self, sensor_temp=21.5, **options):
         hv = self.make(sensor_temp, **options)
@@ -265,6 +271,18 @@ class HeaterVirtualTest(unittest.TestCase):
         self.assertTrue(hv.check_busy(0.))
         self.sensor.temp = 50.
         self.assertFalse(hv.check_busy(0.))
+
+    def test_publishes_max_temp_for_ui_target_limit(self):
+        # Mainsail/Fluidd cap the target box at configfile.settings max_temp
+        # (missing → 0, so every target would be "too high").
+        self.make(max_target=70.)
+        self.assertEqual(self.config.settings['max_temp'], 70.)
+        self.assertEqual(self.config.settings['min_temp'], 0.)
+
+    def test_explicit_max_temp_is_config_error(self):
+        with self.assertRaises(ConfigError) as ctx:
+            self.make(max_temp=80.)
+        self.assertIn('max_target', str(ctx.exception))
 
     def test_get_status_reports_sensor_temperature(self):
         hv = self.make_connected(sensor_temp=33.333)

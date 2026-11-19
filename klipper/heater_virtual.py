@@ -16,6 +16,15 @@ class HeaterVirtual:
         self.sensor_name = config.get('sensor')
         self.max_target = config.getfloat('max_target', 80.,
                                           minval=45., maxval=90.)
+        # There is no shutdown threshold here; the referenced sensor has its
+        # own. Reading min_temp/max_temp with defaults publishes them in
+        # configfile.settings, which Mainsail and Fluidd use to limit the
+        # target box (a missing max_temp makes every target "too high").
+        if config.get('max_temp', None) is not None:
+            raise config.error(
+                "[%s] use max_target, not max_temp" % (self.full_name,))
+        config.getfloat('min_temp', 0.)
+        config.getfloat('max_temp', self.max_target)
         self.macro_name = 'gcode_macro ' + config.get('mirror_macro',
                                                       'VIRTUAL_CHAMBER')
         self.sensor = None
