@@ -22,6 +22,7 @@
 #endif
 
 #include "controller/RmtOutputAdapter.h"
+#include <RemotePolicy.h>
 #include "wifi_tx_power.h"
 #include "version.h"
 
@@ -65,6 +66,8 @@ const char *kWifiSsidKey = "ssid";
 const char *kWifiPasswordKey = "pass";
 const char *kAutoTargetKey = "auto-target";
 const char *kAutoBedThresholdKey = "auto-bed";
+const char *kMinTargetKey = "min-target";
+const char *kMaxTargetKey = "max-target";
 
 const IPAddress kApIp(192, 168, 4, 1);
 const IPAddress kApGateway(192, 168, 4, 1);
@@ -77,7 +80,16 @@ const float kModeTempsC[] = {
 DNSServer s_dnsServer;
 WebServer s_server(80);
 WebSocketsServer s_statusSocket(81);
-RmtOutputAdapter s_output{RmtOutputConfig{}};
+// The adapter's own window is widened to the full pulse range; the target
+// range policy (s_range) does the clamping.
+RmtOutputConfig remoteOutputConfig() {
+  RmtOutputConfig config{};
+  config.minTempC = policy::kRangeFloorC;
+  config.maxTempC = policy::kRangeCeilC;
+  return config;
+}
+
+RmtOutputAdapter s_output{remoteOutputConfig()};
 idryer::cloud::LinkIntegrationsStore s_integrationStore;
 // The integration manager treats this as an optional publisher. Passing null
 // keeps Bambu LAN MQTT and Moonraker entirely on the local network.
@@ -98,6 +110,10 @@ size_t s_otaBytesWritten = 0;
 String s_otaError;
 float s_autoTargetC = 60.0f;
 uint8_t s_autoBedThresholdC = 100;
+policy::TargetRange s_range{policy::kDefaultMinC, policy::kDefaultMaxC};
+String s_targetSource = "manual";
+uint32_t s_lastMoonrakerUpdateMs = 0;
+bool s_moonrakerWasConnected = false;
 
 bool s_buttonStableDown = false;
 bool s_buttonLastRawDown = false;
@@ -118,7 +134,10 @@ bool autoHeatAllowed(float bedTargetC) {
   return bedTargetC >= static_cast<float>(s_autoBedThresholdC);
 }
 
-void applyIntegrationTarget(float targetTempC, const char *source) {
+void applyIntegrationTarget(float targetTempC, const char *source,
+                            const char *targetSource) {
+  targetTempC = policy::clampTargetC(targetTempC, s_range);
+  s_targetSource = targetSource;
   ControllerOutputCommand cmd{};
   if (targetTempC > 0.0f) {
     cmd.mode = ControllerOutputMode::TargetTemperature;
@@ -137,16 +156,21 @@ void applyIntegrationTarget(float targetTempC, const char *source) {
 
 void onMoonrakerVirtualChamber(
     void *, const idryer::cloud::VirtualChamberData &data) {
-  // Kept only as a compatibility callback for older Moonraker installations.
-  // RC3-style control below is driven by the bed *setpoint* in the full status.
+  // Unused: the VIRTUAL_CHAMBER target arrives in the full status below,
+  // where it takes priority over the bed-setpoint rule.
   (void)data;
 }
 
 void onMoonrakerStatus(void *, const idryer::cloud::MoonrakerStatus &status) {
   if (s_integrations.getActive() != idryer::cloud::ActiveIntegration::Moonraker)
     return;
-  applyIntegrationTarget(autoHeatAllowed(status.bedTarget) ? s_autoTargetC : 0.0f,
-                         "moonraker auto");
+  s_lastMoonrakerUpdateMs = millis();
+  const policy::MoonrakerInputs inputs{status.virtualChamberAvailable,
+                                       status.chamberTarget, status.bedTarget};
+  applyIntegrationTarget(
+      policy::resolveMoonrakerTargetC(inputs, s_autoTargetC,
+                                      s_autoBedThresholdC, s_range),
+      "moonraker", status.virtualChamberAvailable ? "klipper" : "bed-rule");
 }
 
 void onBambuPrinterStatus(
@@ -154,7 +178,7 @@ void onBambuPrinterStatus(
   if (s_integrations.getActive() != idryer::cloud::ActiveIntegration::Bambu)
     return;
   applyIntegrationTarget(autoHeatAllowed(status.bedTarget) ? s_autoTargetC : 0.0f,
-                         "bambu auto");
+                         "bambu auto", "bambu");
 }
 
 void writeLed(bool on) {
@@ -195,8 +219,9 @@ void applyMode(uint8_t mode, const char *source) {
     cmd.targetTempC = 0.0f;
   } else {
     cmd.mode = ControllerOutputMode::TargetTemperature;
-    cmd.targetTempC = kModeTempsC[mode];
+    cmd.targetTempC = policy::clampTargetC(kModeTempsC[mode], s_range);
   }
+  s_targetSource = "manual";
   s_output.apply(cmd);
   s_output.forceFrame();
   resetLedPattern();
@@ -292,23 +317,33 @@ void loadAutoSettings() {
     return;
   const float target = prefs.getFloat(kAutoTargetKey, 60.0f);
   const uint8_t threshold = prefs.getUChar(kAutoBedThresholdKey, 100);
+  const uint8_t minTarget = prefs.getUChar(kMinTargetKey, policy::kDefaultMinC);
+  const uint8_t maxTarget = prefs.getUChar(kMaxTargetKey, policy::kDefaultMaxC);
   prefs.end();
-  if (target >= 45.0f && target <= 80.0f)
+  if (policy::validRange(minTarget, maxTarget))
+    s_range = policy::TargetRange{minTarget, maxTarget};
+  if (target >= s_range.minC && target <= s_range.maxC)
     s_autoTargetC = target;
   if (threshold >= 40 && threshold <= 120)
     s_autoBedThresholdC = threshold;
 }
 
-bool saveAutoSettings(float target, int threshold) {
-  if (target < 45.0f || target > 80.0f || threshold < 40 || threshold > 120)
+bool saveAutoSettings(float target, int threshold, int minTarget,
+                      int maxTarget) {
+  if (!policy::validRange(minTarget, maxTarget) || target < minTarget ||
+      target > maxTarget || threshold < 40 || threshold > 120)
     return false;
   Preferences prefs;
   if (!prefs.begin(kPrefsNamespace, false))
     return false;
   const bool ok = prefs.putFloat(kAutoTargetKey, target) > 0 &&
-                  prefs.putUChar(kAutoBedThresholdKey, threshold) > 0;
+                  prefs.putUChar(kAutoBedThresholdKey, threshold) > 0 &&
+                  prefs.putUChar(kMinTargetKey, minTarget) > 0 &&
+                  prefs.putUChar(kMaxTargetKey, maxTarget) > 0;
   prefs.end();
   if (ok) {
+    s_range = policy::TargetRange{static_cast<uint8_t>(minTarget),
+                                  static_cast<uint8_t>(maxTarget)};
     s_autoTargetC = target;
     s_autoBedThresholdC = static_cast<uint8_t>(threshold);
   }
@@ -326,6 +361,35 @@ void updateRestart() {
     Serial.flush();
     ESP.restart();
   }
+}
+
+// Moonraker drops every subscription when Klippy disconnects and the client
+// never resubscribes, so silence while "Connected" means we have gone deaf:
+// turn heat off and restart the client, which resubscribes.
+void updateMoonrakerWatchdog() {
+  using idryer::cloud::ActiveIntegration;
+  const bool connected =
+      s_integrations.getActive() == ActiveIntegration::Moonraker &&
+      s_integrations.moonrakerState() ==
+          idryer::cloud::MoonrakerConnectionState::Connected;
+  if (!connected) {
+    s_moonrakerWasConnected = false;
+    return;
+  }
+  if (!s_moonrakerWasConnected) {
+    s_moonrakerWasConnected = true;
+    s_lastMoonrakerUpdateMs = millis();
+    return;
+  }
+  if (!policy::moonrakerStale(millis(), s_lastMoonrakerUpdateMs,
+                              policy::kMoonrakerStaleMs))
+    return;
+  applyIntegrationTarget(0.0f, "moonraker stale", "watchdog");
+  Serial.println("[REMOTE] moonraker stale, restarting client");
+  s_integrations.setActive(ActiveIntegration::None);
+  s_integrations.setActive(ActiveIntegration::Moonraker);
+  s_moonrakerWasConnected = false;
+  s_lastMoonrakerUpdateMs = millis();
 }
 
 bool isIpLiteral(const String &host) {
@@ -375,12 +439,14 @@ void handleSetupPage() {
   const String source = active == idryer::cloud::ActiveIntegration::Bambu
       ? "bambu" : active == idryer::cloud::ActiveIntegration::Moonraker
       ? "moonraker" : "manual";
-  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--m)}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>All binding configuration stays on this device. Blank password/access-code fields preserve their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option><option value=bambu __BAMBU__>Bambu (LAN)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port type=number value="__MOON_PORT__" min=1 max=65535></label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div><div id=bambu><label>Printer IP<input name=ip value="__BAMBU_IP__" maxlength=15></label><label>Serial<input name=serial value="__BAMBU_SERIAL__" maxlength=19></label><label>LAN access code<input name=lanAccessCode type=password placeholder="(unchanged)" maxlength=15></label><p class=note>Enable LAN Only Mode on the printer and use its access code.</p></div></section><section class=card><h2>Auto control</h2><p class=note>With a printer source selected, heat engages when its bed setpoint reaches this threshold.</p><label>iHeater target (45–80 C)<input name=autoTargetC type=number value="__AUTO_TARGET__" min=45 max=80></label><label>Bed threshold (40–120 C)<input name=autoBedThresholdC type=number value="__AUTO_BED__" min=40 max=120></label></section><button>Save local setup</button></form></main><script>function showSource(){let s=document.getElementById('source').value;document.getElementById('moon').style.display=s==='moonraker'?'block':'none';document.getElementById('bambu').style.display=s==='bambu'?'block':'none'}showSource()</script></html>)HTML";
+  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--m)}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>All binding configuration stays on this device. Blank password/access-code fields preserve their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option><option value=bambu __BAMBU__>Bambu (LAN)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port type=number value="__MOON_PORT__" min=1 max=65535></label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div><div id=bambu><label>Printer IP<input name=ip value="__BAMBU_IP__" maxlength=15></label><label>Serial<input name=serial value="__BAMBU_SERIAL__" maxlength=19></label><label>LAN access code<input name=lanAccessCode type=password placeholder="(unchanged)" maxlength=15></label><p class=note>Enable LAN Only Mode on the printer and use its access code.</p></div></section><section class=card><h2>iHeater target range</h2><p class=note>These values do not change any setting on the iHeater. Stock v0.5.0 firmware accepts 45–90 and faults when the air reaches 90.</p><p class=note>Min must not be lower than your iHeater's minimum: lower targets are ignored by the iHeater, which keeps its previous target.</p><p class=note>We recommend a Max no higher than 80 (10 °C below the iHeater's MAX_AIR_TEMP).</p><label>Min target (C)<input name=minTargetC type=number value="__MIN_TARGET__" min=11 max=90></label><label>Max target (C)<input name=maxTargetC type=number value="__MAX_TARGET__" min=11 max=90></label></section><section class=card><h2>Auto control</h2><p class=note>Klipper's chamber heater (VIRTUAL_CHAMBER) takes priority; otherwise heat engages when the bed setpoint reaches this threshold.</p><label>iHeater target (within range)<input name=autoTargetC type=number value="__AUTO_TARGET__"></label><label>Bed threshold (40–120 C)<input name=autoBedThresholdC type=number value="__AUTO_BED__" min=40 max=120></label></section><button>Save local setup</button></form></main><script>function showSource(){let s=document.getElementById('source').value;document.getElementById('moon').style.display=s==='moonraker'?'block':'none';document.getElementById('bambu').style.display=s==='bambu'?'block':'none'}showSource()</script></html>)HTML";
   page.replace("__SSID__", htmlEscape(s_stationSsid.c_str()));
   page.replace("__MOON_HOST__", htmlEscape(moon.host));
   page.replace("__MOON_PORT__", String(moon.port));
   page.replace("__BAMBU_IP__", htmlEscape(bambu.ip));
   page.replace("__BAMBU_SERIAL__", htmlEscape(bambu.serial));
+  page.replace("__MIN_TARGET__", String(s_range.minC));
+  page.replace("__MAX_TARGET__", String(s_range.maxC));
   page.replace("__AUTO_TARGET__", String(s_autoTargetC, 0));
   page.replace("__AUTO_BED__", String(s_autoBedThresholdC));
   page.replace("<h1>Wi-Fi &amp; printer setup</h1>",
@@ -413,6 +479,9 @@ String statusJson() {
   doc["timerActive"] = s_mode != 0 && s_timerOffAtMs != 0;
   doc["timerRemainingSeconds"] = timerRemainingSeconds();
   doc["pulseCode"] = s_output.getLastPulseCode();
+  doc["minTargetC"] = s_range.minC;
+  doc["maxTargetC"] = s_range.maxC;
+  doc["targetSource"] = s_targetSource;
   doc["rmtEnabled"] = s_output.isEnabled();
   doc["wifiMode"] = wifiModeString();
   doc["ip"] = localIpString();
@@ -544,7 +613,7 @@ bool applySetupForm(String &error) {
     s_integrations.setActive(idryer::cloud::ActiveIntegration::Moonraker);
   } else if (type == "manual") {
     s_integrations.setActive(idryer::cloud::ActiveIntegration::None);
-    applyIntegrationTarget(0.0f, "binding disabled");
+    applyIntegrationTarget(0.0f, "binding disabled", "manual");
   } else {
     error = "Unknown control source.";
     return false;
@@ -552,10 +621,15 @@ bool applySetupForm(String &error) {
 
   const String target = s_server.arg("autoTargetC");
   const String threshold = s_server.arg("autoBedThresholdC");
-  if ((target.length() || threshold.length()) &&
+  const String minTarget = s_server.arg("minTargetC");
+  const String maxTarget = s_server.arg("maxTargetC");
+  if ((target.length() || threshold.length() || minTarget.length() ||
+       maxTarget.length()) &&
       !saveAutoSettings(target.length() ? target.toFloat() : s_autoTargetC,
-                        threshold.length() ? threshold.toInt() : s_autoBedThresholdC)) {
-    error = "Auto target must be 45–80 C and bed threshold 40–120 C.";
+                        threshold.length() ? threshold.toInt() : s_autoBedThresholdC,
+                        minTarget.length() ? minTarget.toInt() : s_range.minC,
+                        maxTarget.length() ? maxTarget.toInt() : s_range.maxC)) {
+    error = "Range must satisfy 11 ≤ min ≤ max ≤ 90, auto target must be inside it, bed threshold 40–120 C.";
     return false;
   }
   return true;
@@ -1197,6 +1271,7 @@ void loop() {
   updateLed();
   updateRestart();
   s_integrations.loop();
+  updateMoonrakerWatchdog();
   pushStatusIfChanged();
   delay(2);
 }
