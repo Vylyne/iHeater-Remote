@@ -15,7 +15,8 @@ include/secrets.h.back
 firmware/
 submodules.md
 SIM/
-test/
+test/*
+!test/test_remote_policy/
 read_serial.py
 test_uart_rp2040_emulator.py
 docs-service/
