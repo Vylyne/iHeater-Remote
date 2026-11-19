@@ -22,7 +22,8 @@
 
 1. Router reboots while printing → STA reconnect within ~30 s, Moonraker resubscribes, heat resumes.
 2. Power cut, router slower than ESP32 → AP fallback, joins within ~2 min, AP and DNS stop.
-3. Moonraker in bed-rule mode (no VIRTUAL_CHAMBER), Wi-Fi drops → heat off.
+3. Moonraker in bed-rule mode (no VIRTUAL_CHAMBER), Wi-Fi drops → heat held, off after 10 min.
+6. Klipper restart (link up, target returns 0 after resubscribe) → heat off on the first real status, not after 10 min.
 4. `millis()` wrap during either interval → no stuck or rapid-fire retries.
 5. Manual mode while Moonraker/Bambu selected → link-loss rule does not touch manual heat.
 
@@ -38,7 +39,9 @@
 - `constexpr uint32_t kStaReconnectMs = 30000; constexpr uint32_t kApRetryMs = 120000;`
 - `enum class WifiAction : uint8_t { None, Reconnect, RetryFromAp };`
 - `WifiAction wifiSupervisorAction(bool apMode, bool hasCredentials, bool staConnected, uint32_t nowMs, uint32_t lastAttemptMs);` — STA connected → None; STA (not AP) disconnected and elapsed ≥ kStaReconnectMs → Reconnect; AP mode with credentials, STA not connected, elapsed ≥ kApRetryMs → RetryFromAp; else None. Elapsed is wrap-safe.
-- `bool cutHeatForLinkLoss(bool printerSourceActive, bool heatingFromPrinter, bool linkConnected);` — `printerSourceActive && heatingFromPrinter && !linkConnected`.
+- `constexpr uint32_t kLinkLossGraceMs = 600000;`
+- `bool cutHeatForLinkLoss(bool printerSourceActive, bool heatingFromPrinter, bool linkHealthy, uint32_t nowMs, uint32_t linkDownSinceMs, uint32_t graceMs);` — `printerSourceActive && heatingFromPrinter && !linkHealthy && elapsed ≥ graceMs` (wrap-safe).
+- `bool moonrakerStatusIsReset(const char *printerState);` — true when `printerState` is null or empty (idryer-core's disconnect reset).
 - `bool validTxPower(int quarterDbm);` — true only for 34, 44, 52, 60, 68, 78.
 
 - [ ] **Step 1: Add failing tests**
@@ -51,10 +54,13 @@ test_wifi_ap_retry_due:          wifiSupervisorAction(true,true,false,120000,0)=
 test_wifi_ap_retry_not_due:      wifiSupervisorAction(true,true,false,119999,0)==None
 test_wifi_ap_no_credentials:     wifiSupervisorAction(true,false,false,500000,0)==None
 test_wifi_wraparound:            wifiSupervisorAction(false,true,false,5,0xFFFFFFF0u)==None; (false,true,false,30000,0xFFFFFFF0u)==Reconnect
-test_link_loss_cuts:             cutHeatForLinkLoss(true,true,false)==true
-test_link_loss_connected:        cutHeatForLinkLoss(true,true,true)==false
-test_link_loss_not_heating:      cutHeatForLinkLoss(true,false,false)==false
-test_link_loss_manual:           cutHeatForLinkLoss(false,true,false)==false
+test_link_loss_within_grace:     cutHeatForLinkLoss(true,true,false,599999,0,600000)==false
+test_link_loss_after_grace:      cutHeatForLinkLoss(true,true,false,600000,0,600000)==true
+test_link_loss_healthy:          cutHeatForLinkLoss(true,true,true,10000000,0,600000)==false
+test_link_loss_not_heating:      cutHeatForLinkLoss(true,false,false,10000000,0,600000)==false
+test_link_loss_manual:           cutHeatForLinkLoss(false,true,false,10000000,0,600000)==false
+test_link_loss_wraparound:       cutHeatForLinkLoss(true,true,false,5,0xFFFFFFF0u,600000)==false
+test_moonraker_reset_status:     moonrakerStatusIsReset("")==true; (nullptr)==true; ("standby")==false
 test_tx_power_valid:             validTxPower(34),44,52,60,68,78 true; 0,33,80,84 false
 ```
 
@@ -71,9 +77,12 @@ test_tx_power_valid:             validTxPower(34),44,52,60,68,78 true; 0,33,80,8
 
 - [ ] **Step 1: TX power.** `kTxPowerKey = "tx-power"`, `int s_txPower` loaded in `loadAutoSettings` (default `IHEATER_WIFI_TX_POWER`, accepted only if `validTxPower`). Replace `applyConfiguredWifiTxPower(...)` calls in this file with a local `applyTxPower(const char *context)` using `s_txPower` (load settings before `configureWiFi()` in `setup()`). Setup page: in the Wi-Fi card add `<label>Transmit power<select name=txPower>` with the six options (labels `8.5 dBm (default)`, `11 dBm`, `13 dBm`, `15 dBm`, `17 dBm`, `19.5 dBm`; `__TXP_<n>__` → `selected`), a note `Higher power can help a weak signal; some C3 Super Mini boards fail to connect above 8.5 dBm. Changing it restarts the device.`, and `Signal: __RSSI__` note. `applySetupForm`: if `txPower` present and different, validate, persist, `scheduleRestart()`; invalid → error `Invalid transmit power.`
 - [ ] **Step 2: Wi-Fi supervisor.** `void updateWifiSupervisor()` in `loop()`: track `s_wifiLastAttemptMs` (set to now while STA connected). On `Reconnect`: log `[REMOTE] WiFi down, reconnecting`, `WiFi.reconnect()`, stamp. On `RetryFromAp`: if not yet AP+STA, `WiFi.mode(WIFI_AP_STA)`; `WiFi.begin(stored ssid, password)`; `applyTxPower`; log; stamp. When in AP mode and `WiFi.status() == WL_CONNECTED`: log IP, `s_dnsServer.stop()`, `WiFi.softAPdisconnect(true)`, `WiFi.mode(WIFI_STA)`, `s_apMode = false`. Credentials come from `loadWifiCredentials`.
-- [ ] **Step 3: Link-loss safety.** `void updateLinkSafety()` in `loop()` after `s_integrations.loop()`: printer source = active is Moonraker or Bambu; heating from printer = output heating and `s_targetSource` in {klipper, bed-rule, bambu}; connected = that client's state is Connected. If `cutHeatForLinkLoss` → `applyIntegrationTarget(0, "printer link lost", "link-lost")` and log once.
+- [ ] **Step 3: Link-loss safety.**
+  - `onMoonrakerStatus`: if `moonrakerStatusIsReset(status.printerState)` → log `[REMOTE] moonraker link lost, holding target` and return without applying or stamping. `onBambuPrinterStatus`: if `bambuState() != Connected` → same, return.
+  - `updateMoonrakerWatchdog`: on stale, restart the client but do not call `applyIntegrationTarget(0, …)`; set `s_moonrakerSilent = true` (cleared on the next real status).
+  - `void updateLinkSafety()` in `loop()` after the watchdog: printer source = active is Moonraker or Bambu; heating from printer = output heating and `s_targetSource` in {klipper, bed-rule, bambu}; healthy = client Connected and (Bambu, or Moonraker and not `s_moonrakerSilent`). Track `s_linkDownSinceMs` (stamped on the healthy→unhealthy edge). If `cutHeatForLinkLoss(..., policy::kLinkLossGraceMs)` → `applyIntegrationTarget(0, "printer link lost 10 min", "link-lost")`.
 - [ ] **Step 4: Status JSON** `wifiTxPower`, `wifiRssi`.
 - [ ] **Step 5: Build** `pio run -e esp32c3-super-mini-remote` → SUCCESS.
 - [ ] **Step 6: Docs** — README Wi-Fi section: reconnect, AP retry, TX power, link-loss rule.
 - [ ] **Step 7: Commit** `feat(remote): Wi-Fi reconnect, AP retry, TX power setting, link-loss safety`
-- [ ] **Step 8: On-device checks (user):** router off/on → reconnects ≤ ~30 s; boot with router off then on → joins ≤ ~2 min, AP gone; Moonraker heating then stop Moonraker → heat off immediately; TX power change → restart and new value shown.
+- [ ] **Step 8: On-device checks (user):** router off/on → reconnects ≤ ~30 s; boot with router off then on → joins ≤ ~2 min, AP gone; Moonraker heating then unplug the router → heat held, off after 10 min; reconnect within 10 min → heat continues; TX power change → restart and new value shown.
