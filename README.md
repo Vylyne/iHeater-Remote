@@ -113,6 +113,22 @@ http://192.168.4.1/
 Captive portal DNS is enabled in AP mode, so most phones and laptops
 should offer to open the UI automatically.
 
+Staying connected:
+
+- If Wi-Fi drops, the Remote calls a reconnect every 30 s until it
+  returns.
+- If it fell back to the access point (for example, after a power cut
+  where the router booted slower than the Remote) and has saved
+  credentials, it keeps the access point up and retries the saved network
+  every 2 minutes. Once it joins, it shuts down the access point and
+  captive DNS. Each retry briefly disturbs devices connected to the access
+  point.
+- **Transmit power** (Setup page): 8.5 dBm (default), 11, 13, 15, 17 or
+  19.5 dBm. Higher power can help a weak signal, but some ESP32-C3 Super
+  Mini boards fail to connect above 8.5 dBm. Changing it restarts the
+  device. The Setup page shows the current signal strength (RSSI) to judge
+  the effect, and the status socket reports it as `wifiRssi`.
+
 For local development, `include/secrets.h` is still supported as a
 fallback when no credentials have been saved in NVS:
 
@@ -174,7 +190,14 @@ Web UI:
   `MAX_AIR_TEMP` (90), so we recommend a Max no higher than 80.
 - **Moonraker watchdog:** if no Moonraker update arrives for 30 s while
   connected (e.g. after a Klipper restart, which drops subscriptions), the
-  Remote turns heat off and reconnects.
+  Remote reconnects to resubscribe. Heat is not turned off at this point;
+  the link-loss rule below decides.
+- **Link loss:** while Moonraker or Bambu is the source and the Remote is
+  heating from it, a lost printer link (disconnected, or Moonraker silent
+  for 30 s) holds the last target, so a short Wi-Fi drop does not cool the
+  chamber mid-print. If the link is still down after 10 minutes, heat
+  turns off. Any real target from the printer, including `0`, applies
+  immediately. Manual heat is never affected.
 - Tap a mode button or Stop, then choose a timer preset or a custom duration.
   `0` means Until Off.
 - Selecting a mode starts the current timer from that moment. Changing
