@@ -53,7 +53,7 @@ class UartPollPolicy {
  private:
   void recomputeDesired();
   void noteClearSent(const PollRequest &req, uint32_t nowMs);
-  void updateClearPhase(const IheaterSnapshot &s, uint32_t nowMs);
+  void updateClearPhase(const IheaterSnapshot &s, uint32_t nowMs, bool wasQuiet);
 
   IheaterSnapshot snapshot_{};
   IheaterLimits limits_{};

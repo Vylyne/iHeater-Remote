@@ -560,6 +560,61 @@ void test_restart_result_one_without_spent_clear_not_ok() {
   TEST_ASSERT_FALSE(p.lastClearOk());
 }
 
+// A real restart is silent for ~5 s, and the clear goes out after ~5 s of safe
+// readings, so the first post-restart uptime is at or above the uptime at send.
+void test_clear_success_verified_without_uptime_drop() {
+  UartPollPolicy p;
+  readyFaulted(p, 5);
+  p.onReply(p.followUp(0), okWriteReply(), 10);
+  p.onNoReply(p.cycleRead(), 1010);
+  p.onNoReply(p.cycleRead(), 5000);
+  feedInputs(p, faultInputs(0, false, 2, 6, 1, IheaterState::Idle), 5400);
+  TEST_ASSERT_EQUAL(ClearPhase::Idle, p.clearPhase());
+  TEST_ASSERT_TRUE(p.lastClearOk());
+}
+
+void test_clear_success_verified_equal_uptime() {
+  UartPollPolicy p;
+  readyFaulted(p, 5);
+  p.onReply(p.followUp(0), okWriteReply(), 10);
+  p.onNoReply(p.cycleRead(), 1010);
+  feedInputs(p, faultInputs(0, false, 2, 5, 1, IheaterState::Idle), 5400);
+  TEST_ASSERT_EQUAL(ClearPhase::Idle, p.clearPhase());
+  TEST_ASSERT_TRUE(p.lastClearOk());
+}
+
+void test_lost_clear_reply_quiet_then_restart_counts() {
+  UartPollPolicy p;
+  readyFaulted(p, 5);
+  p.onNoReply(p.followUp(0), 10);
+  p.onNoReply(p.cycleRead(), 400);
+  p.onNoReply(p.cycleRead(), 800);
+  p.onNoReply(p.cycleRead(), 1200);
+  feedInputs(p, faultInputs(0, false, 2, 6, 1, IheaterState::Idle), 5400);
+  TEST_ASSERT_EQUAL(ClearPhase::Idle, p.clearPhase());
+  TEST_ASSERT_TRUE(p.lastClearOk());
+}
+
+void test_quiet_return_without_spent_clear_not_ok() {
+  UartPollPolicy p;
+  readyFaulted(p, 5);
+  p.onReply(p.followUp(0), okWriteReply(), 10);
+  p.onNoReply(p.cycleRead(), 1010);
+  feedInputs(p, faultInputs(0, false, 3, 6, 1, IheaterState::Idle), 5400);  // still 3 left
+  TEST_ASSERT_EQUAL(ClearPhase::Idle, p.clearPhase());
+  TEST_ASSERT_FALSE(p.lastClearOk());
+}
+
+void test_quiet_return_without_result_one_not_ok() {
+  UartPollPolicy p;
+  readyFaulted(p, 5);
+  p.onReply(p.followUp(0), okWriteReply(), 10);
+  p.onNoReply(p.cycleRead(), 1010);
+  feedInputs(p, faultInputs(0, false, 2, 6, 0, IheaterState::Idle), 5400);
+  TEST_ASSERT_EQUAL(ClearPhase::Idle, p.clearPhase());
+  TEST_ASSERT_FALSE(p.lastClearOk());
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_build_read_vector);
@@ -608,5 +663,10 @@ int main() {
   RUN_TEST(test_clear_never_landed_retries);
   RUN_TEST(test_lost_clear_reply_other_state_times_out);
   RUN_TEST(test_restart_result_one_without_spent_clear_not_ok);
+  RUN_TEST(test_clear_success_verified_without_uptime_drop);
+  RUN_TEST(test_clear_success_verified_equal_uptime);
+  RUN_TEST(test_lost_clear_reply_quiet_then_restart_counts);
+  RUN_TEST(test_quiet_return_without_spent_clear_not_ok);
+  RUN_TEST(test_quiet_return_without_result_one_not_ok);
   return UNITY_END();
 }

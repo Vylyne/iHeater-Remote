@@ -54,10 +54,12 @@ PollRequest UartPollPolicy::followUp(uint32_t) const {
 }
 
 void UartPollPolicy::onReply(const PollRequest &req, const Reply &reply, uint32_t nowMs) {
+  bool wasQuiet = false;
   if (reply.kind == ReplyKind::Ok) {
     // A reply after the link had gone quiet means the iHeater may have restarted.
     const LinkStatus before = link(nowMs);
-    if (before == LinkStatus::NoReply || before == LinkStatus::Restarting) {
+    wasQuiet = (before == LinkStatus::NoReply || before == LinkStatus::Restarting);
+    if (wasQuiet) {
       hasLimits_ = false;
       refusalKnown_ = false;
     }
@@ -76,7 +78,7 @@ void UartPollPolicy::onReply(const PollRequest &req, const Reply &reply, uint32_
         snapshot_ = s;
         hasSnapshot_ = true;
         lastInputsOk_ = true;
-        updateClearPhase(s, nowMs);
+        updateClearPhase(s, nowMs, wasQuiet);
       } else {
         lastInputsOk_ = false;
       }
@@ -132,11 +134,15 @@ void UartPollPolicy::noteClearSent(const PollRequest &req, uint32_t nowMs) {
   clearSentMs_ = nowMs;
 }
 
-void UartPollPolicy::updateClearPhase(const IheaterSnapshot &s, uint32_t nowMs) {
+void UartPollPolicy::updateClearPhase(const IheaterSnapshot &s, uint32_t nowMs,
+                                      bool wasQuiet) {
   if (clearPhase_ == ClearPhase::Blocked && s.activeFault != blockedFault_) {
     clearPhase_ = ClearPhase::Idle;
   } else if (clearPhase_ == ClearPhase::AwaitRestart) {
-    if (s.uptimeS < clearUptimeAtSend_) {
+    // The iHeater is silent for ~5 s while it restarts and the clear goes out
+    // after ~5 s of uptime, so the first reply often shows an uptime at or above
+    // the one at send. A reply after the link went quiet is the restart too.
+    if (s.uptimeS < clearUptimeAtSend_ || wasQuiet) {
       // Success needs the result code and exactly one clear spent.
       lastClearOk_ = (s.lastClearResult == 1 && s.clearsLeft + 1 == clearsLeftAtSend_);
       clearPhase_ = ClearPhase::Idle;
