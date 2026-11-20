@@ -133,23 +133,16 @@ class FakeSensor:
         return self.temp, 0.
 
 
-class FakeMacro:
-    def __init__(self):
-        self.variables = {'target': 0, 'temperature': -1, 'has_sensor': 0}
-
-
 class HeaterVirtualTest(unittest.TestCase):
     def setUp(self):
         self.printer = FakePrinter()
         self.heaters = FakeHeaters()
         self.gcode = FakeGcode()
         self.sensor = FakeSensor(21.5)
-        self.macro = FakeMacro()
         self.printer.objects.update({
             'heaters': self.heaters,
             'gcode': self.gcode,
             'temperature_sensor chamber_hexa': self.sensor,
-            'gcode_macro VIRTUAL_CHAMBER': self.macro,
         })
 
     def make(self, sensor_temp=21.5, **options):
@@ -162,11 +155,6 @@ class HeaterVirtualTest(unittest.TestCase):
     def make_connected(self, sensor_temp=21.5, **options):
         hv = self.make(sensor_temp, **options)
         self.printer.fire('klippy:connect')
-        return hv
-
-    def make_ready(self, sensor_temp=21.5, **options):
-        hv = self.make_connected(sensor_temp, **options)
-        self.printer.fire('klippy:ready')
         return hv
 
     def test_registers_as_heater(self):
@@ -187,19 +175,11 @@ class HeaterVirtualTest(unittest.TestCase):
         self.gcode.mux[('SET_HEATER_TEMPERATURE', 'HEATER', 'chamber')](Gcmd())
         self.assertEqual(hv.get_status(0.)['target'], 55.)
 
-    def test_set_temp_mirrors_to_macro(self):
-        hv = self.make_connected(sensor_temp=30.0)
-        hv.set_temp(60.)
-        self.assertEqual(self.macro.variables['target'], 60.)
-        self.assertEqual(self.macro.variables['temperature'], 30.0)
-        self.assertEqual(self.macro.variables['has_sensor'], 1)
-        self.assertEqual(hv.get_status(0.)['power'], 1.0)
-
     def test_set_temp_zero_turns_off(self):
         hv = self.make_connected()
         hv.set_temp(60.)
         hv.set_temp(0.)
-        self.assertEqual(self.macro.variables['target'], 0.)
+        self.assertEqual(hv.get_status(0.)['target'], 0.)
         self.assertEqual(hv.get_status(0.)['power'], 0.0)
 
     def test_set_temp_low_accepted(self):
@@ -231,13 +211,6 @@ class HeaterVirtualTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             heater_virtual.load_config_prefix(config)
 
-    def test_missing_macro_on_connect_is_config_error(self):
-        del self.printer.objects['gcode_macro VIRTUAL_CHAMBER']
-        self.make()
-        with self.assertRaises(ConfigError) as ctx:
-            self.printer.fire('klippy:connect')
-        self.assertIn('VIRTUAL_CHAMBER', str(ctx.exception))
-
     def test_missing_sensor_object_on_connect_is_config_error(self):
         del self.printer.objects['temperature_sensor chamber_hexa']
         self.make()
@@ -250,19 +223,11 @@ class HeaterVirtualTest(unittest.TestCase):
         with self.assertRaises(ConfigError):
             self.make()
 
-    def test_shutdown_zeroes_and_mirrors(self):
+    def test_shutdown_zeroes_target(self):
         hv = self.make_connected()
         hv.set_temp(60.)
         self.printer.fire('klippy:shutdown')
-        self.assertEqual(self.macro.variables['target'], 0.)
         self.assertEqual(hv.get_status(0.)['target'], 0.)
-
-    def test_timer_mirrors_temperature(self):
-        self.make_ready(sensor_temp=25.0)
-        self.sensor.temp = 26.5
-        nxt = self.printer.reactor.timers[0](100.)
-        self.assertEqual(self.macro.variables['temperature'], 26.5)
-        self.assertEqual(nxt, 101.)
 
     def test_get_temp_and_check_busy(self):
         hv = self.make_connected(sensor_temp=40.)
@@ -283,6 +248,34 @@ class HeaterVirtualTest(unittest.TestCase):
         with self.assertRaises(ConfigError) as ctx:
             self.make(max_temp=80.)
         self.assertIn('max_target', str(ctx.exception))
+
+    def test_remote_token_normalized_in_status(self):
+        hv = self.make(remote_token='7k3p-9qxm')
+        self.assertEqual(hv.get_status(0.)['remote_token'], '7K3P9QXM')
+
+    def test_remote_token_absent_is_empty(self):
+        hv = self.make()
+        self.assertEqual(hv.get_status(0.)['remote_token'], '')
+
+    def test_remote_token_bad_format_is_config_error(self):
+        for bad in ('ABC', '7K3P9QXI', '7K3P9QXMM'):
+            with self.subTest(token=bad):
+                self.heaters.heaters.clear()
+                with self.assertRaises(ConfigError) as ctx:
+                    self.make(remote_token=bad)
+                self.assertIn('heater_virtual chamber', str(ctx.exception))
+
+    def test_duplicate_remote_token_is_config_error(self):
+        self.make(remote_token='7K3P-9QXM')
+        config = FakeConfig(self.printer, 'heater_virtual chamber2',
+                            {'sensor': 'temperature_sensor chamber_hexa',
+                             'remote_token': '7k3p9qxm'})
+        with self.assertRaises(ConfigError):
+            heater_virtual.load_config_prefix(config)
+
+    def test_mirror_macro_not_read(self):
+        self.make(mirror_macro='VIRTUAL_CHAMBER')
+        self.assertNotIn('mirror_macro', self.config.settings)
 
     def test_get_status_reports_sensor_temperature(self):
         hv = self.make_connected(sensor_temp=33.333)

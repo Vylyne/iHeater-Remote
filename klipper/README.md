@@ -8,8 +8,9 @@ heater:
 - `TURN_OFF_HEATERS` and the Mainsail off button turn it off.
 
 Klipper never drives the heating element. It only publishes the chamber
-target; iHeater Remote reads it over Moonraker and sends it to the iHeater,
-which regulates from its own probe.
+target; iHeater Remote reads the heater object over Moonraker, matches it by
+`remote_token`, and sends the target to the iHeater, which regulates from its
+own probe.
 
 ## Install
 
@@ -28,10 +29,10 @@ In `printer.cfg`:
 [include iheater_remote.cfg]
 ```
 
-Delete any existing `M141`, `M191`, `VIRTUAL_CHAMBER` and
-`CLEAR_VIRTUAL_CHAMBER` macros: `iheater_remote.cfg` defines its own.
+Delete any existing `M141` and `M191` macros: `iheater_remote.cfg` defines its own.
 Edit `sensor:` in `iheater_remote.cfg` if your chamber sensor is not
-`temperature_sensor chamber_hexa`, then restart Klipper.
+`temperature_sensor chamber_hexa`, set `remote_token` to the value shown on
+the Remote's Setup page, then restart Klipper.
 
 In the Remote's Setup page, choose **Klipper (Moonraker)** as the control
 source.
@@ -42,17 +43,23 @@ source.
 [heater_virtual chamber]
 sensor: temperature_sensor chamber_hexa
 #max_target: 80
-#mirror_macro: VIRTUAL_CHAMBER
+#remote_token: XXXX-XXXX
 ```
 
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `sensor` | required | Existing sensor object whose reading is the chamber temperature (used by Mainsail and `M191`). |
 | `max_target` | `80` | Highest chamber target Klipper accepts (45–90). Higher requests are a gcode error. Also published as `max_temp` so Mainsail/Fluidd limit their target box to it; do not set `max_temp` yourself. |
-| `mirror_macro` | `VIRTUAL_CHAMBER` | `gcode_macro` whose `target` / `temperature` / `has_sensor` variables the Remote reads. |
+| `remote_token` | empty | Pairing token from the Remote's Setup page: 8 characters from `0123456789ABCDEFGHJKMNPQRSTVWXYZ`, written `XXXX-XXXX`; case and hyphens are ignored. Two `heater_virtual` sections cannot share a token. |
 
 The section name must start with `heater_`: Mainsail only offers a target
 box for `extruder*` and `heater_*` objects.
+
+## Updating from the macro version
+
+Delete `mirror_macro` from the `[heater_virtual]` section and delete the
+`VIRTUAL_CHAMBER` macro, then add `remote_token`. Until you do, the Remote
+shows "not paired" and does not heat from Klipper.
 
 ## Commands
 

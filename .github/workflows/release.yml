@@ -44,11 +44,6 @@ jobs:
       - name: Install PlatformIO
         run: python -m pip install --upgrade platformio pyserial
 
-      - name: Fetch iDryer core dependency
-        run: |
-          git clone https://github.com/pavluchenkor/idryer-core.git ../idryer-core
-          git -C ../idryer-core checkout d3df6af2baa968f184afb341a0c167ffa476f884
-
       - name: Build firmware
         run: pio run -e "$PIO_ENV"
 
