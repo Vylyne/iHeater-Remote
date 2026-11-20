@@ -2,6 +2,7 @@
 #include "standalone/MoonrakerLink.h"
 #include "standalone/RemoteDashboard.h"
 #include "standalone/RemoteSettings.h"
+#include "standalone/UartLink.h"
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -94,7 +95,8 @@ RmtOutputConfig remoteOutputConfig() {
 }
 
 RmtOutputAdapter s_rmt{remoteOutputConfig()};
-OutputPort *s_output = &s_rmt;  // Task 8 points this at the UART port
+UartLink s_uart;
+OutputPort *s_output = &s_rmt;  // setup() points this at s_uart for OutputKind::Uart
 OutputKind s_outputKind = OutputKind::Pulse;
 RemoteSettings s_settings;
 MoonrakerLink s_moonraker;
@@ -344,6 +346,7 @@ void loadDeviceSettings() {
     s_txPower = txPower;
   if (policy::validRange(minTarget, maxTarget))
     s_range = policy::TargetRange{minTarget, maxTarget};
+  s_uart.setSetupRange(s_range); // only stored; the UART task uses it once a target is set
 }
 
 bool saveRange(int minC, int maxC) {
@@ -355,9 +358,11 @@ bool saveRange(int minC, int maxC) {
   const bool ok = prefs.putUChar(kMinTargetKey, minC) > 0 &&
                   prefs.putUChar(kMaxTargetKey, maxC) > 0;
   prefs.end();
-  if (ok)
+  if (ok) {
     s_range = policy::TargetRange{static_cast<uint8_t>(minC),
                                   static_cast<uint8_t>(maxC)};
+    s_uart.setSetupRange(s_range);
+  }
   return ok;
 }
 
@@ -405,6 +410,37 @@ void updateLinkSafety() {
                                  now, s_linkHealthyAtMs,
                                  policy::kLinkLossGraceMs))
     applyIntegrationTarget(0.0f, "printer link lost 10 min", "link-lost");
+}
+
+const char *uartLinkName(policy::LinkStatus status) {
+  switch (status) {
+    case policy::LinkStatus::Waiting:
+      return "waiting";
+    case policy::LinkStatus::Up:
+      return "up";
+    case policy::LinkStatus::Restarting:
+      return "restarting";
+    case policy::LinkStatus::NoReply:
+      return "noreply";
+  }
+  return "unknown";
+}
+
+// Logs each change of the UART link status. Runs on loopTask against the
+// task's published view, so the poll task itself never logs for this.
+void updateUartLinkLog() {
+  if (s_outputKind != OutputKind::Uart || !s_uart.isEnabled())
+    return;
+  static bool s_logged = false;
+  static policy::LinkStatus s_lastLink = policy::LinkStatus::Waiting;
+  const policy::LinkStatus link = s_uart.view().link;
+  if (s_logged && link == s_lastLink)
+    return;
+  s_logged = true;
+  s_lastLink = link;
+  Serial.printf("[UART] link=%s\n", uartLinkName(link));
+  Serial.printf("[UART] poll task stack free=%u bytes\n",
+                static_cast<unsigned>(s_uart.stackHighWaterBytes()));
 }
 
 void updateHeapLog() {
@@ -1207,9 +1243,17 @@ void setup() {
   pinMode(IHEATER_BOOT_BUTTON_PIN, INPUT_PULLUP);
 
   s_outputKind = loadOutputKind();
-  s_output = &s_rmt;  // Task 8 selects the UART port for OutputKind::Uart
-  s_output->begin();
-  applyMode(0, "boot", false); // output off first; the binding is untouched
+  if (s_outputKind == OutputKind::Uart) {
+    s_output = &s_uart;
+    s_output->begin();
+    // No boot applyMode(0, ...) here: in UART mode nothing is written to the
+    // iHeater until the app sets a desired target, and what happens at boot
+    // (Task 9) is decided separately. Do not add a boot Off write here.
+  } else {
+    s_output = &s_rmt;
+    s_output->begin();
+    applyMode(0, "boot", false); // output off first; the binding is untouched
+  }
 
   if (!LittleFS.begin()) {
     Serial.println("[REMOTE] LittleFS unavailable; logo asset will not load");
@@ -1242,6 +1286,7 @@ void loop() {
   updateWifiSupervisor();
   s_moonraker.loop();
   updateLinkSafety();
+  updateUartLinkLog();
   updateHeapLog();
   pushStatusIfChanged();
   delay(2);
