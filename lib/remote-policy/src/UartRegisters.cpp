@@ -47,6 +47,7 @@ bool decodeSettings(const uint16_t *regs, uint8_t count, IheaterLimits &out) {
 
 const char *faultName(uint8_t code) {
   switch (code) {
+    case 0x00: return "none";
     case 0x01: return "air did not reach target in time";
     case 0x02: return "heater not responding";
     case 0x03: return "manual shutdown";
