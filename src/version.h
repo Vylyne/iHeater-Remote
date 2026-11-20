@@ -1,18 +1,7 @@
 #pragma once
 #include <Arduino.h>
-// Menu-core may provide its own version header; iHeater Remote owns all of its
-// release version components.
-#if __has_include("../lib/idryer-menu/src/version.h")
-#include "../lib/idryer-menu/src/version.h"
-#undef VERSION_MAJOR
-#undef VERSION_MINOR
-#undef VERSION_PATCH
-#undef VERSION_STR
-#undef STR
-#undef STR_HELPER
-#endif
 
-// Собственные версии LINK
+// iHeater Remote owns all of its release version components.
 #define VERSION_MAJOR 2
 #define VERSION_MINOR 0
 #define VERSION_PATCH 0
