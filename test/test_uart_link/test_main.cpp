@@ -536,6 +536,30 @@ void test_clear_never_landed_retries() {
   TEST_ASSERT_EQUAL(7, r.value);
 }
 
+void test_lost_clear_reply_other_state_times_out() {
+  UartPollPolicy p;
+  readyFaulted(p);
+  p.onNoReply(p.followUp(0), 10);
+  feedInputs(p, faultInputs(0, false, 2, 101, 0, IheaterState::Idle), 200);
+  TEST_ASSERT_EQUAL(ClearPhase::AwaitRestart, p.clearPhase());
+  for (uint32_t t = 1000; t < 10000; t += 800) {
+    feedInputs(p, faultInputs(0, false, 2, 100 + t / 1000, 0, IheaterState::Idle), t);
+    TEST_ASSERT_EQUAL(ClearPhase::AwaitRestart, p.clearPhase());
+  }
+  feedInputs(p, faultInputs(0, false, 2, 111, 0, IheaterState::Idle), 10500);
+  TEST_ASSERT_EQUAL(ClearPhase::Idle, p.clearPhase());
+  TEST_ASSERT_FALSE(p.lastClearOk());
+}
+
+void test_restart_result_one_without_spent_clear_not_ok() {
+  UartPollPolicy p;
+  readyFaulted(p);
+  p.onReply(p.followUp(0), okWriteReply(), 10);
+  feedInputs(p, faultInputs(0, false, 3, 2, 1, IheaterState::Idle), 5400);  // still 3 left
+  TEST_ASSERT_EQUAL(ClearPhase::Idle, p.clearPhase());
+  TEST_ASSERT_FALSE(p.lastClearOk());
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_build_read_vector);
@@ -582,5 +606,7 @@ int main() {
   RUN_TEST(test_lost_clear_reply_then_restart_counts);
   RUN_TEST(test_lost_clear_reply_without_restart_blocks);
   RUN_TEST(test_clear_never_landed_retries);
+  RUN_TEST(test_lost_clear_reply_other_state_times_out);
+  RUN_TEST(test_restart_result_one_without_spent_clear_not_ok);
   return UNITY_END();
 }

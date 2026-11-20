@@ -137,13 +137,13 @@ void UartPollPolicy::updateClearPhase(const IheaterSnapshot &s, uint32_t nowMs) 
     clearPhase_ = ClearPhase::Idle;
   } else if (clearPhase_ == ClearPhase::AwaitRestart) {
     if (s.uptimeS < clearUptimeAtSend_) {
-      lastClearOk_ = (s.lastClearResult == 1);
+      // Success needs the result code and exactly one clear spent.
+      lastClearOk_ = (s.lastClearResult == 1 && s.clearsLeft + 1 == clearsLeftAtSend_);
       clearPhase_ = ClearPhase::Idle;
-    } else if (s.clearsLeft < clearsLeftAtSend_) {
-      if (s.state == IheaterState::Fault && s.activeFault == clearSentCode_) {
-        clearPhase_ = ClearPhase::Blocked;  // erase failed and the reply was lost
-        blockedFault_ = clearSentCode_;
-      }
+    } else if (s.clearsLeft < clearsLeftAtSend_ && s.state == IheaterState::Fault &&
+               s.activeFault == clearSentCode_) {
+      clearPhase_ = ClearPhase::Blocked;  // erase failed and the reply was lost
+      blockedFault_ = clearSentCode_;
     } else if (intervalElapsed(nowMs, clearSentMs_, kRestartWindowMs)) {
       clearPhase_ = ClearPhase::Idle;  // the clear never landed
     }
