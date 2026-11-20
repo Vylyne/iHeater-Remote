@@ -58,6 +58,29 @@ The firmware assumes:
 The default BOOT button input is `GPIO9`, and the blue status LED is
 `GPIO8` active-low.
 
+### UART link
+
+Instead of the pulse, the Remote can talk to an iHeater that runs the UART
+build over a Modbus RTU link. Choose it with the **Output** setting on the
+Setup page (switching restarts the Remote; the iHeater must run the matching
+build). The dashboard then shows the iHeater's live state.
+
+| ESP32-C3 Super Mini | iHeater USB-C pin | Purpose |
+| --- | --- | --- |
+| `GPIO4` (TX) | `D+` | Remote to iHeater |
+| `GPIO5` (RX) | `D−` | iHeater to Remote |
+| `5V` | `VBUS` | iHeater power |
+| `GND` | `GND` | common ground |
+
+- Leave `3V3` unconnected at the iHeater.
+- Never connect the iHeater's JST 5 V connector at the same time as the
+  Remote's 5 V: the board has no 5 V regulator.
+- Do not connect or disconnect the cable with power applied.
+
+See the "Working with iHeater Remote (UART build)" section of the
+[iHeater user guide](https://github.com/Vylyne/iHeater-Standalone-Firmware/blob/main/docs/en/README.md)
+for the wiring, the faults and what the link can clear.
+
 ## Build
 
 The downstream build target is:
