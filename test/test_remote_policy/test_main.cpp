@@ -213,8 +213,8 @@ void test_backoff() {
 void test_interval_elapsed() {
   TEST_ASSERT_TRUE(intervalElapsed(1000, 0, 1000));
   TEST_ASSERT_FALSE(intervalElapsed(999, 0, 1000));
-  TEST_ASSERT_FALSE(intervalElapsed(500, 0xFFFFFE00u, 1000));
-  TEST_ASSERT_TRUE(intervalElapsed(600, 0xFFFFFE00u, 1000));
+  TEST_ASSERT_FALSE(intervalElapsed(500, 0xFFFFFF00u, 1000));
+  TEST_ASSERT_TRUE(intervalElapsed(744, 0xFFFFFF00u, 1000));
 }
 
 void test_default_port() {
