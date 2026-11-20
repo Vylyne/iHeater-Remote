@@ -400,6 +400,142 @@ void test_link_status_wraparound() {
   TEST_ASSERT_EQUAL(LinkStatus::Up, p.link(0x00000100u));
 }
 
+// --- Automatic fault clearing -----------------------------------------------
+static Reply faultInputs(uint8_t fault, bool clearable, uint8_t clearsLeft, uint32_t uptime,
+                         uint8_t lastResult = 0, IheaterState state = IheaterState::Fault) {
+  Reply r = inputsReply(1, state, uptime, 0, clearable);
+  r.regs[0x04] = fault;
+  r.regs[0x07] = clearsLeft;
+  r.regs[0x08] = lastResult;
+  return r;
+}
+static Reply okWriteReply() {
+  Reply r;
+  r.kind = ReplyKind::Ok;
+  return r;
+}
+// Policy with settings read and a snapshot in Fault 0x07, clearable, 3 clears left.
+static void readyFaulted(UartPollPolicy &p, uint32_t uptime = 100) {
+  feedInputs(p, faultInputs(0x07, true, 3, uptime), 0);
+  feedSettings(p, 0);
+}
+
+void test_reply_after_no_reply_rereads_settings() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply(1, IheaterState::Idle, 100), 0);
+  feedSettings(p, 0);
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+  p.onNoReply(p.cycleRead(), 400);
+  p.onNoReply(p.cycleRead(), 800);
+  p.onNoReply(p.cycleRead(), 1200);
+  TEST_ASSERT_EQUAL(LinkStatus::NoReply, p.link(1200));
+  feedInputs(p, inputsReply(1, IheaterState::Idle, 101), 1400);  // no uptime drop
+  TEST_ASSERT_FALSE(p.hasLimits());
+  TEST_ASSERT_EQUAL(PollKind::ReadSettings, p.followUp(1400).kind);
+}
+
+void test_clear_when_clearable() {
+  UartPollPolicy p;
+  readyFaulted(p);
+  PollRequest r = p.followUp(0);
+  TEST_ASSERT_EQUAL(PollKind::WriteClear, r.kind);
+  TEST_ASSERT_EQUAL_HEX16(0x0101, r.addr);
+  TEST_ASSERT_EQUAL(7, r.value);
+}
+
+void test_no_clear_when_not_clearable() {
+  UartPollPolicy p;
+  feedInputs(p, faultInputs(0x07, false, 3, 100), 0);
+  feedSettings(p, 0);
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+}
+
+void test_no_clear_without_budget() {
+  UartPollPolicy p;
+  feedInputs(p, faultInputs(0x07, true, 0, 100), 0);
+  feedSettings(p, 0);
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+}
+
+void test_clear_refused_rereads() {
+  UartPollPolicy p;
+  readyFaulted(p);
+  PollRequest r = p.followUp(0);
+  p.onReply(r, exceptionReply(0x03), 10);
+  TEST_ASSERT_EQUAL(ClearPhase::Idle, p.clearPhase());
+  feedInputs(p, faultInputs(0x07, true, 3, 101), 200);
+  PollRequest again = p.followUp(200);
+  TEST_ASSERT_EQUAL(PollKind::WriteClear, again.kind);
+  TEST_ASSERT_EQUAL(7, again.value);
+}
+
+void test_clear_erase_failure_blocks() {
+  UartPollPolicy p;
+  readyFaulted(p);
+  p.onReply(p.followUp(0), exceptionReply(0x04), 10);
+  TEST_ASSERT_EQUAL(ClearPhase::Blocked, p.clearPhase());
+  TEST_ASSERT_EQUAL(7, p.blockedFault());
+  feedInputs(p, faultInputs(0x07, true, 3, 101), 200);
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(200).kind);
+  feedInputs(p, faultInputs(0x01, true, 3, 102), 400);
+  PollRequest r = p.followUp(400);
+  TEST_ASSERT_EQUAL(PollKind::WriteClear, r.kind);
+  TEST_ASSERT_EQUAL(1, r.value);
+}
+
+void test_clear_success_verified() {
+  UartPollPolicy p;
+  readyFaulted(p);
+  p.onReply(p.followUp(0), okWriteReply(), 10);
+  TEST_ASSERT_EQUAL(ClearPhase::AwaitRestart, p.clearPhase());
+  p.onNoReply(p.cycleRead(), 1010);
+  TEST_ASSERT_EQUAL(LinkStatus::Restarting, p.link(1010));
+  p.onNoReply(p.cycleRead(), 5000);
+  TEST_ASSERT_EQUAL(LinkStatus::Restarting, p.link(5000));
+  feedInputs(p, faultInputs(0, false, 2, 2, 1, IheaterState::Idle), 5400);
+  TEST_ASSERT_EQUAL(ClearPhase::Idle, p.clearPhase());
+  TEST_ASSERT_TRUE(p.lastClearOk());
+  TEST_ASSERT_EQUAL(PollKind::ReadSettings, p.followUp(5400).kind);
+}
+
+void test_lost_clear_reply_then_restart_counts() {
+  UartPollPolicy p;
+  readyFaulted(p);
+  p.onNoReply(p.followUp(0), 10);
+  TEST_ASSERT_EQUAL(ClearPhase::AwaitRestart, p.clearPhase());
+  feedInputs(p, faultInputs(0, false, 2, 3, 1, IheaterState::Idle), 5400);
+  TEST_ASSERT_EQUAL(ClearPhase::Idle, p.clearPhase());
+  TEST_ASSERT_TRUE(p.lastClearOk());
+}
+
+void test_lost_clear_reply_without_restart_blocks() {
+  UartPollPolicy p;
+  readyFaulted(p);
+  p.onNoReply(p.followUp(0), 10);
+  feedInputs(p, faultInputs(0x07, false, 2, 101), 200);
+  TEST_ASSERT_EQUAL(ClearPhase::Blocked, p.clearPhase());
+  TEST_ASSERT_EQUAL(7, p.blockedFault());
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(200).kind);
+}
+
+void test_clear_never_landed_retries() {
+  UartPollPolicy p;
+  readyFaulted(p);
+  p.onNoReply(p.followUp(0), 10);
+  feedInputs(p, faultInputs(0x07, true, 3, 101), 200);
+  TEST_ASSERT_EQUAL(ClearPhase::AwaitRestart, p.clearPhase());
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(200).kind);
+  for (uint32_t t = 1100; t < 10000; t += 800) {  // link stays up, nothing changes
+    feedInputs(p, faultInputs(0x07, true, 3, 100 + t / 1000), t);
+    TEST_ASSERT_EQUAL(ClearPhase::AwaitRestart, p.clearPhase());
+  }
+  feedInputs(p, faultInputs(0x07, true, 3, 111), 10500);
+  TEST_ASSERT_EQUAL(ClearPhase::Idle, p.clearPhase());
+  PollRequest r = p.followUp(10500);
+  TEST_ASSERT_EQUAL(PollKind::WriteClear, r.kind);
+  TEST_ASSERT_EQUAL(7, r.value);
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_build_read_vector);
@@ -436,5 +572,15 @@ int main() {
   RUN_TEST(test_empty_range_desired_zero);
   RUN_TEST(test_link_status_sequence);
   RUN_TEST(test_link_status_wraparound);
+  RUN_TEST(test_reply_after_no_reply_rereads_settings);
+  RUN_TEST(test_clear_when_clearable);
+  RUN_TEST(test_no_clear_when_not_clearable);
+  RUN_TEST(test_no_clear_without_budget);
+  RUN_TEST(test_clear_refused_rereads);
+  RUN_TEST(test_clear_erase_failure_blocks);
+  RUN_TEST(test_clear_success_verified);
+  RUN_TEST(test_lost_clear_reply_then_restart_counts);
+  RUN_TEST(test_lost_clear_reply_without_restart_blocks);
+  RUN_TEST(test_clear_never_landed_retries);
   return UNITY_END();
 }

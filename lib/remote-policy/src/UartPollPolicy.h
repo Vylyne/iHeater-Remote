@@ -44,13 +44,16 @@ class UartPollPolicy {
   uint16_t desiredT10() const { return desiredT10_; }
   bool rangeEmpty() const { return rangeEmpty_; }
 
-  // Automatic fault clearing is added in a later task; inert for now.
+  // Automatic fault clearing. A clear is sent when the iHeater says it is safe
+  // and its budget allows; success shows as a restart with last_clear_result 1.
   ClearPhase clearPhase() const { return clearPhase_; }
   uint8_t blockedFault() const { return blockedFault_; }
   bool lastClearOk() const { return lastClearOk_; }
 
  private:
   void recomputeDesired();
+  void noteClearSent(const PollRequest &req, uint32_t nowMs);
+  void updateClearPhase(const IheaterSnapshot &s, uint32_t nowMs);
 
   IheaterSnapshot snapshot_{};
   IheaterLimits limits_{};
@@ -73,6 +76,9 @@ class UartPollPolicy {
 
   ClearPhase clearPhase_ = ClearPhase::Idle;
   uint32_t clearSentMs_ = 0;
+  uint8_t clearSentCode_ = 0;
+  uint8_t clearsLeftAtSend_ = 0;
+  uint32_t clearUptimeAtSend_ = 0;
   uint8_t blockedFault_ = 0;
   bool lastClearOk_ = false;
 };
