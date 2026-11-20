@@ -34,29 +34,20 @@ bool migrateLegacy() {
   if (!prefs.begin(kNs, false))
     return false;
 
-  // A previous attempt may have written the moon-* keys but not the source.
-  // The legacy namespaces could already be erased, so keep what is stored.
-  const bool haveMoon = prefs.isKey(kHostKey);
-
+  // Legacy stays untouched until `source` exists, so it is always the
+  // authoritative copy: every attempt re-reads it and rewrites all moon-* keys.
   String host, apiKey;
   uint16_t port = 7125;
   bool tls = false;
   uint8_t active = 0;
 
-  if (haveMoon) {
-    host = prefs.getString(kHostKey, "");
-    port = prefs.getUShort(kPortKey, 7125);
-    tls = prefs.getBool(kTlsKey, false);
-    apiKey = prefs.getString(kKeyKey, "");
-  } else {
-    Preferences moon;
-    if (moon.begin("li_moon", true)) {
-      host = moon.getString("host", "");
-      port = moon.getUShort("port", 7125);
-      tls = moon.getBool("ssl", false);
-      apiKey = moon.getString("apiKey", "");
-      moon.end();
-    }
+  Preferences moon;
+  if (moon.begin("li_moon", true)) {
+    host = moon.getString("host", "");
+    port = moon.getUShort("port", 7125);
+    tls = moon.getBool("ssl", false);
+    apiKey = moon.getString("apiKey", "");
+    moon.end();
   }
   Preferences common;
   if (common.begin("li_common", true)) {
@@ -69,15 +60,12 @@ bool migrateLegacy() {
   if (port == 0)
     port = policy::defaultMoonrakerPort(tls);
 
-  bool ok = true;
-  if (!haveMoon) {
-    // putString returns 0 for an empty value, so confirm with isKey().
-    prefs.putString(kHostKey, host);
-    prefs.putString(kKeyKey, apiKey);
-    ok = prefs.isKey(kHostKey) && prefs.isKey(kKeyKey);
-    ok = (prefs.putUShort(kPortKey, port) == 2) && ok;
-    ok = (prefs.putBool(kTlsKey, tls) == 1) && ok;
-  }
+  // putString returns 0 for an empty value, so confirm with isKey().
+  prefs.putString(kHostKey, host);
+  prefs.putString(kKeyKey, apiKey);
+  bool ok = prefs.isKey(kHostKey) && prefs.isKey(kKeyKey);
+  ok = (prefs.putUShort(kPortKey, port) == 2) && ok;
+  ok = (prefs.putBool(kTlsKey, tls) == 1) && ok;
   if (ok)
     ok = prefs.putUChar(kSourceKey, klipper ? 1 : 0) == 1;
   if (ok) {
