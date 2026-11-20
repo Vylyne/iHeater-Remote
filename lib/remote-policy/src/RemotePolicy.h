@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 // Pure target-selection policy for iHeater Remote. No Arduino dependency.
@@ -64,5 +65,50 @@ bool moonrakerStatusIsReset(const char *printerState);
 // --- Wi-Fi TX power ---------------------------------------------------------
 // Arduino wifi_power_t values (quarter-dBm): 8.5, 11, 13, 15, 17, 19.5 dBm.
 bool validTxPower(int quarterDbm);
+
+// --- Pairing, discovery, link health ----------------------------------------
+constexpr size_t kPairTokenLen = 8;
+
+// Upper-cases and drops '-'. False for null, wrong length or characters
+// outside the alphabet (Crockford base32: no I, L, O, U).
+bool normalizePairToken(const char *in, char out[kPairTokenLen + 1]);
+
+// Low 40 bits, 5 per character, most significant first.
+void pairTokenFromBits(uint64_t bits, char out[kPairTokenLen + 1]);
+
+// "7K3P9QXM" -> "7K3P-9QXM"
+void formatPairToken(const char *normalized, char out[kPairTokenLen + 2]);
+
+// "heater_virtual <name>" with a non-empty name.
+bool isHeaterVirtualObject(const char *name);
+
+constexpr int kHeaterNone = -1;
+constexpr int kHeaterDuplicate = -2;
+
+// Index of the single heater whose token matches myToken (both normalized;
+// null or invalid entries skipped), else kHeaterNone or kHeaterDuplicate.
+int matchPairedHeater(const char *const *tokens, size_t count,
+                      const char *myToken);
+
+enum class KlippyState : uint8_t { Unknown, Ready, NotReady };
+
+bool moonrakerLinkHealthy(bool socketUp, bool subscribed, KlippyState klippy);
+
+constexpr uint32_t kBackoffInitialMs = 2000;
+constexpr uint32_t kBackoffMaxMs = 30000;
+
+// 0 gives the initial value, then doubles up to the cap.
+uint32_t nextBackoffMs(uint32_t currentMs);
+
+// Wrap-safe: true once intervalMs has elapsed since sinceMs.
+bool intervalElapsed(uint32_t nowMs, uint32_t sinceMs, uint32_t intervalMs);
+
+uint16_t defaultMoonrakerPort(bool tls);  // 443 with TLS, else 7125
+
+constexpr uint32_t kPingIntervalMs = 10000;
+constexpr uint32_t kPongTimeoutMs = 5000;
+constexpr uint8_t kMissedPongs = 2;
+constexpr uint32_t kQueryIntervalMs = 30000;
+constexpr uint32_t kRequestTimeoutMs = 5000;
 
 }  // namespace iheaterlink::policy

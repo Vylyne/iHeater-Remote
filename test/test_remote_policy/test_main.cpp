@@ -141,9 +141,99 @@ void test_tx_power_valid() {
   for (int v : invalid) TEST_ASSERT_FALSE(validTxPower(v));
 }
 
+void test_token_normalize() {
+  char out[kPairTokenLen + 1];
+  TEST_ASSERT_TRUE(normalizePairToken("7k3p-9qxm", out));
+  TEST_ASSERT_EQUAL_STRING("7K3P9QXM", out);
+  TEST_ASSERT_TRUE(normalizePairToken("--7K3P9QXM", out));
+  TEST_ASSERT_EQUAL_STRING("7K3P9QXM", out);
+  TEST_ASSERT_FALSE(normalizePairToken("7K3P-9QX", out));
+  TEST_ASSERT_FALSE(normalizePairToken("7K3P9QXMM", out));
+  TEST_ASSERT_FALSE(normalizePairToken("7K3P9QXI", out));
+  TEST_ASSERT_FALSE(normalizePairToken("7K3P9QXU", out));
+  TEST_ASSERT_FALSE(normalizePairToken("7K3P 9QXM", out));
+  TEST_ASSERT_FALSE(normalizePairToken("", out));
+  TEST_ASSERT_FALSE(normalizePairToken(nullptr, out));
+}
+
+void test_token_from_bits() {
+  char out[kPairTokenLen + 1];
+  pairTokenFromBits(0, out);
+  TEST_ASSERT_EQUAL_STRING("00000000", out);
+  pairTokenFromBits(0xFFFFFFFFFFull, out);
+  TEST_ASSERT_EQUAL_STRING("ZZZZZZZZ", out);
+  pairTokenFromBits(1, out);
+  TEST_ASSERT_EQUAL_STRING("00000001", out);
+  pairTokenFromBits(31ull << 35, out);
+  TEST_ASSERT_EQUAL_STRING("Z0000000", out);
+  pairTokenFromBits((1ull << 40) | 1, out);
+  TEST_ASSERT_EQUAL_STRING("00000001", out);
+}
+
+void test_token_format() {
+  char out[kPairTokenLen + 2];
+  formatPairToken("7K3P9QXM", out);
+  TEST_ASSERT_EQUAL_STRING("7K3P-9QXM", out);
+}
+
+void test_heater_object_name() {
+  TEST_ASSERT_TRUE(isHeaterVirtualObject("heater_virtual chamber"));
+  TEST_ASSERT_FALSE(isHeaterVirtualObject("heater_virtual"));
+  TEST_ASSERT_FALSE(isHeaterVirtualObject("heater_virtual "));
+  TEST_ASSERT_FALSE(isHeaterVirtualObject("heater_generic chamber"));
+  TEST_ASSERT_FALSE(isHeaterVirtualObject("heater_virtualx a"));
+}
+
+void test_match_paired_heater() {
+  const char *a[] = {"AAAA0000", "7K3P9QXM"};
+  TEST_ASSERT_EQUAL_INT(1, matchPairedHeater(a, 2, "7k3p-9qxm"));
+  TEST_ASSERT_EQUAL_INT(kHeaterNone, matchPairedHeater(a, 2, "BBBB1111"));
+  const char *d[] = {"7K3P9QXM", "7k3p-9qxm"};
+  TEST_ASSERT_EQUAL_INT(kHeaterDuplicate, matchPairedHeater(d, 2, "7K3P9QXM"));
+  const char *n[] = {nullptr, "", "7K3P9QXM"};
+  TEST_ASSERT_EQUAL_INT(2, matchPairedHeater(n, 3, "7K3P9QXM"));
+  TEST_ASSERT_EQUAL_INT(kHeaterNone, matchPairedHeater(a, 2, "bad"));
+}
+
+void test_link_healthy() {
+  TEST_ASSERT_TRUE(moonrakerLinkHealthy(true, true, KlippyState::Ready));
+  TEST_ASSERT_FALSE(moonrakerLinkHealthy(false, true, KlippyState::Ready));
+  TEST_ASSERT_FALSE(moonrakerLinkHealthy(true, false, KlippyState::Ready));
+  TEST_ASSERT_FALSE(moonrakerLinkHealthy(true, true, KlippyState::NotReady));
+  TEST_ASSERT_FALSE(moonrakerLinkHealthy(true, true, KlippyState::Unknown));
+}
+
+void test_backoff() {
+  TEST_ASSERT_EQUAL_UINT32(2000, nextBackoffMs(0));
+  TEST_ASSERT_EQUAL_UINT32(4000, nextBackoffMs(2000));
+  TEST_ASSERT_EQUAL_UINT32(30000, nextBackoffMs(16000));
+  TEST_ASSERT_EQUAL_UINT32(30000, nextBackoffMs(30000));
+}
+
+void test_interval_elapsed() {
+  TEST_ASSERT_TRUE(intervalElapsed(1000, 0, 1000));
+  TEST_ASSERT_FALSE(intervalElapsed(999, 0, 1000));
+  TEST_ASSERT_FALSE(intervalElapsed(500, 0xFFFFFE00u, 1000));
+  TEST_ASSERT_TRUE(intervalElapsed(600, 0xFFFFFE00u, 1000));
+}
+
+void test_default_port() {
+  TEST_ASSERT_EQUAL_UINT16(443, defaultMoonrakerPort(true));
+  TEST_ASSERT_EQUAL_UINT16(7125, defaultMoonrakerPort(false));
+}
+
 void setup() {
   delay(2000);
   UNITY_BEGIN();
+  RUN_TEST(test_token_normalize);
+  RUN_TEST(test_token_from_bits);
+  RUN_TEST(test_token_format);
+  RUN_TEST(test_heater_object_name);
+  RUN_TEST(test_match_paired_heater);
+  RUN_TEST(test_link_healthy);
+  RUN_TEST(test_backoff);
+  RUN_TEST(test_interval_elapsed);
+  RUN_TEST(test_default_port);
   RUN_TEST(test_wifi_connected_none);
   RUN_TEST(test_wifi_sta_reconnect_due);
   RUN_TEST(test_wifi_sta_reconnect_not_due);
