@@ -43,6 +43,15 @@ namespace standalone {
 #define IHEATER_AP_PASSWORD ""
 #endif
 
+// Set by tools/git_url.py from the building checkout; these cover a build
+// without it.
+#ifndef IHEATER_GIT_URL
+#define IHEATER_GIT_URL "https://github.com/justinh-rahb/iHeater-Remote"
+#endif
+#ifndef IHEATER_GIT_COMMIT
+#define IHEATER_GIT_COMMIT ""
+#endif
+
 namespace {
 
 constexpr uint8_t kMaxMode = 7;
@@ -1287,7 +1296,10 @@ void handleRoot() {
                "<button class=\"tab\" data-page=\"timer\" aria-label=\"Timer\" title=\"Timer\">TIMER</button>");
   page.replace(
       "iDryer Remote <span id=\"version\">—</span> · This remote reports the command it sends to iHeater. Current temperatures and safety-chain state are not available on this hardware.",
-      "<a href=\"https://github.com/justinh-rahb/iHeater-Remote\" target=\"_blank\" rel=\"noopener\">iHeater Remote <span id=\"version\">—</span></a>");
+      // The link points at the repository this firmware was built from
+      // (tools/git_url.py); the title names the commit.
+      "<a href=\"" IHEATER_GIT_URL "\" title=\"Built from " IHEATER_GIT_COMMIT
+      "\" target=\"_blank\" rel=\"noopener\">iHeater Remote <span id=\"version\">—</span></a>");
   s_server.send(200, "text/html", page);
 }
 
