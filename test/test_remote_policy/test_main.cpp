@@ -35,45 +35,6 @@ void test_clamp_above_max() {
   TEST_ASSERT_EQUAL_FLOAT(70.0f, clampTargetC(85.0f, TargetRange{45, 70}));
 }
 
-void test_resolve_vc_target() {
-  TEST_ASSERT_EQUAL_FLOAT(
-      60.0f, resolveMoonrakerTargetC(MoonrakerInputs{true, 60.0f, 0.0f}, 60.0f, 100, R));
-}
-
-void test_resolve_vc_zero_ignores_hot_bed() {
-  TEST_ASSERT_EQUAL_FLOAT(
-      0.0f, resolveMoonrakerTargetC(MoonrakerInputs{true, 0.0f, 110.0f}, 60.0f, 100, R));
-}
-
-void test_resolve_vc_clamped() {
-  TEST_ASSERT_EQUAL_FLOAT(
-      70.0f, resolveMoonrakerTargetC(MoonrakerInputs{true, 78.0f, 0.0f}, 60.0f, 100,
-                                     TargetRange{45, 70}));
-}
-
-void test_resolve_bed_rule_on() {
-  TEST_ASSERT_EQUAL_FLOAT(
-      60.0f, resolveMoonrakerTargetC(MoonrakerInputs{false, 0.0f, 110.0f}, 60.0f, 100, R));
-}
-
-void test_resolve_bed_rule_off() {
-  TEST_ASSERT_EQUAL_FLOAT(
-      0.0f, resolveMoonrakerTargetC(MoonrakerInputs{false, 0.0f, 90.0f}, 60.0f, 100, R));
-}
-
-void test_stale_before_timeout() {
-  TEST_ASSERT_FALSE(moonrakerStale(29999, 0, 30000));
-}
-
-void test_stale_after_timeout() {
-  TEST_ASSERT_TRUE(moonrakerStale(30000, 0, 30000));
-}
-
-void test_stale_wraparound() {
-  TEST_ASSERT_FALSE(moonrakerStale(5, 0xFFFFFFF0u, 30000));
-  TEST_ASSERT_TRUE(moonrakerStale(30000, 0xFFFFFFF0u, 30000));
-}
-
 void test_wifi_connected_none() {
   TEST_ASSERT_TRUE(wifiSupervisorAction(false, true, true, 100000, 0) == WifiAction::None);
 }
@@ -126,12 +87,6 @@ void test_link_loss_manual() {
 
 void test_link_loss_wraparound() {
   TEST_ASSERT_FALSE(cutHeatForLinkLoss(true, true, false, 5, 0xFFFFFFF0u, 600000));
-}
-
-void test_moonraker_reset_status() {
-  TEST_ASSERT_TRUE(moonrakerStatusIsReset(""));
-  TEST_ASSERT_TRUE(moonrakerStatusIsReset(nullptr));
-  TEST_ASSERT_FALSE(moonrakerStatusIsReset("standby"));
 }
 
 void test_tx_power_valid() {
@@ -247,21 +202,12 @@ void setup() {
   RUN_TEST(test_link_loss_not_heating);
   RUN_TEST(test_link_loss_manual);
   RUN_TEST(test_link_loss_wraparound);
-  RUN_TEST(test_moonraker_reset_status);
   RUN_TEST(test_tx_power_valid);
   RUN_TEST(test_valid_range);
   RUN_TEST(test_clamp_off);
   RUN_TEST(test_clamp_low_to_min);
   RUN_TEST(test_clamp_passthrough);
   RUN_TEST(test_clamp_above_max);
-  RUN_TEST(test_resolve_vc_target);
-  RUN_TEST(test_resolve_vc_zero_ignores_hot_bed);
-  RUN_TEST(test_resolve_vc_clamped);
-  RUN_TEST(test_resolve_bed_rule_on);
-  RUN_TEST(test_resolve_bed_rule_off);
-  RUN_TEST(test_stale_before_timeout);
-  RUN_TEST(test_stale_after_timeout);
-  RUN_TEST(test_stale_wraparound);
   UNITY_END();
 }
 

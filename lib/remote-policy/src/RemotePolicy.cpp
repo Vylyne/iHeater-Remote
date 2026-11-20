@@ -19,21 +19,6 @@ float clampTargetC(float requestedC, TargetRange r) {
   return requestedC;
 }
 
-float resolveMoonrakerTargetC(const MoonrakerInputs &in, float autoTargetC,
-                              uint8_t bedThresholdC, TargetRange r) {
-  if (in.virtualChamberAvailable) {
-    return clampTargetC(in.chamberTargetC, r);
-  }
-  if (in.bedTargetC >= bedThresholdC) {
-    return clampTargetC(autoTargetC, r);
-  }
-  return 0.0f;
-}
-
-bool moonrakerStale(uint32_t nowMs, uint32_t lastUpdateMs, uint32_t timeoutMs) {
-  return static_cast<uint32_t>(nowMs - lastUpdateMs) >= timeoutMs;
-}
-
 WifiAction wifiSupervisorAction(bool apMode, bool hasCredentials,
                                 bool staConnected, uint32_t nowMs,
                                 uint32_t lastAttemptMs) {
@@ -57,10 +42,6 @@ bool cutHeatForLinkLoss(bool printerSourceActive, bool heatingFromPrinter,
     return false;
   }
   return static_cast<uint32_t>(nowMs - linkDownSinceMs) >= graceMs;
-}
-
-bool moonrakerStatusIsReset(const char *printerState) {
-  return printerState == nullptr || printerState[0] == '\0';
 }
 
 bool validTxPower(int quarterDbm) {

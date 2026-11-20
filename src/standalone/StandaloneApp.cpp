@@ -1,5 +1,7 @@
 #include "standalone/StandaloneApp.h"
+#include "standalone/MoonrakerLink.h"
 #include "standalone/RemoteDashboard.h"
+#include "standalone/RemoteSettings.h"
 
 #include <Arduino.h>
 #include <ArduinoJson.h>
@@ -12,10 +14,6 @@
 #include <WebSocketsServer.h>
 #include <WiFi.h>
 #include <string.h>
-
-#include <hal/hal_arduino.h>
-#include <integrations/common/link_integrations_manager.h>
-#include <integrations/common/link_integrations_store.h>
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -63,8 +61,6 @@ constexpr size_t kMaxWifiPasswordLen = 64;
 const char *kPrefsNamespace = "iheater-remote";
 const char *kWifiSsidKey = "ssid";
 const char *kWifiPasswordKey = "pass";
-const char *kAutoTargetKey = "auto-target";
-const char *kAutoBedThresholdKey = "auto-bed";
 const char *kMinTargetKey = "min-target";
 const char *kMaxTargetKey = "max-target";
 const char *kTxPowerKey = "tx-power";
@@ -75,6 +71,7 @@ constexpr int kDefaultTxPower = IHEATER_WIFI_TX_POWER;
 constexpr int kDefaultTxPower = WIFI_POWER_8_5dBm;
 #endif
 constexpr uint32_t kRssiSampleMs = 5000;
+constexpr uint32_t kHeapLogMs = 60000;
 
 const IPAddress kApIp(192, 168, 4, 1);
 const IPAddress kApGateway(192, 168, 4, 1);
@@ -97,11 +94,8 @@ RmtOutputConfig remoteOutputConfig() {
 }
 
 RmtOutputAdapter s_output{remoteOutputConfig()};
-idryer::cloud::LinkIntegrationsStore s_integrationStore;
-// The integration manager treats this as an optional publisher. Passing null
-// keeps Bambu LAN MQTT and Moonraker entirely on the local network.
-idryer::cloud::LinkIntegrationsManager s_integrations(nullptr,
-                                                      &s_integrationStore);
+RemoteSettings s_settings;
+MoonrakerLink s_moonraker;
 
 uint8_t s_mode = 0;
 bool s_apMode = false;
@@ -115,20 +109,15 @@ bool s_otaActive = false;
 bool s_otaOk = false;
 size_t s_otaBytesWritten = 0;
 String s_otaError;
-float s_autoTargetC = 60.0f;
-uint8_t s_autoBedThresholdC = 100;
 policy::TargetRange s_range{policy::kDefaultMinC, policy::kDefaultMaxC};
 String s_targetSource = "manual";
-uint32_t s_lastMoonrakerUpdateMs = 0;
-bool s_moonrakerWasConnected = false;
-// Set when the watchdog finds Moonraker silent; cleared by the next real status.
-bool s_moonrakerSilent = false;
 // Last loop() pass on which the active printer link was healthy.
 uint32_t s_linkHealthyAtMs = 0;
 uint32_t s_wifiLastAttemptMs = 0;
 int s_txPower = kDefaultTxPower;
 int s_wifiRssi = 0;
 uint32_t s_wifiRssiAtMs = 0;
+uint32_t s_heapLogAtMs = 0;
 
 bool s_buttonStableDown = false;
 bool s_buttonLastRawDown = false;
@@ -164,9 +153,7 @@ int wifiRssi() {
 bool ledEnabled() { return IHEATER_STATUS_LED_PIN != 0xFF; }
 void resetLedPattern();
 
-bool autoHeatAllowed(float bedTargetC) {
-  return bedTargetC >= static_cast<float>(s_autoBedThresholdC);
-}
+bool klipperSource() { return s_settings.source == ControlSource::Klipper; }
 
 void applyIntegrationTarget(float targetTempC, const char *source,
                             const char *targetSource) {
@@ -188,44 +175,12 @@ void applyIntegrationTarget(float targetTempC, const char *source,
                 (double)cmd.targetTempC, s_output.getLastPulseCode());
 }
 
-void onMoonrakerVirtualChamber(
-    void *, const idryer::cloud::VirtualChamberData &data) {
-  // Unused: the VIRTUAL_CHAMBER target arrives in the full status below,
-  // where it takes priority over the bed-setpoint rule.
-  (void)data;
-}
-
-void onMoonrakerStatus(void *, const idryer::cloud::MoonrakerStatus &status) {
-  if (s_integrations.getActive() != idryer::cloud::ActiveIntegration::Moonraker)
-    return;
-  // idryer-core zeroes its status when the socket drops. Hold the last
-  // target instead; updateLinkSafety() cuts heat if the link stays down.
-  if (policy::moonrakerStatusIsReset(status.printerState)) {
-    Serial.println("[REMOTE] moonraker link lost, holding target");
-    return;
-  }
-  s_moonrakerSilent = false;
-  s_lastMoonrakerUpdateMs = millis();
-  const policy::MoonrakerInputs inputs{status.virtualChamberAvailable,
-                                       status.chamberTarget, status.bedTarget};
-  applyIntegrationTarget(
-      policy::resolveMoonrakerTargetC(inputs, s_autoTargetC,
-                                      s_autoBedThresholdC, s_range),
-      "moonraker", status.virtualChamberAvailable ? "klipper" : "bed-rule");
-}
-
-void onBambuPrinterStatus(
-    void *, const idryer::cloud::BambuPrinterStatus &status) {
-  if (s_integrations.getActive() != idryer::cloud::ActiveIntegration::Bambu)
-    return;
-  // Same disconnect reset as Moonraker: hold, let updateLinkSafety() decide.
-  if (s_integrations.bambuState() !=
-      idryer::cloud::BambuConnectionState::Connected) {
-    Serial.println("[REMOTE] bambu link lost, holding target");
-    return;
-  }
-  applyIntegrationTarget(autoHeatAllowed(status.bedTarget) ? s_autoTargetC : 0.0f,
-                         "bambu auto", "bambu");
+// MoonrakerLink callback: the paired heater_virtual's target (0 = off). The
+// link holds the last target through outages; updateLinkSafety() cuts heat
+// if the link stays down.
+void onKlipperTarget(float targetC) {
+  if (klipperSource())
+    applyIntegrationTarget(targetC, "klipper", "klipper");
 }
 
 void writeLed(bool on) {
@@ -245,12 +200,18 @@ void resetLedPattern() {
   writeLed(false);
 }
 
-void applyMode(uint8_t mode, const char *source) {
+// Only user actions (web and button) pass releasePrinter: a manual press
+// unbinds the printer. Boot, the timer and OTA leave the binding alone.
+void applyMode(uint8_t mode, const char *source, bool releasePrinter = true) {
   if (mode > kMaxMode)
     mode = kMaxMode;
 
-  if (s_integrations.getActive() != idryer::cloud::ActiveIntegration::None)
-    s_integrations.setActive(idryer::cloud::ActiveIntegration::None);
+  if (releasePrinter && klipperSource()) {
+    s_settings.source = ControlSource::Manual;
+    if (!saveSourceAndMoonraker(s_settings))
+      Serial.println("[REMOTE] could not save manual source");
+    s_moonraker.stop();
+  }
   s_mode = mode;
   if (mode == 0) {
     s_timerOffAtMs = 0;
@@ -283,7 +244,7 @@ void updateHeatTimer() {
     return;
 
   if ((int32_t)(millis() - s_timerOffAtMs) >= 0) {
-    applyMode(0, "timer");
+    applyMode(0, "timer", false);
   }
 }
 
@@ -358,12 +319,11 @@ bool clearStoredWifiCredentials() {
   return true;
 }
 
-void loadAutoSettings() {
+// Target range and transmit power.
+void loadDeviceSettings() {
   Preferences prefs;
   if (!prefs.begin(kPrefsNamespace, true))
     return;
-  const float target = prefs.getFloat(kAutoTargetKey, 60.0f);
-  const uint8_t threshold = prefs.getUChar(kAutoBedThresholdKey, 100);
   const uint8_t minTarget = prefs.getUChar(kMinTargetKey, policy::kDefaultMinC);
   const uint8_t maxTarget = prefs.getUChar(kMaxTargetKey, policy::kDefaultMaxC);
   const int txPower = prefs.getInt(kTxPowerKey, kDefaultTxPower);
@@ -372,31 +332,20 @@ void loadAutoSettings() {
     s_txPower = txPower;
   if (policy::validRange(minTarget, maxTarget))
     s_range = policy::TargetRange{minTarget, maxTarget};
-  if (target >= s_range.minC && target <= s_range.maxC)
-    s_autoTargetC = target;
-  if (threshold >= 40 && threshold <= 120)
-    s_autoBedThresholdC = threshold;
 }
 
-bool saveAutoSettings(float target, int threshold, int minTarget,
-                      int maxTarget) {
-  if (!policy::validRange(minTarget, maxTarget) || target < minTarget ||
-      target > maxTarget || threshold < 40 || threshold > 120)
+bool saveRange(int minC, int maxC) {
+  if (!policy::validRange(minC, maxC))
     return false;
   Preferences prefs;
   if (!prefs.begin(kPrefsNamespace, false))
     return false;
-  const bool ok = prefs.putFloat(kAutoTargetKey, target) > 0 &&
-                  prefs.putUChar(kAutoBedThresholdKey, threshold) > 0 &&
-                  prefs.putUChar(kMinTargetKey, minTarget) > 0 &&
-                  prefs.putUChar(kMaxTargetKey, maxTarget) > 0;
+  const bool ok = prefs.putUChar(kMinTargetKey, minC) > 0 &&
+                  prefs.putUChar(kMaxTargetKey, maxC) > 0;
   prefs.end();
-  if (ok) {
-    s_range = policy::TargetRange{static_cast<uint8_t>(minTarget),
-                                  static_cast<uint8_t>(maxTarget)};
-    s_autoTargetC = target;
-    s_autoBedThresholdC = static_cast<uint8_t>(threshold);
-  }
+  if (ok)
+    s_range = policy::TargetRange{static_cast<uint8_t>(minC),
+                                  static_cast<uint8_t>(maxC)};
   return ok;
 }
 
@@ -426,66 +375,35 @@ void updateRestart() {
   }
 }
 
-// Moonraker drops every subscription when Klippy disconnects and the client
-// never resubscribes, so silence while "Connected" means we have gone deaf:
-// restart the client, which resubscribes. Heat is held; updateLinkSafety()
-// counts the silence as link loss.
-void updateMoonrakerWatchdog() {
-  using idryer::cloud::ActiveIntegration;
-  const bool connected =
-      s_integrations.getActive() == ActiveIntegration::Moonraker &&
-      s_integrations.moonrakerState() ==
-          idryer::cloud::MoonrakerConnectionState::Connected;
-  if (!connected) {
-    s_moonrakerWasConnected = false;
-    return;
-  }
-  if (!s_moonrakerWasConnected) {
-    s_moonrakerWasConnected = true;
-    s_lastMoonrakerUpdateMs = millis();
-    return;
-  }
-  if (!policy::moonrakerStale(millis(), s_lastMoonrakerUpdateMs,
-                              policy::kMoonrakerStaleMs))
-    return;
-  Serial.println("[REMOTE] moonraker stale, restarting client");
-  s_moonrakerSilent = true;
-  s_integrations.setActive(ActiveIntegration::None);
-  s_integrations.setActive(ActiveIntegration::Moonraker);
-  s_moonrakerWasConnected = false;
-  s_lastMoonrakerUpdateMs = millis();
-}
-
 // Backstop for a printer that never comes back: heat the printer commanded
 // is held through link outages and cut once the link has been down for
 // policy::kLinkLossGraceMs. Manual heat is never touched.
 void updateLinkSafety() {
-  using idryer::cloud::ActiveIntegration;
   const uint32_t now = millis();
-  const ActiveIntegration active = s_integrations.getActive();
-  bool healthy = true;
-  if (active == ActiveIntegration::Moonraker) {
-    healthy = s_integrations.moonrakerState() ==
-                  idryer::cloud::MoonrakerConnectionState::Connected &&
-              !s_moonrakerSilent;
-  } else if (active == ActiveIntegration::Bambu) {
-    healthy = s_integrations.bambuState() ==
-              idryer::cloud::BambuConnectionState::Connected;
-  }
+  const bool printerSource = klipperSource();
+  const bool healthy = !printerSource || s_moonraker.healthy();
   if (healthy) {
     s_linkHealthyAtMs = now;
     return;
   }
-  const bool printerSource = active == ActiveIntegration::Moonraker ||
-                             active == ActiveIntegration::Bambu;
   const bool heatingFromPrinter =
       s_output.getLastCommand().mode == ControllerOutputMode::TargetTemperature &&
-      (s_targetSource == "klipper" || s_targetSource == "bed-rule" ||
-       s_targetSource == "bambu");
+      s_targetSource == "klipper";
   if (policy::cutHeatForLinkLoss(printerSource, heatingFromPrinter, healthy,
                                  now, s_linkHealthyAtMs,
                                  policy::kLinkLossGraceMs))
     applyIntegrationTarget(0.0f, "printer link lost 10 min", "link-lost");
+}
+
+void updateHeapLog() {
+  const uint32_t now = millis();
+  if (!policy::intervalElapsed(now, s_heapLogAtMs, kHeapLogMs))
+    return;
+  s_heapLogAtMs = now;
+  Serial.printf("[REMOTE] heap free=%u min=%u moon=%s\n",
+                static_cast<unsigned>(ESP.getFreeHeap()),
+                static_cast<unsigned>(ESP.getMinFreeHeap()),
+                s_moonraker.stateString());
 }
 
 // Station mode: reconnect every 30 s while down. AP fallback with saved
@@ -569,33 +487,29 @@ String htmlEscape(const char *raw) {
 void handleSetupPage() {
   if (captiveRedirectIfNeeded())
     return;
-  const auto active = s_integrations.getActive();
-  const auto &bambu = s_integrations.bambuConfig();
-  const auto &moon = s_integrations.moonrakerConfig();
-  const String source = active == idryer::cloud::ActiveIntegration::Bambu
-      ? "bambu" : active == idryer::cloud::ActiveIntegration::Moonraker
-      ? "moonraker" : "manual";
-  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--m)}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>All binding configuration stays on this device. Blank password/access-code fields preserve their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label><label>Transmit power<select name=txPower><option value=34 __TXP_34__>8.5 dBm (default)</option><option value=44 __TXP_44__>11 dBm</option><option value=52 __TXP_52__>13 dBm</option><option value=60 __TXP_60__>15 dBm</option><option value=68 __TXP_68__>17 dBm</option><option value=78 __TXP_78__>19.5 dBm</option></select></label><p class=note>Higher power can help a weak signal; some C3 Super Mini boards fail to connect above 8.5 dBm. Changing it restarts the device.</p><p class=note>Signal: __RSSI__</p></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option><option value=bambu __BAMBU__>Bambu (LAN)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port type=number value="__MOON_PORT__" min=1 max=65535></label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div><div id=bambu><label>Printer IP<input name=ip value="__BAMBU_IP__" maxlength=15></label><label>Serial<input name=serial value="__BAMBU_SERIAL__" maxlength=19></label><label>LAN access code<input name=lanAccessCode type=password placeholder="(unchanged)" maxlength=15></label><p class=note>Enable LAN Only Mode on the printer and use its access code.</p></div></section><section class=card><h2>iHeater target range</h2><p class=note>These values do not change any setting on the iHeater. Stock v0.5.0 firmware accepts 45–90 and faults when the air reaches 90.</p><p class=note>Min must not be lower than your iHeater's minimum: lower targets are ignored by the iHeater, which keeps its previous target.</p><p class=note>We recommend a Max no higher than 80 (10 °C below the iHeater's MAX_AIR_TEMP).</p><label>Min target (C)<input name=minTargetC type=number value="__MIN_TARGET__" min=11 max=90></label><label>Max target (C)<input name=maxTargetC type=number value="__MAX_TARGET__" min=11 max=90></label></section><section class=card><h2>Auto control</h2><p class=note>Klipper's chamber heater (VIRTUAL_CHAMBER) takes priority; otherwise heat engages when the bed setpoint reaches this threshold.</p><label>iHeater target (within range)<input name=autoTargetC type=number value="__AUTO_TARGET__"></label><label>Bed threshold (40–120 C)<input name=autoBedThresholdC type=number value="__AUTO_BED__" min=40 max=120></label></section><button>Save local setup</button></form></main><script>function showSource(){let s=document.getElementById('source').value;document.getElementById('moon').style.display=s==='moonraker'?'block':'none';document.getElementById('bambu').style.display=s==='bambu'?'block':'none'}showSource()</script></html>)HTML";
-  page.replace("__SSID__", htmlEscape(s_stationSsid.c_str()));
-  for (const int txp : {34, 44, 52, 60, 68, 78})
-    page.replace(String("__TXP_") + txp + "__", s_txPower == txp ? "selected" : "");
-  const int rssi = wifiRssi();
-  page.replace("__RSSI__", rssi ? String(rssi) + " dBm" : String("not connected"));
-  page.replace("__MOON_HOST__", htmlEscape(moon.host));
-  page.replace("__MOON_PORT__", String(moon.port));
-  page.replace("__BAMBU_IP__", htmlEscape(bambu.ip));
-  page.replace("__BAMBU_SERIAL__", htmlEscape(bambu.serial));
-  page.replace("__MIN_TARGET__", String(s_range.minC));
-  page.replace("__MAX_TARGET__", String(s_range.maxC));
-  page.replace("__AUTO_TARGET__", String(s_autoTargetC, 0));
-  page.replace("__AUTO_BED__", String(s_autoBedThresholdC));
+  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--m)}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.check{display:flex;align-items:center;gap:10px}.check input{min-height:0;width:18px;height:18px;margin:0;padding:0}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>Blank password and API key fields keep their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label><label>Transmit power<select name=txPower><option value=34 __TXP_34__>8.5 dBm (default)</option><option value=44 __TXP_44__>11 dBm</option><option value=52 __TXP_52__>13 dBm</option><option value=60 __TXP_60__>15 dBm</option><option value=68 __TXP_68__>17 dBm</option><option value=78 __TXP_78__>19.5 dBm</option></select></label><p class=note>Higher power can help a weak signal; some C3 Super Mini boards fail to connect above 8.5 dBm. Changing it restarts the device.</p><p class=note>Signal: __RSSI__</p></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port id=port type=number value="__MOON_PORT__" min=1 max=65535></label><label class=check><input name=tls id=tls type=checkbox value=1 __MOON_TLS__>Use TLS (wss://, e.g. through Mainsail on 443)</label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div></section><section class=card><h2>Pairing</h2><label>Pairing token<input name=pairToken value="__PAIR_TOKEN__" maxlength=16 autocomplete=off autocapitalize=characters spellcheck=false></label><label class=check><input name=regenToken type=checkbox value=1>Generate a new token on save</label><p class=note>Put this in your [heater_virtual] section as remote_token: __PAIR_TOKEN__. After a wipe, type your old token here to keep your printer.cfg unchanged.</p></section><section class=card><h2>iHeater target range</h2><p class=note>These values do not change any setting on the iHeater. Stock v0.5.0 firmware accepts 45–90 and faults when the air reaches 90.</p><p class=note>Min must not be lower than your iHeater's minimum: lower targets are ignored by the iHeater, which keeps its previous target.</p><p class=note>We recommend a Max no higher than 80 (10 °C below the iHeater's MAX_AIR_TEMP).</p><label>Min target (C)<input name=minTargetC type=number value="__MIN_TARGET__" min=11 max=90></label><label>Max target (C)<input name=maxTargetC type=number value="__MAX_TARGET__" min=11 max=90></label></section><button>Save local setup</button></form></main><script>function showSource(){document.getElementById('moon').style.display=document.getElementById('source').value==='moonraker'?'block':'none'}showSource();document.getElementById('tls').onchange=e=>{let p=document.getElementById('port');if(e.target.checked&&p.value==='7125')p.value='443';else if(!e.target.checked&&p.value==='443')p.value='7125'}</script></html>)HTML";
   page.replace("<h1>Wi-Fi &amp; printer setup</h1>",
                "<div style='font-size:23px;font-weight:800;letter-spacing:-1px'><span style='color:#5ba9ff'>i</span>Dryer</div><h1>Wi-Fi &amp; printer setup</h1>");
   page.replace("</form></main>",
                String("</form><p class=note><a href='/fw'>Firmware update</a> · iHeater Remote v") + VERSION_STR + "</p></main>");
-  page.replace("__MANUAL__", source == "manual" ? "selected" : "");
-  page.replace("__MOON__", source == "moonraker" ? "selected" : "");
-  page.replace("__BAMBU__", source == "bambu" ? "selected" : "");
+  for (const int txp : {34, 44, 52, 60, 68, 78})
+    page.replace(String("__TXP_") + txp + "__", s_txPower == txp ? "selected" : "");
+  const int rssi = wifiRssi();
+  page.replace("__RSSI__", rssi ? String(rssi) + " dBm" : String("not connected"));
+  const bool klipper = klipperSource();
+  page.replace("__MANUAL__", klipper ? "" : "selected");
+  page.replace("__MOON__", klipper ? "selected" : "");
+  page.replace("__MOON_TLS__", s_settings.moon.tls ? "checked" : "");
+  page.replace("__MOON_PORT__", String(s_settings.moon.port));
+  page.replace("__MIN_TARGET__", String(s_range.minC));
+  page.replace("__MAX_TARGET__", String(s_range.maxC));
+  char token[policy::kPairTokenLen + 2] = {};
+  if (s_settings.pairToken.length() == policy::kPairTokenLen)
+    policy::formatPairToken(s_settings.pairToken.c_str(), token);
+  // Stored, user-supplied values go last so they cannot fill a placeholder.
+  page.replace("__PAIR_TOKEN__", token);
+  page.replace("__MOON_HOST__", htmlEscape(s_settings.moon.host.c_str()));
+  page.replace("__SSID__", htmlEscape(s_stationSsid.c_str()));
   s_server.send(200, "text/html", page);
 }
 
@@ -636,15 +550,11 @@ String statusJson() {
   doc["otaBytesWritten"] = s_otaBytesWritten;
   doc["otaError"] = s_otaError;
   doc["firmwareVersion"] = VERSION_STR;
-  doc["integration"] = idryer::cloud::activeIntegrationToString(
-      s_integrations.getActive());
-  doc["bambuState"] = idryer::cloud::bambuConnectionStateToString(
-      s_integrations.bambuState());
-  doc["moonrakerState"] = idryer::cloud::moonrakerConnectionStateToString(
-      s_integrations.moonrakerState());
-  const auto &bambu = s_integrations.bambuPrinterStatus();
-  doc["bambuFilament"] = bambu.trayType;
-  doc["bambuPrintState"] = bambu.gcodeState;
+  const bool klipper = klipperSource();
+  doc["source"] = klipper ? "klipper" : "manual";
+  doc["moonrakerState"] = s_moonraker.stateString();
+  doc["heaterObject"] = s_moonraker.heaterObject();
+  doc["moonrakerError"] = klipper ? s_moonraker.lastError() : String();
 
   String out;
   serializeJson(doc, out);
@@ -722,61 +632,98 @@ bool applySetupForm(String &error) {
     error = "Invalid transmit power.";
     return false;
   }
-  const String type = s_server.arg("type");
-  StaticJsonDocument<384> doc;
-  doc["type"] = type;
 
-  if (type == "bambu") {
-    const auto &old = s_integrations.bambuConfig();
-    const String ip = s_server.arg("ip");
-    const String serial = s_server.arg("serial");
-    const String code = s_server.arg("lanAccessCode");
-    doc["enabled"] = true;
-    doc["ip"] = ip.length() ? ip : old.ip;
-    doc["serial"] = serial.length() ? serial : old.serial;
-    // Secrets are write-only: a blank field explicitly means keep the stored code.
-    doc["lanAccessCode"] = code.length() ? code : old.lanAccessCode;
-    s_integrations.handleLinkIntegrationCommand(doc.as<JsonObjectConst>());
-    if (!s_integrations.bambuConfig().configured()) {
-      error = "Bambu requires IP, serial number, and LAN access code.";
-      return false;
-    }
-    s_integrations.setActive(idryer::cloud::ActiveIntegration::Bambu);
-  } else if (type == "moonraker") {
-    const auto &old = s_integrations.moonrakerConfig();
-    const int port = s_server.arg("port").toInt();
-    const String host = s_server.arg("host");
-    const String key = s_server.arg("apiKey");
-    doc["enabled"] = true;
-    doc["host"] = host.length() ? host : old.host;
-    doc["port"] = port > 0 && port <= 65535 ? port : old.port;
-    doc["apiKey"] = key.length() ? key : old.apiKey;
-    doc["ssl"] = s_server.arg("ssl") == "1";
-    s_integrations.handleLinkIntegrationCommand(doc.as<JsonObjectConst>());
-    if (!s_integrations.moonrakerConfig().configured()) {
-      error = "Moonraker requires a host or IP address.";
-      return false;
-    }
-    s_integrations.setActive(idryer::cloud::ActiveIntegration::Moonraker);
-  } else if (type == "manual") {
-    s_integrations.setActive(idryer::cloud::ActiveIntegration::None);
-    applyIntegrationTarget(0.0f, "binding disabled", "manual");
+  const String type = s_server.arg("type");
+  RemoteSettings next = s_settings;
+  if (type == "manual" || type == "none") {
+    next.source = ControlSource::Manual;
+  } else if (type == "moonraker" || type == "klipper") {
+    next.source = ControlSource::Klipper;
   } else {
     error = "Unknown control source.";
     return false;
   }
 
-  const String target = s_server.arg("autoTargetC");
-  const String threshold = s_server.arg("autoBedThresholdC");
   const String minTarget = s_server.arg("minTargetC");
   const String maxTarget = s_server.arg("maxTargetC");
-  if ((target.length() || threshold.length() || minTarget.length() ||
-       maxTarget.length()) &&
-      !saveAutoSettings(target.length() ? target.toFloat() : s_autoTargetC,
-                        threshold.length() ? threshold.toInt() : s_autoBedThresholdC,
-                        minTarget.length() ? minTarget.toInt() : s_range.minC,
-                        maxTarget.length() ? maxTarget.toInt() : s_range.maxC)) {
-    error = "Range must satisfy 11 ≤ min ≤ max ≤ 90, auto target must be inside it, bed threshold 40–120 C.";
+  const int minC = minTarget.length() ? minTarget.toInt() : s_range.minC;
+  const int maxC = maxTarget.length() ? maxTarget.toInt() : s_range.maxC;
+  if (!policy::validRange(minC, maxC)) {
+    error = "Range must satisfy 11 ≤ min ≤ max ≤ 90.";
+    return false;
+  }
+
+  // regenToken=1 wins over a typed token, so the typed one is not checked.
+  const bool regenToken = s_server.arg("regenToken") == "1";
+  String typedToken = s_server.arg("pairToken");
+  typedToken.trim();
+  char token[policy::kPairTokenLen + 1] = {};
+  if (!regenToken && typedToken.length() &&
+      !policy::normalizePairToken(typedToken.c_str(), token)) {
+    error = "Pairing token must be 8 characters: 0–9 and A–Z without I, L, O or U.";
+    return false;
+  }
+
+  // The Moonraker fields are only read with Klipper selected: the Setup page
+  // hides them for Manual, and /api/integration {type:none} sends none.
+  if (next.source == ControlSource::Klipper) {
+    String host = s_server.arg("host");
+    host.trim();
+    if (host.length())
+      next.moon.host = host;
+    if (!next.moon.host.length()) {
+      error = "Klipper needs the Moonraker host or IP address.";
+      return false;
+    }
+    next.moon.tls = s_server.arg("tls") == "1";
+    const String port = s_server.arg("port");
+    if (port.length()) {
+      const long value = port.toInt();
+      if (value < 1 || value > 65535) {
+        error = "Port must be 1–65535.";
+        return false;
+      }
+      next.moon.port = static_cast<uint16_t>(value);
+    } else {
+      next.moon.port = policy::defaultMoonrakerPort(next.moon.tls);
+    }
+    // A TLS handshake against the plain port blocks the main loop for up to
+    // 120 s per attempt, so refuse the combination outright.
+    if (next.moon.tls && next.moon.port == 7125) {
+      error = "Port 7125 is Moonraker's plain port: turn TLS off, or use 443 through Mainsail.";
+      return false;
+    }
+    // Secrets are write-only: a blank field keeps the stored key.
+    const String apiKey = s_server.arg("apiKey");
+    if (apiKey.length())
+      next.moon.apiKey = apiKey;
+  }
+
+  if (regenToken)
+    next.pairToken = generatePairToken();
+  else if (token[0] != '\0')
+    next.pairToken = token;
+
+  // Every check has passed: save source and Moonraker settings, the token,
+  // the range, then the transmit power, in that order.
+  if (!saveSourceAndMoonraker(next)) {
+    error = "Could not save the control source.";
+    return false;
+  }
+  s_settings.source = next.source;
+  s_settings.moon = next.moon;
+  if (next.pairToken != s_settings.pairToken) {
+    if (!savePairToken(next.pairToken.c_str())) {
+      error = "Could not save the pairing token.";
+      return false;
+    }
+    s_settings.pairToken = next.pairToken;
+    char shown[policy::kPairTokenLen + 2];
+    policy::formatPairToken(s_settings.pairToken.c_str(), shown);
+    Serial.printf("[REMOTE] pairing token set to %s\n", shown);
+  }
+  if ((minC != s_range.minC || maxC != s_range.maxC) && !saveRange(minC, maxC)) {
+    error = "Could not save the target range.";
     return false;
   }
   if (txPower.length() && txPower.toInt() != s_txPower) {
@@ -785,6 +732,13 @@ bool applySetupForm(String &error) {
       return false;
     }
     scheduleRestart();
+  }
+
+  if (klipperSource()) {
+    s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
+  } else {
+    s_moonraker.stop();
+    applyIntegrationTarget(0.0f, "binding disabled", "manual");
   }
   return true;
 }
@@ -916,7 +870,7 @@ void handleOtaUpload() {
     s_otaBytesWritten = 0;
     s_otaError = "";
 
-    applyMode(0, "ota:start");
+    applyMode(0, "ota:start", false);
     Serial.printf("[REMOTE] OTA upload start filename=%s\n",
                   upload.filename.c_str());
 
@@ -996,224 +950,6 @@ void handleRoot() {
       "iDryer Remote <span id=\"version\">—</span> · This remote reports the command it sends to iHeater. Current temperatures and safety-chain state are not available on this hardware.",
       "<a href=\"https://github.com/justinh-rahb/iHeater-Remote\" target=\"_blank\" rel=\"noopener\">iHeater Remote <span id=\"version\">—</span></a>");
   s_server.send(200, "text/html", page);
-  return; // The legacy dashboard remains below only for source-history context.
-
-#if 0
-  static const char page[] PROGMEM = R"HTML(
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>iHeater Remote</title>
-<style>
-:root{color-scheme:dark light;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;background:#101314;color:#eef3f1}
-body{margin:0;min-height:100vh;background:#101314}
-main{width:min(760px,calc(100vw - 32px));margin:0 auto;padding:28px 0 36px}
-h1{font-size:clamp(28px,6vw,44px);line-height:1;margin:0 0 18px}
-.panel{border:1px solid #2a3332;border-radius:8px;background:#171d1c;padding:18px;margin:16px 0}
-.status{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-.metric{border:1px solid #293231;border-radius:6px;padding:12px;background:#111615}
-.label{display:block;color:#9fb0aa;font-size:12px;text-transform:uppercase;letter-spacing:.08em}
-.value{display:block;margin-top:4px;font-size:24px;font-weight:700}
-.modes{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}
-.timer{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:10px;align-items:center}
-.timer label{grid-column:span 2;color:#9fb0aa;font-size:13px;font-weight:700;text-transform:uppercase;letter-spacing:.08em}
-.timer input{grid-column:span 2}
-.timer button{min-height:46px}
-.timer button.active{border-color:#8fd0bb;background:#1c4a3e}
-.form{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px;align-items:end}
-.form label{display:grid;gap:6px;color:#9fb0aa;font-size:12px;font-weight:700;text-transform:uppercase;letter-spacing:.08em}
-.form label.wide{grid-column:span 2}
-input{min-height:46px;border:1px solid #3a4643;border-radius:6px;background:#101514;color:#f6fbf9;padding:0 12px;font:inherit;font-weight:700}
-input[type=file]{padding:10px 12px}
-button{appearance:none;border:1px solid #3a4643;border-radius:6px;background:#22302c;color:#f6fbf9;min-height:48px;font:inherit;font-weight:700;cursor:pointer}
-button:hover{background:#2b3b36}
-button.active{border-color:#8fd0bb;background:#1c4a3e}
-button.stop{grid-column:span 4;background:#4b2424;border-color:#724141}
-button.secondary{background:#202826}
-.small{color:#9fb0aa;font-size:14px;line-height:1.45}
-@media (max-width:560px){.status,.modes{grid-template-columns:1fr 1fr}.timer,.form{grid-template-columns:1fr 1fr}.timer label,.timer input,.form label.wide{grid-column:span 2}button.stop{grid-column:span 2}}
-</style>
-</head>
-<body>
-<main>
-<h1>iHeater Remote</h1>
-<section class="panel status">
-<div class="metric"><span class="label">Mode</span><span class="value" id="mode">-</span></div>
-<div class="metric"><span class="label">Target</span><span class="value" id="target">-</span></div>
-<div class="metric"><span class="label">Timer</span><span class="value" id="timer">-</span></div>
-<div class="metric"><span class="label">Remaining</span><span class="value" id="remaining">-</span></div>
-<div class="metric"><span class="label">Network</span><span class="value" id="network">-</span></div>
-<div class="metric"><span class="label">Pulse</span><span class="value" id="pulse">-</span></div>
-<div class="metric"><span class="label">Wi-Fi Config</span><span class="value" id="wifiConfig">-</span></div>
-</section>
-<section class="panel">
-<div class="modes" id="modes"></div>
-</section>
-<section class="panel">
-<div class="timer" id="timers">
-<button data-minutes="0">Until Off</button>
-<button data-minutes="30">30 min</button>
-<button data-minutes="60">1 hr</button>
-<button data-minutes="120">2 hr</button>
-<button data-minutes="240">4 hr</button>
-<button data-minutes="480">8 hr</button>
-<label for="customMinutes">Custom minutes</label>
-<input id="customMinutes" inputmode="numeric" min="0" max="1440" step="1" type="number">
-<button id="applyTimer">Set</button>
-</div>
-</section>
-<section class="panel">
-<div class="form">
-<label class="wide" for="wifiSsid">Wi-Fi SSID<input id="wifiSsid" maxlength="32" autocomplete="username"></label>
-<label class="wide" for="wifiPassword">Wi-Fi Password<input id="wifiPassword" maxlength="64" type="password" autocomplete="current-password"></label>
-<button id="saveWifi">Save Wi-Fi</button>
-<button id="clearWifi" class="secondary">Forget Wi-Fi</button>
-</div>
-<p class="small" id="wifiMessage"></p>
-</section>
-<section class="panel">
-<div class="form">
-<label class="wide" for="otaFile">Firmware .bin<input id="otaFile" accept=".bin,application/octet-stream" type="file"></label>
-<button id="uploadOta">Update</button>
-</div>
-<p class="small" id="otaMessage"></p>
-</section>
-<p class="small" id="detail"></p>
-</main>
-<script>
-const temps=[0,55,60,65,70,75,80,85];
-const modes=document.getElementById("modes");
-const timers=document.getElementById("timers");
-const customMinutes=document.getElementById("customMinutes");
-const wifiSsid=document.getElementById("wifiSsid");
-const wifiPassword=document.getElementById("wifiPassword");
-const wifiMessage=document.getElementById("wifiMessage");
-const otaFile=document.getElementById("otaFile");
-const otaMessage=document.getElementById("otaMessage");
-temps.forEach((temp,mode)=>{
-  const b=document.createElement("button");
-  b.textContent=mode===0?"Off":`Mode ${mode} - ${temp} C`;
-  b.dataset.mode=mode;
-  b.className=mode===0?"stop":"";
-  b.onclick=()=>fetch(`/api/mode?mode=${mode}`,{method:"POST"}).then(refresh);
-  modes.appendChild(b);
-});
-timers.querySelectorAll("button[data-minutes]").forEach(b=>{
-  b.onclick=()=>setTimer(Number(b.dataset.minutes));
-});
-document.getElementById("applyTimer").onclick=()=>{
-  const minutes=Number(customMinutes.value||0);
-  setTimer(minutes);
-};
-customMinutes.addEventListener("keydown",event=>{
-  if(event.key==="Enter") setTimer(Number(customMinutes.value||0));
-});
-document.getElementById("saveWifi").onclick=saveWifi;
-document.getElementById("clearWifi").onclick=clearWifi;
-document.getElementById("uploadOta").onclick=uploadOta;
-function setTimer(minutes){
-  if(!Number.isFinite(minutes)) minutes=0;
-  const value=Math.max(0,Math.min(1440,Math.round(minutes)));
-  return fetch(`/api/timer?minutes=${value}`,{method:"POST"}).then(refresh);
-}
-async function postForm(path,fields){
-  const body=new URLSearchParams(fields);
-  const r=await fetch(path,{method:"POST",body});
-  const s=await r.json().catch(()=>({error:"request failed"}));
-  if(!r.ok) throw new Error(s.error||"request failed");
-  return s;
-}
-async function saveWifi(){
-  wifiMessage.textContent="";
-  try{
-    await postForm("/api/wifi",{ssid:wifiSsid.value.trim(),password:wifiPassword.value});
-    wifiPassword.value="";
-    wifiMessage.textContent="Saved. Rebooting...";
-    await refresh();
-  }catch(err){
-    wifiMessage.textContent=err.message;
-  }
-}
-async function clearWifi(){
-  wifiMessage.textContent="";
-  try{
-    await postForm("/api/wifi/clear",{});
-    wifiPassword.value="";
-    wifiMessage.textContent="Forgotten. Rebooting...";
-    await refresh();
-  }catch(err){
-    wifiMessage.textContent=err.message;
-  }
-}
-function uploadOta(){
-  otaMessage.textContent="";
-  if(!otaFile.files.length){
-    otaMessage.textContent="Choose a firmware .bin first.";
-    return;
-  }
-
-  const file=otaFile.files[0];
-  const body=new FormData();
-  body.append("firmware",file,file.name);
-
-  const request=new XMLHttpRequest();
-  request.open("POST","/api/ota");
-  request.upload.onprogress=event=>{
-    if(event.lengthComputable){
-      otaMessage.textContent=`Uploading ${Math.round(event.loaded*100/event.total)}%`;
-    }else{
-      otaMessage.textContent=`Uploading ${event.loaded} bytes`;
-    }
-  };
-  request.onload=()=>{
-    let response={};
-    try{ response=JSON.parse(request.responseText||"{}"); }catch(_){}
-    if(request.status>=200&&request.status<300){
-      otaMessage.textContent=`Update written (${response.bytesWritten||file.size} bytes). Rebooting...`;
-      setTimeout(refresh,500);
-    }else{
-      otaMessage.textContent=response.error||"Update failed.";
-    }
-  };
-  request.onerror=()=>{ otaMessage.textContent="Update failed."; };
-  request.send(body);
-}
-function formatDuration(seconds){
-  if(seconds<=0) return "-";
-  const h=Math.floor(seconds/3600);
-  const m=Math.floor((seconds%3600)/60);
-  const s=seconds%60;
-  if(h>0) return `${h}h ${String(m).padStart(2,"0")}m`;
-  if(m>0) return `${m}m ${String(s).padStart(2,"0")}s`;
-  return `${s}s`;
-}
-async function refresh(){
-  const s=await fetch("/api/status",{cache:"no-store"}).then(r=>r.json());
-  document.getElementById("mode").textContent=s.mode===0?"Off":`MODE_TEMP_${s.mode}`;
-  document.getElementById("target").textContent=s.mode===0?"0 C":`${s.targetTempC} C`;
-  document.getElementById("timer").textContent=s.timerMinutes===0?"Until Off":`${s.timerMinutes} min`;
-  document.getElementById("remaining").textContent=s.timerActive?formatDuration(s.timerRemainingSeconds):"-";
-  document.getElementById("network").textContent=s.wifiMode.toUpperCase();
-  document.getElementById("pulse").textContent=s.pulseCode;
-  document.getElementById("wifiConfig").textContent=s.wifiCredentialSource.toUpperCase();
-  document.getElementById("detail").textContent=`${s.ssid} - ${s.ip}`;
-  if(s.otaActive) otaMessage.textContent=`Updating (${s.otaBytesWritten} bytes written)`;
-  if(s.otaError) otaMessage.textContent=s.otaError;
-  document.querySelectorAll("button[data-mode]").forEach(b=>b.classList.toggle("active",Number(b.dataset.mode)===s.mode));
-  document.querySelectorAll("button[data-minutes]").forEach(b=>b.classList.toggle("active",Number(b.dataset.minutes)===s.timerMinutes));
-  if(document.activeElement!==customMinutes) customMinutes.value=s.timerMinutes;
-  if(document.activeElement!==wifiSsid) wifiSsid.value=s.configuredWifiSsid||"";
-}
-refresh();
-setInterval(refresh,1000);
-</script>
-</body>
-</html>
-)HTML";
-  s_server.send_P(200, "text/html", page);
-#endif
 }
 
 void configureRoutes() {
@@ -1393,20 +1129,19 @@ void setup() {
   pinMode(IHEATER_BOOT_BUTTON_PIN, INPUT_PULLUP);
 
   s_output.begin();
-  applyMode(0, "boot");
+  applyMode(0, "boot", false); // output off first; the binding is untouched
 
   if (!LittleFS.begin()) {
     Serial.println("[REMOTE] LittleFS unavailable; logo asset will not load");
   }
 
-  loadAutoSettings(); // before Wi-Fi: carries the TX power setting
+  loadDeviceSettings(); // before Wi-Fi: carries the TX power setting
   configureWiFi();
-  idryer::hal::initArduinoHal(&Serial, false);
-  s_integrations.setDeviceType(idryer::UartDeviceType::IHeaterLink);
-  s_integrations.setVirtualChamberCallback(onMoonrakerVirtualChamber);
-  s_integrations.setMoonrakerStatusCallback(onMoonrakerStatus);
-  s_integrations.setBambuPrinterStatusCallback(onBambuPrinterStatus);
-  s_integrations.begin();
+  // After Wi-Fi: a first-boot pairing token needs esp_random() with RF entropy.
+  loadRemoteSettings(s_settings);
+  s_moonraker.onTarget(onKlipperTarget);
+  if (klipperSource())
+    s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
   configureRoutes();
   s_server.begin();
   s_statusSocket.begin();
@@ -1425,9 +1160,9 @@ void loop() {
   updateLed();
   updateRestart();
   updateWifiSupervisor();
-  s_integrations.loop();
-  updateMoonrakerWatchdog();
+  s_moonraker.loop();
   updateLinkSafety();
+  updateHeapLog();
   pushStatusIfChanged();
   delay(2);
 }
