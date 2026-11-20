@@ -3,6 +3,7 @@
 #include <unity.h>
 
 #include "UartFrames.h"
+#include "UartRegisters.h"
 
 extern "C" {
 #include "modbus_rtu.h"
@@ -151,6 +152,89 @@ void test_parse_write_echo_mismatch() {
   TEST_ASSERT_EQUAL((int)ReplyKind::Invalid, (int)parseReply(req, resp, n).kind);
 }
 
+static void fillInputs(uint16_t r[22]) {
+  memset(r, 0, 22 * sizeof(uint16_t));
+  r[0] = 1;
+  r[1] = 0x0102;
+  r[3] = 2;
+  r[9] = 524;
+  r[10] = 1182;
+  r[14] = 430;
+  r[15] = 1;
+  r[16] = 0x0005;
+  r[17] = 0x0001;
+}
+
+void test_decode_inputs_fields() {
+  uint16_t r[22];
+  fillInputs(r);
+  IheaterSnapshot s{};
+  TEST_ASSERT_TRUE(decodeInputs(r, 22, s));
+  TEST_ASSERT_EQUAL(1, s.proto);
+  TEST_ASSERT_EQUAL(0x0102, s.fwVersion);
+  TEST_ASSERT_EQUAL((int)IheaterState::Heating, (int)s.state);
+  TEST_ASSERT_EQUAL(524, s.airT10);
+  TEST_ASSERT_EQUAL(1182, s.heaterT10);
+  TEST_ASSERT_EQUAL(430, s.pwmPermille);
+  TEST_ASSERT_TRUE(s.fanOn);
+  TEST_ASSERT_EQUAL_UINT32(65541u, s.uptimeS);
+}
+
+void test_decode_negative_and_invalid() {
+  uint16_t r[22];
+  fillInputs(r);
+  r[9] = 0xFF9C;
+  r[10] = 0x8000;
+  IheaterSnapshot s{};
+  TEST_ASSERT_TRUE(decodeInputs(r, 22, s));
+  TEST_ASSERT_EQUAL(-100, s.airT10);
+  TEST_ASSERT_EQUAL(kNoReading, s.heaterT10);
+}
+
+void test_decode_wrong_count() {
+  uint16_t r[22] = {0};
+  IheaterSnapshot s{};
+  TEST_ASSERT_FALSE(decodeInputs(r, 21, s));
+}
+
+void test_decode_settings() {
+  uint16_t r[10] = {850, 900, 450, 850, 60, 5, 400, 350, 600, 100};
+  IheaterLimits l{};
+  TEST_ASSERT_TRUE(decodeSettings(r, 10, l));
+  TEST_ASSERT_EQUAL(450, l.minTargetT10);
+  TEST_ASSERT_EQUAL(850, l.maxAirTargetT10);
+  TEST_ASSERT_EQUAL(60, l.linkHoldS);
+  TEST_ASSERT_EQUAL(100, l.clearMarginT10);
+  TEST_ASSERT_FALSE(decodeSettings(r, 9, l));
+}
+
+void test_fault_names() {
+  TEST_ASSERT_EQUAL_STRING("air over-temperature", faultName(0x07));
+  TEST_ASSERT_EQUAL_STRING("unknown fault", faultName(0x42));
+}
+
+void test_uart_target_inside() {
+  TEST_ASSERT_EQUAL(600, uartTargetT10(60.0f, {45, 85}, 450, 850));
+  TEST_ASSERT_EQUAL(624, uartTargetT10(62.36f, {45, 85}, 450, 850));
+}
+
+void test_uart_target_clamps() {
+  TEST_ASSERT_EQUAL(450, uartTargetT10(40.0f, {45, 85}, 450, 850));
+  TEST_ASSERT_EQUAL(850, uartTargetT10(90.0f, {45, 85}, 450, 850));
+  TEST_ASSERT_EQUAL(700, uartTargetT10(85.0f, {50, 70}, 450, 850));
+}
+
+void test_uart_target_off() {
+  TEST_ASSERT_EQUAL(0, uartTargetT10(0.0f, {45, 85}, 450, 850));
+  TEST_ASSERT_EQUAL(0, uartTargetT10(-3.0f, {45, 85}, 450, 850));
+}
+
+void test_uart_range_empty() {
+  RangeT10 r{};
+  TEST_ASSERT_FALSE(effectiveRangeT10({11, 40}, 450, 850, r));
+  TEST_ASSERT_EQUAL(0, uartTargetT10(30.0f, {11, 40}, 450, 850));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_build_read_vector);
@@ -164,5 +248,14 @@ int main() {
   RUN_TEST(test_parse_wrong_address_invalid);
   RUN_TEST(test_parse_byte_count_mismatch);
   RUN_TEST(test_parse_write_echo_mismatch);
+  RUN_TEST(test_decode_inputs_fields);
+  RUN_TEST(test_decode_negative_and_invalid);
+  RUN_TEST(test_decode_wrong_count);
+  RUN_TEST(test_decode_settings);
+  RUN_TEST(test_fault_names);
+  RUN_TEST(test_uart_target_inside);
+  RUN_TEST(test_uart_target_clamps);
+  RUN_TEST(test_uart_target_off);
+  RUN_TEST(test_uart_range_empty);
   return UNITY_END();
 }
