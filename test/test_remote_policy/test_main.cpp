@@ -345,6 +345,24 @@ void test_link_loss_carry_zero_is_valid() {
   TEST_ASSERT_FALSE(linkLossExpired(carried, kLinkLossGraceMs));
 }
 
+void test_link_loss_carry_adds_boot_time() {
+  // Time already spent in setup() counts: 540 s carried + 7 s of boot.
+  TEST_ASSERT_EQUAL_UINT32(547000, linkLossCarryPlus(540000, 7000));
+  TEST_ASSERT_EQUAL_UINT32(7000, linkLossCarryPlus(0, 7000));
+  TEST_ASSERT_FALSE(linkLossExpired(linkLossCarryPlus(540000, 7000), kLinkLossGraceMs));
+  // Boot time alone can use up the grace.
+  TEST_ASSERT_TRUE(linkLossExpired(linkLossCarryPlus(595000, 5000), kLinkLossGraceMs));
+  // Saturates at the grace instead of wrapping.
+  TEST_ASSERT_EQUAL_UINT32(kLinkLossGraceMs, linkLossCarryPlus(kLinkLossGraceMs, 0xFFFFFFFFu));
+  TEST_ASSERT_EQUAL_UINT32(kLinkLossGraceMs, linkLossCarryPlus(0xFFFFFFF0u, 0x20u));
+  // The sum stays a valid record value.
+  uint32_t carried = 0;
+  LinkLossRecord r{};
+  sealLinkLoss(r, linkLossCarryPlus(590000, 20000));
+  TEST_ASSERT_TRUE(carriedLinkLoss(r, true, carried));
+  TEST_ASSERT_TRUE(linkLossExpired(carried, kLinkLossGraceMs));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_token_normalize);
@@ -393,5 +411,6 @@ int main() {
   RUN_TEST(test_link_loss_carry_rejects_garbage);
   RUN_TEST(test_link_loss_carry_healthy_clears);
   RUN_TEST(test_link_loss_carry_zero_is_valid);
+  RUN_TEST(test_link_loss_carry_adds_boot_time);
   return UNITY_END();
 }

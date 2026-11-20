@@ -216,6 +216,12 @@ bool carriedLinkLoss(const LinkLossRecord &r, bool softwareReset, uint32_t &carr
 
 bool linkLossExpired(uint32_t carriedMs, uint32_t graceMs) { return carriedMs >= graceMs; }
 
+uint32_t linkLossCarryPlus(uint32_t carriedMs, uint32_t elapsedMs) {
+  if (carriedMs >= kLinkLossGraceMs) return kLinkLossGraceMs;
+  if (elapsedMs >= kLinkLossGraceMs - carriedMs) return kLinkLossGraceMs;
+  return carriedMs + elapsedMs;
+}
+
 uint32_t linkLossBaselineMs(uint32_t carriedMs) { return 0u - carriedMs; }
 
 bool setupSaveStopsHeat(bool uartOutput, bool wasKlipper, bool nowKlipper,

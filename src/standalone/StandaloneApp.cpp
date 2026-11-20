@@ -1494,22 +1494,26 @@ void bootDecision() {
     if (s_outputKind == OutputKind::Uart) {
       // Continue the link-loss count from before a software restart. Sealed
       // straight away so a crash before the first refresh keeps it.
+      // The time already spent in setup() (Wi-Fi connect blocks for seconds)
+      // counts too, so every boot of a crash loop moves the record forward even
+      // if it panics before the first refresh.
       uint32_t carriedMs = 0;
       const bool carried =
           policy::carriedLinkLoss(s_linkLoss, softwareReset(), carriedMs);
       s_linkHealthyAtMs = policy::linkLossBaselineMs(carriedMs);
-      policy::sealLinkLoss(s_linkLoss, carriedMs);
-      if (carried && policy::linkLossExpired(carriedMs, policy::kLinkLossGraceMs)) {
+      const uint32_t unhealthyMs = policy::linkLossCarryPlus(carriedMs, millis());
+      policy::sealLinkLoss(s_linkLoss, unhealthyMs);
+      if (carried && policy::linkLossExpired(unhealthyMs, policy::kLinkLossGraceMs)) {
         // The printer has been gone for the whole grace: do not adopt the
         // iHeater's target, switch it off.
         Serial.printf("[REMOTE] link loss carried over restart: %us, heat off\n",
-                      (unsigned)(carriedMs / 1000u));
+                      (unsigned)(unhealthyMs / 1000u));
         applyIntegrationTarget(0.0f, "link lost 10 min (carried)", "link-lost");
         return;
       }
       if (carried)
         Serial.printf("[REMOTE] link loss carried over restart: %us\n",
-                      (unsigned)(carriedMs / 1000u));
+                      (unsigned)(unhealthyMs / 1000u));
       s_klipperRecoveryPending = true;
     } else {
       s_klipperRecoveryPending = false;
@@ -1600,8 +1604,10 @@ void loop() {
   updateLed();
   updateRestart();
   updateWifiSupervisor();
-  s_moonraker.loop();
+  // Before s_moonraker.loop(): refresh the carried link-loss time ahead of the
+  // call most likely to crash (TLS handshake, heap) while the printer is down.
   updateLinkSafety();
+  s_moonraker.loop();
   updateUartLinkLog();
   updateHeapLog();
   pushStatusIfChanged();

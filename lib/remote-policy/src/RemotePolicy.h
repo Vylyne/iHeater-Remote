@@ -153,6 +153,10 @@ bool carriedLinkLoss(const LinkLossRecord &r, bool softwareReset, uint32_t &carr
 // The carried time already reached the grace: cut instead of adopting heat.
 bool linkLossExpired(uint32_t carriedMs, uint32_t graceMs);
 
+// carriedMs plus the time already spent booting (millis() at the boot decision),
+// saturated at kLinkLossGraceMs. This is the unhealthy time to decide on and seal.
+uint32_t linkLossCarryPlus(uint32_t carriedMs, uint32_t elapsedMs);
+
 // "Last healthy" time to use at boot so cutHeatForLinkLoss continues from the
 // carried time. millis() restarts at 0, so this is 0 - carriedMs (wraps on
 // purpose), which also counts the time spent booting.
