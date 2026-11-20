@@ -1,11 +1,15 @@
 # Virtual heater for an externally regulated chamber heater (iHeater Remote)
 #
 # Registers a Klipper heater with no MCU pin, no PWM and no verify_heater.
-# Its temperature comes from an existing sensor object; its target is
-# mirrored into a gcode_macro (default VIRTUAL_CHAMBER) that iHeater Remote
-# reads over Moonraker.
+# Its temperature comes from an existing sensor object. iHeater Remote reads
+# the heater object directly over Moonraker and pairs with it by the
+# remote_token option (reported in get_status).
 #
 # This file may be distributed under the terms of the GNU GPLv3 license.
+
+import re
+
+_TOKEN_RE = re.compile(r'^[0-9A-HJKMNP-TV-Z]{8}$')
 
 
 class HeaterVirtual:
@@ -25,16 +29,29 @@ class HeaterVirtual:
                 "[%s] use max_target, not max_temp" % (self.full_name,))
         config.getfloat('min_temp', 0.)
         config.getfloat('max_temp', self.max_target)
-        self.macro_name = 'gcode_macro ' + config.get('mirror_macro',
-                                                      'VIRTUAL_CHAMBER')
+        token = config.get('remote_token', '').upper().replace('-', '')
+        if token and not _TOKEN_RE.match(token):
+            raise config.error(
+                "[%s] remote_token must be 8 characters from "
+                "0123456789ABCDEFGHJKMNPQRSTVWXYZ (case-insensitive, "
+                "hyphens ignored)" % (self.full_name,))
+        self.remote_token = token
         self.sensor = None
-        self.macro = None
         self.target = 0.
         # Register with the heaters module
         self.pheaters = self.printer.load_object(config, 'heaters')
         if self.short_name in self.pheaters.heaters:
             raise config.error("Heater %s already registered"
                                % (self.short_name,))
+        if token:
+            for other in self.pheaters.heaters.values():
+                if (isinstance(other, HeaterVirtual)
+                        and other.remote_token == token):
+                    raise config.error(
+                        "[%s] remote_token %s-%s is already used by "
+                        "heater_virtual %s"
+                        % (self.full_name, token[:4], token[4:],
+                           other.short_name))
         self.pheaters.heaters[self.short_name] = self
         self.pheaters.available_heaters.append(self.full_name)
         self.pheaters.register_sensor(config, self)
@@ -45,8 +62,6 @@ class HeaterVirtual:
                                    desc=self.cmd_SET_HEATER_TEMPERATURE_help)
         self.printer.register_event_handler('klippy:connect',
                                             self._handle_connect)
-        self.printer.register_event_handler('klippy:ready',
-                                            self._handle_ready)
         self.printer.register_event_handler('klippy:shutdown',
                                             self._handle_shutdown)
 
@@ -56,37 +71,14 @@ class HeaterVirtual:
             raise self.printer.config_error(
                 "[%s] sensor '%s' not found"
                 % (self.full_name, self.sensor_name))
-        self.macro = self.printer.lookup_object(self.macro_name, None)
-        if self.macro is None:
-            raise self.printer.config_error(
-                "[%s] requires [%s] (include iheater_remote.cfg)"
-                % (self.full_name, self.macro_name))
-        self._mirror(self.printer.get_reactor().monotonic())
-
-    def _handle_ready(self):
-        reactor = self.printer.get_reactor()
-        reactor.register_timer(self._mirror_timer, reactor.NOW)
 
     def _handle_shutdown(self):
         self.target = 0.
-        self._mirror(self.printer.get_reactor().monotonic())
-
-    def _mirror_timer(self, eventtime):
-        self._mirror(eventtime)
-        return eventtime + 1.
 
     def _sensor_temp(self, eventtime):
         if self.sensor is None:
             return 0.
         return self.sensor.get_temp(eventtime)[0]
-
-    def _mirror(self, eventtime):
-        if self.macro is None:
-            return
-        self.macro.variables = dict(
-            self.macro.variables, target=self.target,
-            temperature=round(self._sensor_temp(eventtime), 2),
-            has_sensor=1)
 
     # Heater interface used by klippy/extras/heaters.py
     def set_temp(self, degrees):
@@ -95,7 +87,6 @@ class HeaterVirtual:
                 "Requested temperature (%.1f) out of range (0-%.1f)"
                 % (degrees, self.max_target))
         self.target = degrees
-        self._mirror(self.printer.get_reactor().monotonic())
 
     def get_temp(self, eventtime):
         return self._sensor_temp(eventtime), self.target
@@ -110,7 +101,8 @@ class HeaterVirtual:
     def get_status(self, eventtime):
         temp, target = self.get_temp(eventtime)
         return {'temperature': round(temp, 2), 'target': target,
-                'power': 1. if target > 0. else 0.}
+                'power': 1. if target > 0. else 0.,
+                'remote_token': self.remote_token}
 
     cmd_SET_HEATER_TEMPERATURE_help = "Sets a heater temperature"
 
