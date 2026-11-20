@@ -736,6 +736,13 @@ void fillIheaterJson(JsonObject out) {
       out["link"] = "no-reply";
       break;
   }
+  // Link diagnostics for bench checks; the dashboard does not show them.
+  JsonObject diag = out.createNestedObject("diag");
+  diag["uptimeMs"] = millis();
+  diag["firstOkMs"] = view.firstOkMs;
+  diag["timeouts"] = view.timeouts;
+  diag["badReplies"] = view.badReplies;
+  diag["stackFree"] = s_uart.stackHighWaterBytes();
   if (view.hasSnapshot) {
     const policy::IheaterSnapshot &s = view.snap;
     static const char *const kStates[] = {"booting", "idle", "heating", "hold", "fault"};
