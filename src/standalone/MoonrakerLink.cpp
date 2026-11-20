@@ -28,6 +28,11 @@ bool containsBytes(const uint8_t *hay, size_t len, const char *needle) {
   return false;
 }
 
+bool startsWith(const char *s, size_t len, const char *prefix) {
+  const size_t n = strlen(prefix);
+  return s != nullptr && len >= n && memcmp(s, prefix, n) == 0;
+}
+
 // Moonraker pushes many notifications we do not use (notify_proc_stat_update
 // every second, gcode responses, ...). Skip those before parsing. Moonraker
 // writes `"method": "..."` with a space, so match on the names themselves.
@@ -211,8 +216,18 @@ void MoonrakerLink::onDisconnected(const char *reason, size_t length) {
   if (!running_) return;
 
   if (!wasConnected) {
-    lastError_ = "could not connect";
-    if (settings_.tls) lastError_ += " (TLS: check certificate and host name)";
+    // The library reports an HTTP rejection of the upgrade (e.g. 401 for a
+    // wrong X-Api-Key) as "HTTP <code>" or "WebSocket handshake failed[ -
+    // HTTP <code>]"; TCP/TLS failures carry other reasons.
+    if (startsWith(reason, length, "HTTP ") ||
+        startsWith(reason, length, "WebSocket handshake failed")) {
+      lastError_ = "Moonraker refused the connection (";
+      for (size_t i = 0; i < length; ++i) lastError_ += reason[i];
+      lastError_ += "): check the API key";
+    } else {
+      lastError_ = "could not connect";
+      if (settings_.tls) lastError_ += " (TLS: check certificate and host name)";
+    }
   }
   backoffMs_ = policy::nextBackoffMs(backoffMs_);
   ws_.setReconnectInterval(backoffMs_);
@@ -274,7 +289,7 @@ void MoonrakerLink::handleNotification(const char *method,
                                        JsonVariantConst params) {
   if (strcmp(method, kNotifyStatus) == 0) {
     JsonObjectConst status = params[0].as<JsonObjectConst>();
-    if (status.isNull()) return;
+    if (status.isNull() || !following()) return;  // unpaired: not ours
     subscribed_ = true;
     phase_ = Phase::Subscribed;
     applyStatus(status);
@@ -359,6 +374,9 @@ void MoonrakerLink::handleResult(Pending kind, JsonVariantConst result) {
 
     case Pending::Subscribe:
     case Pending::Query: {
+      // A late reply after discovery went unpaired must not mark the link
+      // subscribed (and so healthy).
+      if (!following()) break;
       JsonObjectConst status = result["status"].as<JsonObjectConst>();
       subscribed_ = true;
       phase_ = Phase::Subscribed;
@@ -489,6 +507,10 @@ void MoonrakerLink::sendTokenQuery(JsonArrayConst objects) {
 }
 
 void MoonrakerLink::sendHeaterRequest(const char *method, Pending kind) {
+  if (heater_.isEmpty()) {
+    Serial.printf("[MOON] %s skipped: no paired heater\n", method);
+    return;
+  }
   StaticJsonDocument<256> params;
   JsonObject objects = params.createNestedObject("objects");
   objects.createNestedArray(heater_.c_str()).add("target");
@@ -528,6 +550,10 @@ void MoonrakerLink::resetSession() {
   subscribed_ = false;
   phase_ = Phase::Identifying;
   klippy_ = policy::KlippyState::Unknown;
+}
+
+bool MoonrakerLink::following() const {
+  return !heater_.isEmpty() && phase_ != Phase::Unpaired;
 }
 
 bool MoonrakerLink::anyPending() const {
