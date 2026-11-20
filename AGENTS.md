@@ -14,12 +14,11 @@ read its tail.
 
 ```bash
 pio run -e esp32c3-super-mini-remote
-pio test -e esp32c3-super-mini-remote -f test_remote_policy --without-uploading --without-testing
+export PATH="$HOME/scoop/apps/mingw/current/bin:$PATH"; pio test -e native
 python -m unittest discover -s klipper -p "test_*.py"
 ```
 
-There is no host C++ compiler, so the policy tests are build-only: a
-compile failure is a failing test, but the tests are not run on a host.
+Policy tests run on the PC with MinGW from `~/scoop/apps/mingw`.
 
 ## Layout
 
@@ -27,6 +26,7 @@ compile failure is a failing test, but the tests are not run on a host.
   `MoonrakerLink`, TLS roots in `MoonrakerCa.h`).
 - `lib/remote-policy/`: pure decision logic, with tests in
   `test/test_remote_policy/`.
+- `lib/modbus-rtu/`: copy of the iHeater's Modbus slave core; do not edit here.
 - `klipper/`: the `heater_virtual` module, its config and unit tests.
 - `tools/fake_moonraker/`: fake Moonraker server for bench testing.
 - `docs/design/`: design and plan documents.

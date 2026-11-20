@@ -1,7 +1,10 @@
-#include <Arduino.h>
 #include <unity.h>
 
 #include "RemotePolicy.h"
+
+extern "C" {
+#include "modbus_rtu.h"
+}
 
 using namespace iheaterlink::policy;
 
@@ -203,8 +206,12 @@ void test_connect_failure_tls_hint() {
   TEST_ASSERT_FALSE(suggestTlsForPort(80, false));
 }
 
-void setup() {
-  delay(2000);
+void test_vendored_crc_vector() {
+  const uint8_t frame[] = {0x01, 0x03, 0x00, 0x00, 0x00, 0x0A};
+  TEST_ASSERT_EQUAL_HEX16(0xCDC5, modbus_crc16(frame, sizeof frame));  // wire bytes C5 CD
+}
+
+int main() {
   UNITY_BEGIN();
   RUN_TEST(test_token_normalize);
   RUN_TEST(test_token_from_bits);
@@ -237,7 +244,6 @@ void setup() {
   RUN_TEST(test_clamp_low_to_min);
   RUN_TEST(test_clamp_passthrough);
   RUN_TEST(test_clamp_above_max);
-  UNITY_END();
+  RUN_TEST(test_vendored_crc_vector);
+  return UNITY_END();
 }
-
-void loop() {}
