@@ -1,18 +1,26 @@
 #!/usr/bin/env python3
 """
-Fake Moonraker WS-server для проверки iHeater Link Moonraker integration.
-Слушает ws://0.0.0.0:7125/websocket, отвечает на JSON-RPC и шлёт
-notify_status_update с setpoint стола heater_bed.
+Fake Moonraker WebSocket server for bench-testing iHeater Remote.
 
-Сценарий:
-  1) Запустить:  python3 /tmp/fake_moonraker.py
-  2) В локальном /setup выбрать Moonraker: host=<mac IP>, port=7125.
-  3) ESP подключается → printer.objects.subscribe → SDK status callback
-     → bed-setpoint auto-control → s_output (RMT pulse).
-  4) Логи в Serial:
-       [REMOTE] moonraker auto target=60.0C ...
+Listens on ws://0.0.0.0:<port>/websocket and answers the JSON-RPC calls the
+Remote makes: server.connection.identify, printer.objects.list,
+printer.objects.query and printer.objects.subscribe. It simulates one or
+more `heater_virtual` objects, each carrying a `remote_token`, and sends
+`notify_proc_stat_update` noise every second like a real Moonraker.
+
+Commands on stdin (type then Enter):
+  t <C>      set the paired heater's target and notify
+  restart    notify_klippy_disconnected, target 0, notify_klippy_ready in 2 s
+  shutdown   target 0, notify_status_update, notify_klippy_shutdown
+  freeze     stop answering everything, pings included, until "thaw"
+  thaw       resume after "freeze"
+  drop       close all sockets
 """
-import asyncio, json, logging, sys
+import argparse
+import asyncio
+import json
+import logging
+import sys
 
 logging.basicConfig(
     level=logging.INFO,
@@ -24,52 +32,81 @@ log = logging.getLogger("fake-moonraker")
 try:
     import websockets
 except ImportError:
-    print("pip3 install websockets", file=sys.stderr)
+    print("pip install websockets", file=sys.stderr)
     sys.exit(1)
 
-# Текущие значения виртуальной камеры и setpoint стола (°C).
-chamber_target = 0.0
-bed_target = 0.0
+TOKEN_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
+
 clients = set()
+frozen = False
+klippy_ready = True
+heaters = {}  # object name -> {"token": str, "target": float}
+PAIRED = "heater_virtual chamber"  # the heater that gets --token
 
 
-async def broadcast_status(target_temp: float, bed_setpoint: float):
-    """Шлём notify_status_update всем подписчикам."""
-    msg = {
-        "jsonrpc": "2.0",
-        "method": "notify_status_update",
-        "params": [
-            {
-                "gcode_macro VIRTUAL_CHAMBER": {
-                    "target":      target_temp,
-                    "temperature": -1,
-                    "has_sensor":  0,
-                },
-                "heater_bed": {"temperature": 25.0, "target": bed_setpoint},
-            },
-            # eventtime
-            123456.0,
-        ],
-    }
-    payload = json.dumps(msg)
-    if not clients:
+def normalize_token(raw: str) -> str:
+    return raw.upper().replace("-", "")
+
+
+def build_heaters(token: str, count: int):
+    """First heater gets --token (or none); extra heaters get other tokens."""
+    heaters.clear()
+    heaters[PAIRED] = {"token": normalize_token(token) if token else "", "target": 0.0}
+    for i in range(1, count):
+        other = "".join(TOKEN_ALPHABET[(i * 7 + j * 3) % 32] for j in range(8))
+        heaters[f"heater_virtual extra{i}"] = {"token": other, "target": 0.0}
+
+
+def status_for(requested: dict) -> dict:
+    """Build a status object for the requested objects/fields."""
+    status = {}
+    for name, fields in requested.items():
+        if name == "webhooks":
+            status[name] = {"state": "ready" if klippy_ready else "startup"}
+        elif name in heaters:
+            h = heaters[name]
+            out = {}
+            for f in fields or ["target", "remote_token"]:
+                if f == "target":
+                    out[f] = h["target"]
+                elif f == "remote_token":
+                    out[f] = h["token"]
+            status[name] = out
+    return status
+
+
+async def send_all(msg: dict):
+    if frozen or not clients:
         return
-    log.info(f"→ notify heater_bed.target={bed_setpoint}")
-    await asyncio.gather(
-        *[c.send(payload) for c in clients], return_exceptions=True
-    )
+    payload = json.dumps(msg)
+    await asyncio.gather(*[c.send(payload) for c in list(clients)], return_exceptions=True)
 
 
-async def heartbeat():
-    """Переключает setpoint стола: ниже/выше авто-порога каждые 10 секунд."""
-    global chamber_target, bed_target
-    pattern = [0.0, 100.0]
-    idx = 0
+async def notify(method: str, params=None):
+    await send_all({"jsonrpc": "2.0", "method": method, "params": params if params is not None else []})
+
+
+async def notify_target():
+    h = heaters[PAIRED]
+    log.info(f"-> notify {PAIRED} target={h['target']}")
+    await notify("notify_status_update", [{PAIRED: {"target": h["target"]}}, 123456.0])
+
+
+async def noise():
     while True:
-        bed_target = pattern[idx % len(pattern)]
-        await broadcast_status(chamber_target, bed_target)
-        idx += 1
-        await asyncio.sleep(10)
+        await asyncio.sleep(1)
+        await notify(
+            "notify_proc_stat_update",
+            [{"moonraker_stats": {"time": 1.0, "cpu_usage": 1.2, "memory": 40000},
+              "cpu_temp": 41.0, "network": {"wlan0": {"rx_bytes": 1, "tx_bytes": 1}}}],
+        )
+
+
+def make_object_list(padding: int):
+    objs = ["webhooks", "configfile", "heater_bed", "extruder", "gcode_move", "toolhead"]
+    objs += [f"gcode_macro PAD_{i}" for i in range(padding)]
+    objs += list(heaters.keys())
+    return objs
 
 
 async def handle(ws):
@@ -78,6 +115,8 @@ async def handle(ws):
     log.info(f"+ client {peer}")
     try:
         async for raw in ws:
+            if frozen:
+                continue
             try:
                 msg = json.loads(raw)
             except Exception:
@@ -86,43 +125,28 @@ async def handle(ws):
 
             method = msg.get("method", "?")
             mid = msg.get("id")
-            log.info(f"← {method} id={mid}")
+            params = msg.get("params") or {}
+            log.info(f"<- {method} id={mid}")
+            if mid is None:
+                continue
 
-            # JSON-RPC reply (только если есть id).
-            result = {}
+            reply = {"jsonrpc": "2.0", "id": mid}
             if method == "server.connection.identify":
-                result = {"connection_id": 42}
-            elif method == "server.info":
-                result = {
-                    "klippy_connected": True,
-                    "klippy_state": "ready",
-                    "moonraker_version": "fake-1.0.0",
-                }
+                reply["result"] = {"connection_id": 42}
+            elif method in ("printer.objects.list", "printer.objects.query",
+                            "printer.objects.subscribe") and not klippy_ready:
+                reply["error"] = {"code": 503, "message": "Klippy Host not ready"}
             elif method == "printer.objects.list":
-                result = {"objects": ["gcode_macro VIRTUAL_CHAMBER", "heater_bed"]}
+                reply["result"] = {"objects": make_object_list(ARGS.objects)}
+            elif method == "printer.objects.query":
+                reply["result"] = {"eventtime": 123456.0,
+                                   "status": status_for(params.get("objects", {}))}
             elif method == "printer.objects.subscribe":
-                # Сразу отдаём текущее состояние + статус.
-                result = {
-                    "eventtime": 123456.0,
-                    "status": {
-                        "gcode_macro VIRTUAL_CHAMBER": {
-                            "target":      chamber_target,
-                            "temperature": -1,
-                            "has_sensor":  0,
-                        },
-                        "heater_bed": {"temperature": 25.0, "target": bed_target},
-                    },
-                }
+                reply["result"] = {"eventtime": 123456.0,
+                                   "status": status_for(params.get("objects", {}))}
             else:
-                result = {"ok": True}
-
-            if mid is not None:
-                resp = {"jsonrpc": "2.0", "id": mid, "result": result}
-                await ws.send(json.dumps(resp))
-
-            # После subscribe — сразу пушим notify, чтобы ESP отработал.
-            if method == "printer.objects.subscribe":
-                await broadcast_status(chamber_target, bed_target)
+                reply["result"] = {"ok": True}
+            await ws.send(json.dumps(reply))
     except websockets.ConnectionClosed:
         pass
     finally:
@@ -130,14 +154,95 @@ async def handle(ws):
         log.info(f"- client {peer}")
 
 
+def set_reading(paused: bool):
+    """Stop (or resume) reading from every socket so pings go unanswered."""
+    for c in list(clients):
+        transport = getattr(c, "transport", None)
+        if transport is None:
+            continue
+        try:
+            if paused:
+                transport.pause_reading()
+            else:
+                transport.resume_reading()
+        except Exception as exc:  # transport already closed
+            log.warning(f"freeze/thaw failed on a socket: {exc}")
+
+
+async def restart_sequence():
+    global klippy_ready
+    klippy_ready = False
+    heaters[PAIRED]["target"] = 0.0
+    await notify("notify_klippy_disconnected")
+    log.info("restart: disconnected, ready in 2 s")
+    await asyncio.sleep(2)
+    klippy_ready = True
+    await notify("notify_klippy_ready")
+    log.info("restart: ready")
+
+
+async def command_loop():
+    global frozen, klippy_ready
+    loop = asyncio.get_running_loop()
+    while True:
+        line = await loop.run_in_executor(None, sys.stdin.readline)
+        if not line:
+            await asyncio.sleep(3600)  # stdin closed; keep serving
+            continue
+        parts = line.split()
+        if not parts:
+            continue
+        cmd = parts[0].lower()
+        if cmd == "t" and len(parts) == 2:
+            try:
+                heaters[PAIRED]["target"] = float(parts[1])
+            except ValueError:
+                log.warning("usage: t <C>")
+                continue
+            await notify_target()
+        elif cmd == "restart":
+            asyncio.create_task(restart_sequence())
+        elif cmd == "shutdown":
+            heaters[PAIRED]["target"] = 0.0
+            await notify_target()
+            await notify("notify_klippy_shutdown")
+            log.info("shutdown sent")
+        elif cmd == "freeze":
+            frozen = True
+            set_reading(True)
+            log.info("frozen: no replies, no pongs")
+        elif cmd == "thaw":
+            frozen = False
+            set_reading(False)
+            log.info("thawed")
+        elif cmd == "drop":
+            log.info("dropping all sockets")
+            await asyncio.gather(*[c.close() for c in list(clients)], return_exceptions=True)
+        else:
+            log.warning("commands: t <C>, restart, shutdown, freeze, thaw, drop")
+
+
 async def main():
-    log.info("listening on 0.0.0.0:7125 (path=/websocket)")
-    log.info("press 't' + Enter in another shell? — see heartbeat (auto 10s flip 0↔70)")
-    async with websockets.serve(handle, "0.0.0.0", 7125):
-        await heartbeat()
+    build_heaters(ARGS.token, ARGS.heaters)
+    log.info(f"listening on 0.0.0.0:{ARGS.port} (path=/websocket)")
+    log.info(f"paired heater: {PAIRED!r} token={ARGS.token or '(none, unpaired)'}")
+    # ping_interval=None: the Remote does the pinging, not this server.
+    async with websockets.serve(handle, "0.0.0.0", ARGS.port, ping_interval=None):
+        await asyncio.gather(noise(), command_loop())
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--port", type=int, default=7125)
+    parser.add_argument("--token", default="",
+                        help="remote_token of the paired heater, XXXX-XXXX "
+                             "(default: none, the unpaired case)")
+    parser.add_argument("--heaters", type=int, default=1,
+                        help="number of heater_virtual objects; extras get other tokens")
+    parser.add_argument("--objects", type=int, default=150,
+                        help="padding objects in printer.objects.list")
+    ARGS = parser.parse_args()
     try:
         asyncio.run(main())
     except KeyboardInterrupt:

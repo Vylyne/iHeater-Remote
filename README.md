@@ -5,9 +5,9 @@ iHeater controller. It drives the iHeater pulse input over one GPIO,
 exposes a small local web UI, and recreates the standalone iHeater mode
 button behavior on an ESP32-C3 Super Mini.
 
-This is a downstream fork of iHeater Link. It intentionally removes the
-cloud/portal workflow from the active firmware build while keeping the
-upstream source layout close enough to make future syncs practical.
+It is local-only: there is no cloud, portal or Internet dependency. It
+started as a downstream fork of iHeater Link and no longer carries any
+upstream code.
 
 ## Credits
 
@@ -23,13 +23,13 @@ train.
 
 ## What the Local Remote Does
 
-- Runs without iDryer cloud, portal MQTT, or Home Assistant.
-- Can bind directly to one local printer source: Bambu Lab LAN MQTT or
-  Moonraker/Klipper. The selected source and its credentials live in ESP32
-  NVS; no portal account, cloud broker, or Internet connection is involved.
-- With Klipper, can appear as a native chamber heater (`M141`/`M191`,
-  Mainsail target box) via the bundled
-  [Klipper module](klipper/README.md).
+- Runs without any cloud, portal MQTT or Home Assistant.
+- Has one control source at a time, chosen on the Setup page:
+  **Manual**, or **Klipper (Moonraker)**. The Remote runs its own Moonraker
+  WebSocket client and follows one `heater_virtual` heater that you pair by
+  token. Settings and the API key live in ESP32 NVS.
+- With Klipper, appears as a native chamber heater (`M141`/`M191`, Mainsail
+  target box) via the bundled [Klipper module](klipper/README.md).
 - Serves a local web UI for selecting the heater mode.
 - Creates a captive-portal access point if it cannot join configured
   Wi-Fi.
@@ -38,8 +38,6 @@ train.
   selection.
 - Uses the ESP32-C3 Super Mini blue LED to indicate the selected mode by
   flashing the mode number in quick bursts.
-- Keeps the upstream iHeater Link code present behind its original build
-  environments so upstream changes can still be pulled and reviewed.
 
 ## Hardware
 
@@ -169,35 +167,44 @@ Web UI:
   compact cards and a navigation rail inspired by DragonBreath's local SPA.
 - Live dashboard state is pushed over a local WebSocket at
   `ws://<device-ip>:81/`; the dashboard does not poll a status HTTP endpoint.
-- **Setup** follows DragonBreath RC3’s local-source model: choose Manual,
-  Bambu LAN, or Moonraker; only one source is active. Non-secret fields are
-  prefilled, while a blank access code/API key preserves the stored secret.
-  Wi-Fi changes and source changes share the same page without requiring an
-  Internet connection or overwriting Wi-Fi accidentally.
-- **Moonraker:** with the Klipper chamber heater installed
-  ([klipper/README.md](klipper/README.md)), the Klipper chamber target
-  (`M141`/`M191`, Mainsail) is followed directly, and `0` means off even if
-  the bed is hot. Without it, the bed rule below applies.
-- **Bed rule** (Bambu, and Moonraker without the chamber heater): the iHeater
-  applies the configured auto target only while the printer bed **setpoint**
-  meets the configured threshold (40–120 °C). Bambu is read-only: no printer
-  control commands are sent.
+- **Setup** has a **Control source** choice: Manual or Klipper (Moonraker).
+  For Klipper, enter the host and port, and tick **TLS** to use a secure
+  connection (the port switches between 7125 and 443; TLS on port 7125 is
+  rejected). The API key is write-only: a blank field keeps the stored key.
+  Wi-Fi and source settings share the page without overwriting each other.
+- **Pairing:** the Pairing card shows this Remote's token (`XXXX-XXXX`).
+  Add it to your `[heater_virtual]` section as `remote_token`
+  ([klipper/README.md](klipper/README.md)); the Remote follows only the
+  heater with that token. **Generate a new token on save** replaces it. To
+  keep an old token after a wipe, enter it manually in the Pairing card.
+  Until a heater carries the token, the dashboard shows "not paired" with
+  the token, the Remote never heats from Klipper, and manual heat still
+  works.
+- **Status:** the status JSON on the WebSocket includes `source`,
+  `moonrakerState` (`disconnected`, `connecting`, `klippy-not-ready` or
+  `ready`), `heaterObject` and `moonrakerError` (what failed, such as a TLS
+  error or "not paired").
+- **TLS:** the certificate is verified against embedded Let's Encrypt roots
+  (ISRG Root X1, X2, YE and YR) with a host-name check. There is no
+  skip-verify option. A server using another CA needs that root added in
+  `src/standalone/MoonrakerCa.h`.
+- **Source switching:** a manual press (web UI or BOOT button) switches the
+  source to Manual. Boot, the timer and OTA do not.
 - **iHeater target range** (Setup page, default Min 45 / Max 85): records
   the range your iHeater firmware accepts. It does not change any setting
-  on the iHeater. Every target the Remote sends (Klipper, bed rule, manual
-  modes) is clamped to it. Stock v0.5.0 iHeater firmware accepts 45–90,
-  ignores other targets, and faults when the air reaches its
-  `MAX_AIR_TEMP` (90), so we recommend a Max no higher than 80.
-- **Moonraker watchdog:** if no Moonraker update arrives for 30 s while
-  connected (e.g. after a Klipper restart, which drops subscriptions), the
-  Remote reconnects to resubscribe. Heat is not turned off at this point;
-  the link-loss rule below decides.
-- **Link loss:** while Moonraker or Bambu is the source and the Remote is
-  heating from it, a lost printer link (disconnected, or Moonraker silent
-  for 30 s) holds the last target, so a short Wi-Fi drop does not cool the
-  chamber mid-print. If the link is still down after 10 minutes, heat
-  turns off. Any real target from the printer, including `0`, applies
-  immediately. Manual heat is never affected.
+  on the iHeater. Every target the Remote sends (Klipper or manual modes)
+  is clamped to it. Stock v0.5.0 iHeater firmware accepts 45–90, ignores
+  other targets, and faults when the air reaches its `MAX_AIR_TEMP` (90),
+  so we recommend a Max no higher than 80.
+- **Liveness:** the Remote sends a WebSocket ping every 10 s and reconnects
+  after 2 missed pongs. It also queries the heater every 30 s. Reconnects
+  back off from 2 s, doubling to 30 s. After a Klipper restart, the Remote
+  rediscovers the heater and resubscribes.
+- **Link loss:** while Klipper is the source and the Remote is heating from
+  it, a lost link holds the last target, so a short Wi-Fi drop does not
+  cool the chamber mid-print. If there is no healthy link for 10 minutes,
+  printer-commanded heat turns off. Any real target from the printer,
+  including `0`, applies immediately. Manual heat is never affected.
 - Tap a mode button or Stop, then choose a timer preset or a custom duration.
   `0` means Until Off.
 - Selecting a mode starts the current timer from that moment. Changing
@@ -215,29 +222,18 @@ LED:
 - Off mode leaves the blue LED off.
 - Active modes flash the mode number, pause, then repeat.
 
-## Keeping Sync With Upstream
-
-This fork keeps the upstream project shape mostly intact:
-
-- Original integration firmware remains in `src/main.cpp` behind the
-  normal upstream build environments.
-- iHeater Remote is selected by the `IHEATER_REMOTE_LOCAL` build flag.
-- The local-only implementation lives under `src/standalone/`.
-- The downstream PlatformIO environment is isolated as
-  `esp32c3-super-mini-remote`.
-
-Suggested sync workflow:
-
-```bash
-git remote add upstream https://github.com/pavluchenkor/iHeater-Link.git
-git fetch upstream
-git merge upstream/main
-```
-
-Expect most downstream conflicts to be limited to `README.md`,
-`platformio.ini`, `src/main.cpp`, and `src/standalone/`.
-
 [![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/wildtang3nt)
+
+## Updating from 2.0
+
+Settings from 2.0 (idryer-core) carry over once: the Remote reads them at
+the first boot, saves them in its own namespace and erases the old ones. A
+Moonraker setup from 2.0 becomes source Klipper with the same host, port,
+TLS flag and key.
+
+On the Klipper side, add `remote_token` (shown on the Setup page) to your
+`[heater_virtual]` section and remove the old `VIRTUAL_CHAMBER` macro. Until
+you do, the Remote shows "not paired". See [klipper/README.md](klipper/README.md).
 
 ## Notes
 

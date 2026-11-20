@@ -1,81 +1,102 @@
 # fake_moonraker.py
 
-Локальный заглушечный WebSocket-сервер, имитирующий Moonraker для проверки
-интеграции iHeater Link без реального Klipper/принтера.
+A fake Moonraker WebSocket server for bench-testing iHeater Remote without
+a real Klipper printer. It speaks the same JSON-RPC the Remote uses and
+lets you force the awkward cases: a Klipper restart, a frozen link, an
+unpaired Remote, noisy traffic and a large object list.
 
-## Назначение
+## What it does
 
-Проверка цепочки:
+- Listens on `ws://0.0.0.0:7125/websocket` (change with `--port`).
+- Answers `server.connection.identify`, `printer.objects.list`,
+  `printer.objects.query` and `printer.objects.subscribe`. List, query and
+  subscribe return a JSON-RPC error while the simulated Klipper is not
+  ready.
+- Simulates `heater_virtual chamber`, which carries the `--token` value as
+  its `remote_token`. With `--heaters N`, extra heaters get other tokens.
+- Sends `notify_proc_stat_update` every second as noise, like a real
+  Moonraker.
+- Pads `printer.objects.list` with `--objects` extra objects (default 150).
 
-```
-fake_moonraker → ESP32 (LinkIntegrationsManager → onVirtualChamberUpdate)
-              → auto_heat (filament-type lookup в menu)
-              → RmtOutputAdapter (RMT pulse) → STM32 iHeater
-              → mirrorRmtToStatus → MQTT status → портал
-```
-
-## Что делает
-
-- Слушает `ws://0.0.0.0:7125/websocket`.
-- Отвечает на JSON-RPC: `server.connection.identify`, `server.info`,
-  `printer.objects.list`, `printer.objects.subscribe`.
-- После `printer.objects.subscribe` шлёт `notify_status_update` с объектом
-  `heater_bed.target` всем подписчикам.
-- Каждые 10 секунд переключает setpoint стола между `0.0` и `100.0` °C,
-  провоцируя локальный авто-контроль на ON/OFF цикл.
-
-## Запуск
+## Run
 
 ```bash
-pip3 install --user websockets
-python3 tools/fake_moonraker.py
+pip install websockets
+python tools/fake_moonraker/fake_moonraker.py --token ABCD-2345
 ```
 
-В логе появится:
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--port` | `7125` | Listening port |
+| `--token XXXX-XXXX` | none | `remote_token` of the paired heater. No token means the unpaired case. |
+| `--heaters N` | `1` | Number of `heater_virtual` objects; extras get other tokens |
+| `--objects N` | `150` | Padding objects in the object list |
 
-```
-listening on 0.0.0.0:7125 (path=/websocket)
-+ client 192.168.0.x
-← server.connection.identify id=1
-← printer.objects.subscribe id=2
-→ notify heater_bed.target=0.0
-→ notify heater_bed.target=100.0
-```
+Type these commands on stdin, then Enter:
 
-## Настройка локальной интеграции
+| Command | Effect |
+| --- | --- |
+| `t <C>` | Set the paired heater's target and notify |
+| `restart` | Send `notify_klippy_disconnected`, set the target to 0, then send `notify_klippy_ready` after 2 s |
+| `shutdown` | Set the target to 0, send `notify_status_update`, then `notify_klippy_shutdown` |
+| `freeze` | Stop answering everything, pings included, until `thaw` |
+| `thaw` | Resume after `freeze` |
+| `drop` | Close all sockets |
 
-Откройте `http://<iHeater-IP>/setup`, выберите **Klipper (Moonraker)** и укажите:
+## Set up the Remote
 
-| Поле     | Значение            |
-| -------- | ------------------- |
-| host     | `<IP вашего мака>`  |
-| port     | `7125`              |
-| auto target / bed threshold | значения для проверки авто-режима |
+Open `http://<iHeater-IP>/setup`, set **Control source** to **Klipper
+(Moonraker)** and enter:
 
-IP мака:
+| Field | Value |
+| --- | --- |
+| Host | the IP of the computer running the fake |
+| Port | `7125` |
+| TLS | off |
 
-```bash
-ipconfig getifaddr en0
-```
+The Pairing card shows the Remote's token (`XXXX-XXXX`). Start the fake
+with that token. The Remote and the computer must be on the same Wi-Fi
+network.
 
-ESP32 и мак должны быть в одной WiFi-сети.
+## Bench checklist
 
-Выбор Moonraker локально выключает Bambu; источник управления всегда один.
+Each item matches a Review Focus scenario in
+`docs/design/2026-11-19-local-only-cleanup-plan.md`. Watch the Serial log
+(`[MOON]` lines) and the dashboard.
 
-## Ожидаемый Serial-вывод на ESP
+1. **Restart while heating.** Start with the Remote's token, enter
+   `t 60`, wait for the Remote to heat, then enter `restart`.
+   - The Remote holds, rediscovers and resubscribes.
+   - The new target (0) applies within seconds, not after 10 min.
+2. **Frozen link (half-open socket).** Enter `t 60`, then `freeze`.
+   - Missed pongs force a reconnect (about 20 s: pings every 10 s, two
+     missed).
+   - Reconnect backoff grows from 2 s to the 30 s cap.
+   - If you leave it frozen, heat cuts 10 min after the link was last
+     healthy.
+   - `thaw` lets the Remote reconnect.
+3. **Unpaired.** Start without `--token`, or with a different one.
+   - The Remote never heats from Klipper.
+   - The dashboard shows the "not paired" text with the token.
+   - Manual heat still works.
+4. **Noise and a large list.** Run with the defaults.
+   - `notify_proc_stat_update` arrives at about 1 Hz and is skipped.
+   - The 150-object list is handled without a crash or heap growth.
+   - Send malformed JSON from another client; it must be ignored.
+5. **Shutdown.** Enter `t 60`, then `shutdown`. Heat stops at once, and
+   the Remote waits for `notify_klippy_ready` (use `restart` to recover).
+6. **Several heaters.** Run with `--heaters 3`. The Remote pairs only with
+   the heater whose `remote_token` matches.
 
-```
-[INFO ] MQTT: ← .../commands/link_integration ... {"type":"moonraker", "enabled":true, ...}
-[CMD  ] link_integration: switched active to moonraker
-[REMOTE] moonraker auto target=60.0C
-[DEBUG] MQTT: → .../status (...): {"unitsInfo":[{"mode":"Drying","target":{"temperature":70 ...}}]}
-```
+Also check the real server (`wss://hestia.brunton.ca`, TLS on port 443)
+with the real `remote_token`.
 
-## Диагностика
+## Troubleshooting
 
-- ESP не подключается → проверьте firewall на маке (System Settings →
-  Network → Firewall → разрешить входящие подключения для `python3`).
-- Подключение установилось, но `heater_bed.target` не приходит → ESP не шлёт
-  `printer.objects.subscribe`. Проверьте host и порт в локальном `/setup`.
-- Pylance ругается «websockets не разрешается» — ложноположительное:
-  библиотека стоит в `~/Library/Python/3.9/`, runtime её видит.
+- The Remote cannot connect: check the computer's firewall allows
+  incoming connections for Python on the port.
+- It connects but never heats: the Setup page token must match
+  `--token`. The `moonrakerError` field says why (for example "not paired").
+- `freeze` relies on pausing the socket transport. If your `websockets`
+  version has no `transport` attribute on the connection, the log shows a
+  warning and pongs keep flowing.
