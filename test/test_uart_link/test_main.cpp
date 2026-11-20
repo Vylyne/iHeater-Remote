@@ -3,6 +3,7 @@
 #include <unity.h>
 
 #include "UartFrames.h"
+#include "UartPollPolicy.h"
 #include "UartRegisters.h"
 
 extern "C" {
@@ -235,6 +236,170 @@ void test_uart_range_empty() {
   TEST_ASSERT_EQUAL(0, uartTargetT10(30.0f, {11, 40}, 450, 850));
 }
 
+// --- UartPollPolicy ---------------------------------------------------------
+static Reply inputsReply(uint16_t proto = 1, IheaterState state = IheaterState::Idle,
+                         uint32_t uptime = 100, int16_t airTarget = 0, bool clearable = false) {
+  Reply r;
+  r.kind = ReplyKind::Ok;
+  r.count = kInputCount;
+  r.regs[0x00] = proto;
+  r.regs[0x03] = (uint16_t)state;
+  r.regs[0x05] = clearable ? 1 : 0;
+  r.regs[0x0C] = (uint16_t)airTarget;
+  r.regs[0x10] = (uint16_t)(uptime & 0xFFFF);
+  r.regs[0x11] = (uint16_t)(uptime >> 16);
+  return r;
+}
+static Reply settingsReply() {
+  Reply r;
+  r.kind = ReplyKind::Ok;
+  r.count = kSettingsCount;
+  r.regs[2] = 450;
+  r.regs[3] = 850;
+  return r;
+}
+static Reply exceptionReply(uint8_t code) {
+  Reply r;
+  r.kind = ReplyKind::Exception;
+  r.exception = code;
+  return r;
+}
+static void feedInputs(UartPollPolicy &p, const Reply &r, uint32_t now = 0) {
+  p.onReply(p.cycleRead(), r, now);
+}
+static void feedSettings(UartPollPolicy &p, uint32_t now = 0) {
+  p.onReply({PollKind::ReadSettings, kSettingsBase, kSettingsCount}, settingsReply(), now);
+}
+
+void test_cycle_read_is_input_block() {
+  UartPollPolicy p;
+  PollRequest r = p.cycleRead();
+  TEST_ASSERT_EQUAL(PollKind::ReadInputs, r.kind);
+  TEST_ASSERT_EQUAL_HEX16(0x0000, r.addr);
+  TEST_ASSERT_EQUAL(22, r.value);
+}
+
+void test_no_followup_before_snapshot() {
+  UartPollPolicy p;
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+}
+
+void test_reads_settings_after_first_snapshot() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply());
+  PollRequest r = p.followUp(0);
+  TEST_ASSERT_EQUAL(PollKind::ReadSettings, r.kind);
+  TEST_ASSERT_EQUAL_HEX16(0x0200, r.addr);
+  TEST_ASSERT_EQUAL(10, r.value);
+}
+
+void test_no_write_before_desired() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply());
+  feedSettings(p);
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+}
+
+void test_writes_target_when_different() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply());
+  feedSettings(p);
+  p.setDesired(60.0f, {45, 85});
+  PollRequest r = p.followUp(0);
+  TEST_ASSERT_EQUAL(PollKind::WriteTarget, r.kind);
+  TEST_ASSERT_EQUAL_HEX16(0x0100, r.addr);
+  TEST_ASSERT_EQUAL(600, r.value);
+  feedInputs(p, inputsReply(1, IheaterState::Heating, 101, 600));
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+}
+
+void test_off_written_before_limits() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply(1, IheaterState::Heating, 100, 600));
+  p.setDesired(0.0f, {45, 85});
+  PollRequest r = p.followUp(0);
+  TEST_ASSERT_EQUAL(PollKind::WriteTarget, r.kind);
+  TEST_ASSERT_EQUAL(0, r.value);
+}
+
+void test_nonzero_waits_for_limits() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply());
+  p.setDesired(60.0f, {45, 85});
+  TEST_ASSERT_EQUAL(PollKind::ReadSettings, p.followUp(0).kind);
+}
+
+void test_no_target_write_while_faulted() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply(1, IheaterState::Fault, 100, 0, false));
+  feedSettings(p);
+  p.setDesired(60.0f, {45, 85});
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+}
+
+void test_target_refusal_not_retried() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply());
+  feedSettings(p);
+  p.setDesired(60.0f, {45, 85});
+  PollRequest w = p.followUp(0);
+  TEST_ASSERT_EQUAL(600, w.value);
+  p.onReply(w, exceptionReply(0x03), 10);
+  feedInputs(p, inputsReply(), 200);
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(200).kind);
+  p.setDesired(65.0f, {45, 85});
+  PollRequest w2 = p.followUp(200);
+  TEST_ASSERT_EQUAL(PollKind::WriteTarget, w2.kind);
+  TEST_ASSERT_EQUAL(650, w2.value);
+}
+
+void test_restart_rereads_settings() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply(1, IheaterState::Idle, 100));
+  feedSettings(p);
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+  feedInputs(p, inputsReply(1, IheaterState::Idle, 3), 200);
+  TEST_ASSERT_EQUAL(PollKind::ReadSettings, p.followUp(200).kind);
+}
+
+void test_proto_mismatch_never_writes() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply(2));
+  p.setDesired(60.0f, {45, 85});
+  TEST_ASSERT_FALSE(p.protocolSupported());
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+  feedSettings(p);
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+}
+
+void test_empty_range_desired_zero() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply());
+  feedSettings(p);
+  p.setDesired(30.0f, {11, 40});
+  TEST_ASSERT_EQUAL(0, p.desiredT10());
+  TEST_ASSERT_TRUE(p.rangeEmpty());
+}
+
+void test_link_status_sequence() {
+  UartPollPolicy p;
+  TEST_ASSERT_EQUAL(LinkStatus::Waiting, p.link(0));
+  feedInputs(p, inputsReply(), 100);
+  TEST_ASSERT_EQUAL(LinkStatus::Up, p.link(100));
+  p.onNoReply(p.cycleRead(), 300);
+  p.onNoReply(p.cycleRead(), 500);
+  TEST_ASSERT_EQUAL(LinkStatus::Up, p.link(1000));
+  TEST_ASSERT_EQUAL(LinkStatus::NoReply, p.link(1200));
+  feedInputs(p, inputsReply(), 1400);
+  TEST_ASSERT_EQUAL(LinkStatus::Up, p.link(1400));
+}
+
+void test_link_status_wraparound() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply(), 0xFFFFFF00u);
+  TEST_ASSERT_EQUAL(LinkStatus::Up, p.link(0x00000100u));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_build_read_vector);
@@ -257,5 +422,19 @@ int main() {
   RUN_TEST(test_uart_target_clamps);
   RUN_TEST(test_uart_target_off);
   RUN_TEST(test_uart_range_empty);
+  RUN_TEST(test_cycle_read_is_input_block);
+  RUN_TEST(test_no_followup_before_snapshot);
+  RUN_TEST(test_reads_settings_after_first_snapshot);
+  RUN_TEST(test_no_write_before_desired);
+  RUN_TEST(test_writes_target_when_different);
+  RUN_TEST(test_off_written_before_limits);
+  RUN_TEST(test_nonzero_waits_for_limits);
+  RUN_TEST(test_no_target_write_while_faulted);
+  RUN_TEST(test_target_refusal_not_retried);
+  RUN_TEST(test_restart_rereads_settings);
+  RUN_TEST(test_proto_mismatch_never_writes);
+  RUN_TEST(test_empty_range_desired_zero);
+  RUN_TEST(test_link_status_sequence);
+  RUN_TEST(test_link_status_wraparound);
   return UNITY_END();
 }

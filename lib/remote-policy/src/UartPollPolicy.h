@@ -1,0 +1,80 @@
+#pragma once
+
+#include <stdint.h>
+
+#include "RemotePolicy.h"
+#include "UartFrames.h"
+#include "UartRegisters.h"
+
+// Poll policy for the Remote's Modbus master. Pure decisions, no Arduino
+// dependency. Each cycle the caller sends cycleRead(), feeds the outcome to
+// onReply()/onNoReply(), then asks followUp() for at most one more request.
+namespace iheaterlink::policy {
+
+constexpr uint32_t kPollPeriodMs = 200;
+constexpr uint32_t kReplyTimeoutMs = 200;
+constexpr uint32_t kNoReplyAfterMs = 1000;
+constexpr uint32_t kRestartWindowMs = 10000;
+
+enum class LinkStatus : uint8_t { Waiting, Up, Restarting, NoReply };
+enum class ClearPhase : uint8_t { Idle, AwaitRestart, Blocked };
+enum class PollKind : uint8_t { None, ReadInputs, ReadSettings, WriteTarget, WriteClear };
+struct PollRequest {
+  PollKind kind;
+  uint16_t addr;
+  uint16_t value;  // register count for reads
+};
+
+class UartPollPolicy {
+ public:
+  // The first call makes the desired target known.
+  void setDesired(float targetC, TargetRange setup);
+  PollRequest cycleRead() const;
+  PollRequest followUp(uint32_t nowMs) const;
+  void onReply(const PollRequest &req, const Reply &reply, uint32_t nowMs);
+  void onNoReply(const PollRequest &req, uint32_t nowMs);
+  LinkStatus link(uint32_t nowMs) const;
+
+  bool hasSnapshot() const { return hasSnapshot_; }
+  const IheaterSnapshot &snapshot() const { return snapshot_; }
+  bool hasLimits() const { return hasLimits_; }
+  const IheaterLimits &limits() const { return limits_; }
+  bool protocolSupported() const { return hasSnapshot_ && snapshot_.proto == 1; }
+  bool desiredKnown() const { return desiredKnown_; }
+  uint16_t desiredT10() const { return desiredT10_; }
+  bool rangeEmpty() const { return rangeEmpty_; }
+
+  // Automatic fault clearing is added in a later task; inert for now.
+  ClearPhase clearPhase() const { return clearPhase_; }
+  uint8_t blockedFault() const { return blockedFault_; }
+  bool lastClearOk() const { return lastClearOk_; }
+
+ private:
+  void recomputeDesired();
+
+  IheaterSnapshot snapshot_{};
+  IheaterLimits limits_{};
+  bool hasSnapshot_ = false;
+  bool hasLimits_ = false;
+  bool lastInputsOk_ = false;
+
+  bool desiredKnown_ = false;
+  float desiredC_ = 0.0f;
+  TargetRange setup_{0, 0};
+  uint16_t desiredT10_ = 0;
+  bool rangeEmpty_ = false;
+
+  bool refusalKnown_ = false;
+  uint16_t refusedT10_ = 0;
+  IheaterState refusedState_ = IheaterState::Booting;
+
+  bool haveOk_ = false;
+  uint32_t lastOkMs_ = 0;
+
+  ClearPhase clearPhase_ = ClearPhase::Idle;
+  uint32_t clearSentMs_ = 0;
+  uint8_t blockedFault_ = 0;
+  bool lastClearOk_ = false;
+};
+
+}  // namespace iheaterlink::policy
