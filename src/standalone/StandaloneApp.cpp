@@ -712,6 +712,14 @@ bool applySetupForm(String &error) {
   }
   s_settings.source = next.source;
   s_settings.moon = next.moon;
+  // Apply the saved source live now, so a later failed save cannot leave the
+  // output or the link following a source that is no longer stored.
+  if (klipperSource()) {
+    s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
+  } else {
+    s_moonraker.stop();
+    applyIntegrationTarget(0.0f, "binding disabled", "manual");
+  }
   if (next.pairToken != s_settings.pairToken) {
     if (!savePairToken(next.pairToken.c_str())) {
       error = "Could not save the pairing token.";
@@ -721,6 +729,8 @@ bool applySetupForm(String &error) {
     char shown[policy::kPairTokenLen + 2];
     policy::formatPairToken(s_settings.pairToken.c_str(), shown);
     Serial.printf("[REMOTE] pairing token set to %s\n", shown);
+    if (klipperSource())  // follow the link with the newly saved token
+      s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
   }
   if ((minC != s_range.minC || maxC != s_range.maxC) && !saveRange(minC, maxC)) {
     error = "Could not save the target range.";
@@ -732,13 +742,6 @@ bool applySetupForm(String &error) {
       return false;
     }
     scheduleRestart();
-  }
-
-  if (klipperSource()) {
-    s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
-  } else {
-    s_moonraker.stop();
-    applyIntegrationTarget(0.0f, "binding disabled", "manual");
   }
   return true;
 }
