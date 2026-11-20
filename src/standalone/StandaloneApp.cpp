@@ -135,6 +135,11 @@ constexpr uint32_t kResumeRefreshMs = 1000;
 // boot applyMode(0) cannot overwrite the record before it is read.
 bool s_resumeLocked = false;
 uint32_t s_resumeRefreshAtMs = 0;
+// Unhealthy time of the Klipper link on the UART output, carried across a
+// software restart so a crash loop cannot restart the 10-minute link-loss
+// grace at every boot. Same trust rule as s_resume (policy::carriedLinkLoss).
+RTC_NOINIT_ATTR policy::LinkLossRecord s_linkLoss;
+uint32_t s_linkLossRefreshAtMs = 0;
 // Set once a Setup save has switched the Output: the restart is pending and no
 // heat may be started on the old output in the meantime.
 bool s_outputSwitchPending = false;
@@ -463,7 +468,19 @@ void updateLinkSafety() {
   const bool healthy = !printerSource || s_moonraker.healthy();
   if (healthy) {
     s_linkHealthyAtMs = now;
+    if (s_linkLoss.magic != 0)
+      policy::clearLinkLoss(s_linkLoss);
     return;
+  }
+  // Keep the unhealthy time in RTC memory while it runs, so it is already there
+  // if the next restart is a crash. Pulse mode does not carry it.
+  if (s_outputKind != OutputKind::Uart) {
+    if (s_linkLoss.magic != 0)
+      policy::clearLinkLoss(s_linkLoss);
+  } else if (policy::intervalElapsed(now, s_linkLossRefreshAtMs,
+                                     kResumeRefreshMs)) {
+    s_linkLossRefreshAtMs = now;
+    policy::sealLinkLoss(s_linkLoss, now - s_linkHealthyAtMs);
   }
   const bool heatingFromPrinter =
       s_output->getLastCommand().mode == ControllerOutputMode::TargetTemperature &&
@@ -1474,7 +1491,29 @@ void bootDecision() {
   if (klipperSource()) {
     // Pulse is already off (early boot applyMode). UART writes nothing until
     // the iHeater's own target has been read back, or Moonraker delivers one.
-    s_klipperRecoveryPending = s_outputKind == OutputKind::Uart;
+    if (s_outputKind == OutputKind::Uart) {
+      // Continue the link-loss count from before a software restart. Sealed
+      // straight away so a crash before the first refresh keeps it.
+      uint32_t carriedMs = 0;
+      const bool carried =
+          policy::carriedLinkLoss(s_linkLoss, softwareReset(), carriedMs);
+      s_linkHealthyAtMs = policy::linkLossBaselineMs(carriedMs);
+      policy::sealLinkLoss(s_linkLoss, carriedMs);
+      if (carried && policy::linkLossExpired(carriedMs, policy::kLinkLossGraceMs)) {
+        // The printer has been gone for the whole grace: do not adopt the
+        // iHeater's target, switch it off.
+        Serial.printf("[REMOTE] link loss carried over restart: %us, heat off\n",
+                      (unsigned)(carriedMs / 1000u));
+        applyIntegrationTarget(0.0f, "link lost 10 min (carried)", "link-lost");
+        return;
+      }
+      if (carried)
+        Serial.printf("[REMOTE] link loss carried over restart: %us\n",
+                      (unsigned)(carriedMs / 1000u));
+      s_klipperRecoveryPending = true;
+    } else {
+      s_klipperRecoveryPending = false;
+    }
     writeResumeRecord();  // mode 0: a stale Manual record must not outlive this
     return;
   }

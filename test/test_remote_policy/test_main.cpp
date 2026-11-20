@@ -270,6 +270,81 @@ void test_setup_save_rule() {
   TEST_ASSERT_TRUE(setupSaveStopsHeat(true, false, false, false, true));
 }
 
+// --- Link-loss carry across a software restart -----------------------------
+static LinkLossRecord sealedLoss(uint32_t unhealthyMs) {
+  LinkLossRecord r{};
+  sealLinkLoss(r, unhealthyMs);
+  return r;
+}
+
+void test_link_loss_carry_continues_accumulated_time() {
+  uint32_t carried = 0;
+  TEST_ASSERT_TRUE(carriedLinkLoss(sealedLoss(540000), true, carried));
+  TEST_ASSERT_EQUAL_UINT32(540000, carried);
+  TEST_ASSERT_FALSE(linkLossExpired(carried, kLinkLossGraceMs));
+  // Boot counts from millis() 0, so the baseline is 0 - carried: the cut comes
+  // after the remaining 60 s, not a fresh 10 minutes.
+  const uint32_t since = linkLossBaselineMs(carried);
+  TEST_ASSERT_FALSE(cutHeatForLinkLoss(true, true, false, 59000, since, kLinkLossGraceMs));
+  TEST_ASSERT_TRUE(cutHeatForLinkLoss(true, true, false, 60000, since, kLinkLossGraceMs));
+}
+
+void test_link_loss_carry_already_expired() {
+  uint32_t carried = 0;
+  TEST_ASSERT_TRUE(carriedLinkLoss(sealedLoss(kLinkLossGraceMs), true, carried));
+  TEST_ASSERT_TRUE(linkLossExpired(carried, kLinkLossGraceMs));
+  TEST_ASSERT_TRUE(carriedLinkLoss(sealedLoss(kLinkLossGraceMs + 5000), true, carried));
+  TEST_ASSERT_TRUE(linkLossExpired(carried, kLinkLossGraceMs));
+  TEST_ASSERT_FALSE(linkLossExpired(kLinkLossGraceMs - 1, kLinkLossGraceMs));
+}
+
+void test_link_loss_carry_saturates() {
+  // A very long outage must not wrap the stored value back below the grace.
+  uint32_t carried = 0;
+  TEST_ASSERT_TRUE(carriedLinkLoss(sealedLoss(0xFFFFFFF0u), true, carried));
+  TEST_ASSERT_TRUE(linkLossExpired(carried, kLinkLossGraceMs));
+  const uint32_t since = linkLossBaselineMs(carried);
+  TEST_ASSERT_TRUE(cutHeatForLinkLoss(true, true, false, 3000, since, kLinkLossGraceMs));
+}
+
+void test_link_loss_carry_rejects_power_on() {
+  uint32_t carried = 123;
+  TEST_ASSERT_FALSE(carriedLinkLoss(sealedLoss(540000), false, carried));
+  TEST_ASSERT_EQUAL_UINT32(0, carried);
+}
+
+void test_link_loss_carry_rejects_garbage() {
+  uint32_t carried = 123;
+  LinkLossRecord zero{};
+  TEST_ASSERT_FALSE(carriedLinkLoss(zero, true, carried));
+  TEST_ASSERT_EQUAL_UINT32(0, carried);
+  LinkLossRecord r = sealedLoss(540000);
+  r.unhealthyMs ^= 1;  // bad check
+  TEST_ASSERT_FALSE(carriedLinkLoss(r, true, carried));
+  r = sealedLoss(540000);
+  r.magic ^= 1;
+  TEST_ASSERT_FALSE(carriedLinkLoss(r, true, carried));
+  r = sealedLoss(540000);
+  r.check ^= 0x80000000u;
+  TEST_ASSERT_FALSE(carriedLinkLoss(r, true, carried));
+}
+
+void test_link_loss_carry_healthy_clears() {
+  LinkLossRecord r = sealedLoss(540000);
+  clearLinkLoss(r);
+  uint32_t carried = 123;
+  TEST_ASSERT_FALSE(carriedLinkLoss(r, true, carried));
+  TEST_ASSERT_EQUAL_UINT32(0, carried);
+}
+
+void test_link_loss_carry_zero_is_valid() {
+  // Sealed at boot with nothing accumulated yet: counting restarts from 0.
+  uint32_t carried = 123;
+  TEST_ASSERT_TRUE(carriedLinkLoss(sealedLoss(0), true, carried));
+  TEST_ASSERT_EQUAL_UINT32(0, carried);
+  TEST_ASSERT_FALSE(linkLossExpired(carried, kLinkLossGraceMs));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_token_normalize);
@@ -311,5 +386,12 @@ int main() {
   RUN_TEST(test_resume_rejects_bad_mode);
   RUN_TEST(test_resume_rejects_expired_timer);
   RUN_TEST(test_setup_save_rule);
+  RUN_TEST(test_link_loss_carry_continues_accumulated_time);
+  RUN_TEST(test_link_loss_carry_already_expired);
+  RUN_TEST(test_link_loss_carry_saturates);
+  RUN_TEST(test_link_loss_carry_rejects_power_on);
+  RUN_TEST(test_link_loss_carry_rejects_garbage);
+  RUN_TEST(test_link_loss_carry_healthy_clears);
+  RUN_TEST(test_link_loss_carry_zero_is_valid);
   return UNITY_END();
 }

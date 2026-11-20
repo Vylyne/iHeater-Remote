@@ -128,6 +128,36 @@ void sealResume(ResumeRecord &r);
 // mode <= maxMode, and not an expired timer (timerMinutes > 0, remainingS == 0).
 bool resumeValid(const ResumeRecord &r, bool softwareReset, uint8_t maxMode);
 
+// --- Printer link-loss carry across a software restart ------------------------
+// The time the printer link has been unhealthy, kept in RTC no-init memory so a
+// crash loop cannot restart the 10-minute grace at every boot.
+struct LinkLossRecord {
+  uint32_t magic;
+  uint32_t unhealthyMs;
+  uint32_t check;
+};
+constexpr uint32_t kLinkLossMagic = 0x4C4C5331;  // "LLS1"
+
+// Stores unhealthyMs (saturated at kLinkLossGraceMs: anything longer is just
+// "expired") and sets magic and check, like sealResume.
+void sealLinkLoss(LinkLossRecord &r, uint32_t unhealthyMs);
+
+// Healthy again: the record no longer validates.
+void clearLinkLoss(LinkLossRecord &r);
+
+// True with the carried unhealthy time only after a software reset, with
+// matching magic and check and a value sealLinkLoss could have written.
+// Otherwise false and carriedMs is 0.
+bool carriedLinkLoss(const LinkLossRecord &r, bool softwareReset, uint32_t &carriedMs);
+
+// The carried time already reached the grace: cut instead of adopting heat.
+bool linkLossExpired(uint32_t carriedMs, uint32_t graceMs);
+
+// "Last healthy" time to use at boot so cutHeatForLinkLoss continues from the
+// carried time. millis() restarts at 0, so this is 0 - carriedMs (wraps on
+// purpose), which also counts the time spent booting.
+uint32_t linkLossBaselineMs(uint32_t carriedMs);
+
 // Whether a Setup save must set the target to 0 before applying. Switching
 // Output always stops heat; the UART output otherwise keeps heat running when
 // nothing that matters changed.

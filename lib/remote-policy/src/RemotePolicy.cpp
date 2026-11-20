@@ -180,6 +180,44 @@ bool resumeValid(const ResumeRecord &r, bool softwareReset, uint8_t maxMode) {
   return true;
 }
 
+static uint32_t linkLossCheck(const LinkLossRecord &r) {
+  uint32_t h = 2166136261u;
+  auto feed = [&h](uint32_t v, int bytes) {
+    for (int i = 0; i < bytes; i++) {
+      h ^= (v >> (8 * i)) & 0xFF;
+      h *= 16777619u;
+    }
+  };
+  feed(r.magic, 4);
+  feed(r.unhealthyMs, 4);
+  return h;
+}
+
+void sealLinkLoss(LinkLossRecord &r, uint32_t unhealthyMs) {
+  r.magic = kLinkLossMagic;
+  r.unhealthyMs = unhealthyMs > kLinkLossGraceMs ? kLinkLossGraceMs : unhealthyMs;
+  r.check = linkLossCheck(r);
+}
+
+void clearLinkLoss(LinkLossRecord &r) {
+  r.magic = 0;
+  r.unhealthyMs = 0;
+  r.check = 0;
+}
+
+bool carriedLinkLoss(const LinkLossRecord &r, bool softwareReset, uint32_t &carriedMs) {
+  carriedMs = 0;
+  if (!softwareReset) return false;
+  if (r.magic != kLinkLossMagic || r.check != linkLossCheck(r)) return false;
+  if (r.unhealthyMs > kLinkLossGraceMs) return false;
+  carriedMs = r.unhealthyMs;
+  return true;
+}
+
+bool linkLossExpired(uint32_t carriedMs, uint32_t graceMs) { return carriedMs >= graceMs; }
+
+uint32_t linkLossBaselineMs(uint32_t carriedMs) { return 0u - carriedMs; }
+
 bool setupSaveStopsHeat(bool uartOutput, bool wasKlipper, bool nowKlipper,
                         bool bindingChanged, bool outputChanged) {
   if (outputChanged) return true;
