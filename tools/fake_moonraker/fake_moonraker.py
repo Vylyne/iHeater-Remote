@@ -11,7 +11,8 @@ more `heater_virtual` objects, each carrying a `remote_token`, and sends
 Commands on stdin (type then Enter):
   t <C>      set the paired heater's target and notify
   restart    notify_klippy_disconnected, target 0, notify_klippy_ready in 2 s
-  shutdown   target 0, notify_status_update, notify_klippy_shutdown
+  shutdown   target 0, notify_status_update, notify_klippy_shutdown;
+             Klipper stays shut down (list/query/subscribe error) until restart
   freeze     stop answering everything, pings included, until "thaw"
   thaw       resume after "freeze"
   drop       close all sockets
@@ -39,7 +40,7 @@ TOKEN_ALPHABET = "0123456789ABCDEFGHJKMNPQRSTVWXYZ"
 
 clients = set()
 frozen = False
-klippy_ready = True
+klippy_state = "ready"  # "ready", "startup" (restart) or "shutdown" (sticky until restart)
 heaters = {}  # object name -> {"token": str, "target": float}
 PAIRED = "heater_virtual chamber"  # the heater that gets --token
 
@@ -62,7 +63,7 @@ def status_for(requested: dict) -> dict:
     status = {}
     for name, fields in requested.items():
         if name == "webhooks":
-            status[name] = {"state": "ready" if klippy_ready else "startup"}
+            status[name] = {"state": klippy_state}
         elif name in heaters:
             h = heaters[name]
             out = {}
@@ -134,7 +135,7 @@ async def handle(ws):
             if method == "server.connection.identify":
                 reply["result"] = {"connection_id": 42}
             elif method in ("printer.objects.list", "printer.objects.query",
-                            "printer.objects.subscribe") and not klippy_ready:
+                            "printer.objects.subscribe") and klippy_state != "ready":
                 reply["error"] = {"code": 503, "message": "Klippy Host not ready"}
             elif method == "printer.objects.list":
                 reply["result"] = {"objects": make_object_list(ARGS.objects)}
@@ -159,6 +160,7 @@ def set_reading(paused: bool):
     for c in list(clients):
         transport = getattr(c, "transport", None)
         if transport is None:
+            log.warning("freeze/thaw: this websockets version exposes no transport; pongs keep flowing")
             continue
         try:
             if paused:
@@ -170,19 +172,19 @@ def set_reading(paused: bool):
 
 
 async def restart_sequence():
-    global klippy_ready
-    klippy_ready = False
+    global klippy_state
+    klippy_state = "startup"
     heaters[PAIRED]["target"] = 0.0
     await notify("notify_klippy_disconnected")
     log.info("restart: disconnected, ready in 2 s")
     await asyncio.sleep(2)
-    klippy_ready = True
+    klippy_state = "ready"
     await notify("notify_klippy_ready")
     log.info("restart: ready")
 
 
 async def command_loop():
-    global frozen, klippy_ready
+    global frozen, klippy_state
     loop = asyncio.get_running_loop()
     while True:
         line = await loop.run_in_executor(None, sys.stdin.readline)
@@ -204,9 +206,10 @@ async def command_loop():
             asyncio.create_task(restart_sequence())
         elif cmd == "shutdown":
             heaters[PAIRED]["target"] = 0.0
+            klippy_state = "shutdown"  # stays until "restart", as in real Klipper
             await notify_target()
             await notify("notify_klippy_shutdown")
-            log.info("shutdown sent")
+            log.info("shutdown sent; Klipper stays shut down until restart")
         elif cmd == "freeze":
             frozen = True
             set_reading(True)

@@ -82,9 +82,14 @@ Each item matches a Review Focus scenario in
 4. **Noise and a large list.** Run with the defaults.
    - `notify_proc_stat_update` arrives at about 1 Hz and is skipped.
    - The 150-object list is handled without a crash or heap growth.
-   - Send malformed JSON from another client; it must be ignored.
-5. **Shutdown.** Enter `t 60`, then `shutdown`. Heat stops at once, and
-   the Remote waits for `notify_klippy_ready` (use `restart` to recover).
+5. **Shutdown.** Enter `t 60`, then `shutdown`.
+   - The target 0 applies at once, so heat stops.
+   - The Remote holds and rediscovers on its 30 s tick. The fake answers
+     list, query and subscribe with an error and reports `webhooks.state`
+     `shutdown`, as real Klipper does, so the dashboard shows
+     `klippy-not-ready` and the Remote retries every 30 s.
+   - Enter `restart` to recover; the Remote resubscribes after
+     `notify_klippy_ready`.
 6. **Several heaters.** Run with `--heaters 3`. The Remote pairs only with
    the heater whose `remote_token` matches.
 
