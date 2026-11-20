@@ -10,8 +10,9 @@ unpaired Remote, noisy traffic and a large object list.
 - Listens on `ws://0.0.0.0:7125/websocket` (change with `--port`).
 - Answers `server.connection.identify`, `printer.objects.list`,
   `printer.objects.query` and `printer.objects.subscribe`. List, query and
-  subscribe return a JSON-RPC error while the simulated Klipper is not
-  ready.
+  subscribe return a JSON-RPC error only during the start-up window after
+  `restart`. After `shutdown` they still answer, with `webhooks.state`
+  `shutdown`, as real Moonraker does.
 - Simulates `heater_virtual chamber`, which carries the `--token` value as
   its `remote_token`. With `--heaters N`, extra heaters get other tokens.
 - Sends `notify_proc_stat_update` every second as noise, like a real
@@ -38,7 +39,7 @@ Type these commands on stdin, then Enter:
 | --- | --- |
 | `t <C>` | Set the paired heater's target and notify |
 | `restart` | Send `notify_klippy_disconnected`, set the target to 0, then send `notify_klippy_ready` after 2 s |
-| `shutdown` | Set the target to 0, send `notify_status_update`, then `notify_klippy_shutdown` |
+| `shutdown` | Set the target to 0, send `notify_status_update`, then `notify_klippy_shutdown`. Sticky: Klipper stays shut down until `restart` |
 | `freeze` | Stop answering everything, pings included, until `thaw` |
 | `thaw` | Resume after `freeze` |
 | `drop` | Close all sockets |
@@ -76,7 +77,9 @@ Each item matches a Review Focus scenario in
      healthy.
    - `thaw` lets the Remote reconnect.
 3. **Unpaired.** Start without `--token`, or with a different one.
-   - The Remote never heats from Klipper.
+   - The Remote never heats from Klipper. If it was heating from the
+     printer (for example after you changed the token and restarted the
+     fake), it commands the target off as soon as discovery finds no match.
    - The dashboard shows the "not paired" text with the token.
    - Manual heat still works.
 4. **Noise and a large list.** Run with the defaults.
@@ -84,12 +87,14 @@ Each item matches a Review Focus scenario in
    - The 150-object list is handled without a crash or heap growth.
 5. **Shutdown.** Enter `t 60`, then `shutdown`.
    - The target 0 applies at once, so heat stops.
-   - The Remote holds and rediscovers on its 30 s tick. The fake answers
-     list, query and subscribe with an error and reports `webhooks.state`
-     `shutdown`, as real Klipper does, so the dashboard shows
-     `klippy-not-ready` and the Remote retries every 30 s.
-   - Enter `restart` to recover; the Remote resubscribes after
-     `notify_klippy_ready`.
+   - The Remote drops to "not subscribed" and rediscovers on its 30 s tick.
+     The fake still answers list, query and subscribe, with `webhooks.state`
+     `shutdown`, as real Klipper does. The Remote resubscribes and reads
+     the target (0), but treats Klipper as not ready: the link is not
+     healthy, the dashboard shows `klippy-not-ready`, and the 10 min
+     link-loss rule applies to any heat the printer had commanded.
+   - Enter `restart` to recover; the Remote rediscovers on
+     `notify_klippy_ready` and the link turns healthy.
 6. **Several heaters.** Run with `--heaters 3`. The Remote pairs only with
    the heater whose `remote_token` matches.
 

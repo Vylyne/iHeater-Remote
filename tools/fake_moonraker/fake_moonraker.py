@@ -12,7 +12,8 @@ Commands on stdin (type then Enter):
   t <C>      set the paired heater's target and notify
   restart    notify_klippy_disconnected, target 0, notify_klippy_ready in 2 s
   shutdown   target 0, notify_status_update, notify_klippy_shutdown;
-             Klipper stays shut down (list/query/subscribe error) until restart
+             Klipper stays shut down until restart; list/query/subscribe still
+             answer, with webhooks.state "shutdown", as real Klipper does
   freeze     stop answering everything, pings included, until "thaw"
   thaw       resume after "freeze"
   drop       close all sockets
@@ -135,7 +136,9 @@ async def handle(ws):
             if method == "server.connection.identify":
                 reply["result"] = {"connection_id": 42}
             elif method in ("printer.objects.list", "printer.objects.query",
-                            "printer.objects.subscribe") and klippy_state != "ready":
+                            "printer.objects.subscribe") and klippy_state == "startup":
+                # Only the restart window errors. In "shutdown" Klipper still
+                # answers, and webhooks.state reads "shutdown".
                 reply["error"] = {"code": 503, "message": "Klippy Host not ready"}
             elif method == "printer.objects.list":
                 reply["result"] = {"objects": make_object_list(ARGS.objects)}
