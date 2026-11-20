@@ -211,6 +211,65 @@ void test_vendored_crc_vector() {
   TEST_ASSERT_EQUAL_HEX16(0xCDC5, modbus_crc16(frame, sizeof frame));  // wire bytes C5 CD
 }
 
+static ResumeRecord sealedRec() {
+  ResumeRecord r{};
+  r.mode = 3;
+  r.timerMinutes = 30;
+  r.remainingS = 1200;
+  sealResume(r);
+  return r;
+}
+
+void test_resume_sealed_valid() { TEST_ASSERT_TRUE(resumeValid(sealedRec(), true, 7)); }
+
+void test_resume_rejects_power_on() { TEST_ASSERT_FALSE(resumeValid(sealedRec(), false, 7)); }
+
+void test_resume_rejects_zeroed() {
+  ResumeRecord r{};
+  TEST_ASSERT_FALSE(resumeValid(r, true, 7));
+}
+
+void test_resume_rejects_flipped_bit() {
+  ResumeRecord r = sealedRec();
+  r.remainingS ^= 1;
+  TEST_ASSERT_FALSE(resumeValid(r, true, 7));
+}
+
+void test_resume_rejects_bad_mode() {
+  ResumeRecord r{};
+  r.mode = 8;
+  r.timerMinutes = 30;
+  r.remainingS = 1200;
+  sealResume(r);
+  TEST_ASSERT_FALSE(resumeValid(r, true, 7));
+}
+
+void test_resume_rejects_expired_timer() {
+  ResumeRecord r{};
+  r.mode = 3;
+  r.timerMinutes = 30;
+  r.remainingS = 0;
+  sealResume(r);
+  TEST_ASSERT_FALSE(resumeValid(r, true, 7));
+  r.timerMinutes = 0;
+  sealResume(r);
+  TEST_ASSERT_TRUE(resumeValid(r, true, 7));
+}
+
+void test_setup_save_rule() {
+  // (uartOutput, wasKlipper, nowKlipper, bindingChanged, outputChanged)
+  TEST_ASSERT_FALSE(setupSaveStopsHeat(true, false, false, false, false));
+  TEST_ASSERT_TRUE(setupSaveStopsHeat(false, false, false, false, false));
+  TEST_ASSERT_TRUE(setupSaveStopsHeat(true, true, false, false, false));
+  TEST_ASSERT_FALSE(setupSaveStopsHeat(true, true, true, false, false));
+  TEST_ASSERT_FALSE(setupSaveStopsHeat(false, true, true, false, false));
+  TEST_ASSERT_TRUE(setupSaveStopsHeat(true, true, true, true, false));
+  TEST_ASSERT_TRUE(setupSaveStopsHeat(false, true, true, true, false));
+  TEST_ASSERT_TRUE(setupSaveStopsHeat(true, false, true, false, false));
+  TEST_ASSERT_TRUE(setupSaveStopsHeat(false, false, true, false, false));
+  TEST_ASSERT_TRUE(setupSaveStopsHeat(true, false, false, false, true));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_token_normalize);
@@ -245,5 +304,12 @@ int main() {
   RUN_TEST(test_clamp_passthrough);
   RUN_TEST(test_clamp_above_max);
   RUN_TEST(test_vendored_crc_vector);
+  RUN_TEST(test_resume_sealed_valid);
+  RUN_TEST(test_resume_rejects_power_on);
+  RUN_TEST(test_resume_rejects_zeroed);
+  RUN_TEST(test_resume_rejects_flipped_bit);
+  RUN_TEST(test_resume_rejects_bad_mode);
+  RUN_TEST(test_resume_rejects_expired_timer);
+  RUN_TEST(test_setup_save_rule);
   return UNITY_END();
 }

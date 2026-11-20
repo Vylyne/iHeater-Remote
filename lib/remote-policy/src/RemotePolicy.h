@@ -109,4 +109,29 @@ HandshakeHint handshakeFailureHint(int httpCode, uint16_t port, bool tls);
 // drops it first) most likely needs TLS.
 bool suggestTlsForPort(uint16_t port, bool tls);
 
+// --- Manual resume record and Setup-save rule ---------------------------------
+// Kept in RTC no-init memory so a Manual timer survives a software reset.
+struct ResumeRecord {
+  uint32_t magic;
+  uint8_t mode;
+  uint16_t timerMinutes;
+  uint32_t remainingS;
+  uint32_t check;
+};
+constexpr uint32_t kResumeMagic = 0x52534D31;  // "RSM1"
+
+// Sets magic and check. The check is FNV-1a over the fields one by one, never
+// over the raw struct bytes (padding in no-init memory is garbage).
+void sealResume(ResumeRecord &r);
+
+// Valid only after a software reset, with matching magic and check,
+// mode <= maxMode, and not an expired timer (timerMinutes > 0, remainingS == 0).
+bool resumeValid(const ResumeRecord &r, bool softwareReset, uint8_t maxMode);
+
+// Whether a Setup save must set the target to 0 before applying. Switching
+// Output always stops heat; the UART output otherwise keeps heat running when
+// nothing that matters changed.
+bool setupSaveStopsHeat(bool uartOutput, bool wasKlipper, bool nowKlipper,
+                        bool bindingChanged, bool outputChanged);
+
 }  // namespace iheaterlink::policy

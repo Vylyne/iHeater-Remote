@@ -152,4 +152,39 @@ HandshakeHint handshakeFailureHint(int httpCode, uint16_t port, bool tls) {
 
 bool suggestTlsForPort(uint16_t port, bool tls) { return !tls && port == 443; }
 
+static uint32_t resumeCheck(const ResumeRecord &r) {
+  uint32_t h = 2166136261u;
+  auto feed = [&h](uint32_t v, int bytes) {
+    for (int i = 0; i < bytes; i++) {
+      h ^= (v >> (8 * i)) & 0xFF;
+      h *= 16777619u;
+    }
+  };
+  feed(r.magic, 4);
+  feed(r.mode, 1);
+  feed(r.timerMinutes, 2);
+  feed(r.remainingS, 4);
+  return h;
+}
+
+void sealResume(ResumeRecord &r) {
+  r.magic = kResumeMagic;
+  r.check = resumeCheck(r);
+}
+
+bool resumeValid(const ResumeRecord &r, bool softwareReset, uint8_t maxMode) {
+  if (!softwareReset) return false;
+  if (r.magic != kResumeMagic || r.check != resumeCheck(r)) return false;
+  if (r.mode > maxMode) return false;
+  if (r.timerMinutes > 0 && r.remainingS == 0) return false;
+  return true;
+}
+
+bool setupSaveStopsHeat(bool uartOutput, bool wasKlipper, bool nowKlipper,
+                        bool bindingChanged, bool outputChanged) {
+  if (outputChanged) return true;
+  if (nowKlipper) return !wasKlipper || bindingChanged;
+  return uartOutput ? wasKlipper : true;
+}
+
 }  // namespace iheaterlink::policy
