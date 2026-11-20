@@ -68,7 +68,20 @@ Klipper restart in about a second instead of 30.
 
 ### Moonraker client
 
-- WebSocket to `ws://<host>:<port>/websocket`. No TLS (local network only).
+- WebSocket to `ws://<host>:<port>/websocket`, or `wss://` when TLS is on,
+  e.g. through Mainsail's nginx on 443 (`wss://hestia.brunton.ca/websocket`
+  on the user's setup, which answers today with a Let's Encrypt
+  certificate).
+- **TLS verifies the certificate** against an embedded public CA bundle
+  (the Mozilla bundle Arduino-ESP32 ships, or a trimmed one if flash is
+  tight), checking the host name, so the API key is never sent to an
+  impostor. idryer-core's client today encrypts but skips this check. If
+  certificate validity dates need a real clock, the Remote gets the time
+  by SNTP before connecting. No "skip verification" option; a self-signed
+  setup uses plain `ws` on the LAN.
+- The API key goes in `server.connection.identify` and, when set, as an
+  `X-Api-Key` header on the upgrade request, so it keeps working once the
+  user turns on Moonraker authorization.
 - On connect: `server.connection.identify` (client name `iheater-remote`,
   type `other`, `api_key` when one is set), then `printer.objects.list`.
 - **Heater discovery:** the first object whose name starts with
@@ -107,19 +120,23 @@ Klipper restart in about a second instead of 30.
 ### Settings and Setup page
 
 - Stored in the Remote's own `iheater-remote` namespace: `source`
-  (`manual` / `klipper`), `moon-host`, `moon-port` (default 7125),
-  `moon-key`.
+  (`manual` / `klipper`), `moon-host`, `moon-port` (default 7125, or 443
+  with TLS), `moon-tls`, `moon-key`.
 - **Migration** on first boot when `source` is absent: read `li_common`
-  `active` (3 = Moonraker) and `li_moon` `host` / `port` / `apiKey`, write
+  `active` (3 = Moonraker) and `li_moon` `host` / `port` / `ssl` /
+  `apiKey`, write
   them to the new keys, then erase the `li_common`, `li_moon`, `li_bambu`
   and `li_ha` namespaces. Old auto-target and bed-threshold keys are
   removed from `iheater-remote`.
-- Setup page: source is Manual or Klipper (Moonraker); host, port and API
-  key (write-only, blank keeps it). Auto target and bed threshold fields
+- Setup page: source is Manual or Klipper (Moonraker); host, port, TLS
+  and API key (write-only, blank keeps it). Auto target and bed threshold fields
   are removed. Status JSON drops `bambuState`, `bambuFilament`,
   `bambuPrintState` and `integration`, and gains `source`,
   `moonrakerState` (`disconnected` / `connecting` / `klippy-not-ready` /
-  `ready`) and `heaterObject`.
+  `ready`), `heaterObject` and `moonrakerError` (last failure in a few
+  words, e.g. `certificate rejected`, `auth failed`, `no heater_virtual`),
+  shown on the dashboard so a TLS or key problem is visible without a
+  serial cable.
 - `/api/integration` keeps its URL so the dashboard keeps working, with
   only the Moonraker fields.
 
@@ -165,7 +182,9 @@ arrive through the queue it is blocking. Instead, with the UART project:
 
 ## Calls I made (check these)
 
-1. No TLS option for Moonraker (local network only).
+1. TLS (`wss`) supported and always certificate-checked against a public
+   CA bundle; no option to skip the check. API key sent in identify and as
+   `X-Api-Key`.
 2. Settings migrate once, then idryer-core's old NVS namespaces are erased.
 3. Subscription is just the heater target and Klipper state; the silence
    watchdog becomes a WebSocket ping plus a 30 s query.
