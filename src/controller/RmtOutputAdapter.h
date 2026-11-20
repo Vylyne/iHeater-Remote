@@ -6,6 +6,7 @@
 #include <freertos/task.h>
 
 #include "ControllerOutputCommand.h"
+#include "OutputPort.h"
 
 namespace iheaterlink
 {
@@ -29,19 +30,19 @@ namespace iheaterlink
         uint32_t framePeriodMs = 1000;
     };
 
-    class RmtOutputAdapter
+    class RmtOutputAdapter : public OutputPort
     {
     public:
         explicit RmtOutputAdapter(const RmtOutputConfig &config)
             : config_(config) {}
 
-        void begin();
-        void apply(const ControllerOutputCommand &command);
-        ControllerOutputCommand getLastCommand() const;
+        void begin() override;
+        void apply(const ControllerOutputCommand &command) override;
+        ControllerOutputCommand getLastCommand() const override;
 
         uint8_t getLastPulseCode() const { return lastPulseCode_; }
-        bool isEnabled() const { return config_.outputPin != 0xFF && initialized_; }
-        void forceFrame();
+        bool isEnabled() const override { return config_.outputPin != 0xFF && initialized_; }
+        void forceFrame() override;
         const RmtOutputConfig &getConfig() const { return config_; }
 
     private:

@@ -15,6 +15,7 @@ const char *kPortKey = "moon-port";
 const char *kTlsKey = "moon-tls";
 const char *kKeyKey = "moon-key";
 const char *kTokenKey = "pair-token";
+const char *kOutputKey = "output";
 
 const char *const kLegacyNamespaces[] = {"li_common", "li_moon", "li_bambu",
                                          "li_ha"};
@@ -150,6 +151,26 @@ bool saveSourceAndMoonraker(const RemoteSettings &s) {
   ok = (prefs.putUShort(kPortKey, s.moon.port) == 2) && ok;
   ok = (prefs.putBool(kTlsKey, s.moon.tls) == 1) && ok;
   ok = (prefs.putString(kKeyKey, s.moon.apiKey) == s.moon.apiKey.length()) && ok;
+  prefs.end();
+  return ok;
+}
+
+OutputKind loadOutputKind() {
+  Preferences prefs;
+  OutputKind kind = OutputKind::Pulse;
+  if (prefs.begin(kNs, true)) {
+    if (prefs.getUChar(kOutputKey, 0) == 1)
+      kind = OutputKind::Uart;
+    prefs.end();
+  }
+  return kind;
+}
+
+bool saveOutputKind(OutputKind kind) {
+  Preferences prefs;
+  if (!prefs.begin(kNs, false))
+    return false;
+  const bool ok = prefs.putUChar(kOutputKey, static_cast<uint8_t>(kind)) == 1;
   prefs.end();
   return ok;
 }

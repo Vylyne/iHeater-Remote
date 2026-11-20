@@ -93,7 +93,9 @@ RmtOutputConfig remoteOutputConfig() {
   return config;
 }
 
-RmtOutputAdapter s_output{remoteOutputConfig()};
+RmtOutputAdapter s_rmt{remoteOutputConfig()};
+OutputPort *s_output = &s_rmt;  // Task 8 points this at the UART port
+OutputKind s_outputKind = OutputKind::Pulse;
 RemoteSettings s_settings;
 MoonrakerLink s_moonraker;
 
@@ -171,11 +173,14 @@ void applyIntegrationTarget(float targetTempC, const char *source,
   }
   s_mode = 0; // Integration targets are not one of the seven manual modes.
   s_timerOffAtMs = 0;
-  s_output.apply(cmd);
-  s_output.forceFrame();
+  s_output->apply(cmd);
+  s_output->forceFrame();
   resetLedPattern();
-  Serial.printf("[REMOTE] %s target=%.1fC pulse=%u\n", source,
-                (double)cmd.targetTempC, s_output.getLastPulseCode());
+  if (s_outputKind == OutputKind::Pulse)
+    Serial.printf("[REMOTE] %s target=%.1fC pulse=%u\n", source,
+                  (double)cmd.targetTempC, s_rmt.getLastPulseCode());
+  else
+    Serial.printf("[REMOTE] %s target=%.1fC\n", source, (double)cmd.targetTempC);
 }
 
 // MoonrakerLink callback: the paired heater_virtual's target (0 = off). The
@@ -233,13 +238,17 @@ void applyMode(uint8_t mode, const char *source, bool releasePrinter = true) {
     cmd.targetTempC = policy::clampTargetC(kModeTempsC[mode], s_range);
   }
   s_targetSource = "manual";
-  s_output.apply(cmd);
-  s_output.forceFrame();
+  s_output->apply(cmd);
+  s_output->forceFrame();
   resetLedPattern();
 
-  Serial.printf("[REMOTE] %s mode=%u target=%.1fC timer=%umin pulse=%u\n",
-                source, mode, (double)cmd.targetTempC, s_timerMinutes,
-                s_output.getLastPulseCode());
+  if (s_outputKind == OutputKind::Pulse)
+    Serial.printf("[REMOTE] %s mode=%u target=%.1fC timer=%umin pulse=%u\n",
+                  source, mode, (double)cmd.targetTempC, s_timerMinutes,
+                  s_rmt.getLastPulseCode());
+  else
+    Serial.printf("[REMOTE] %s mode=%u target=%.1fC timer=%umin\n", source,
+                  mode, (double)cmd.targetTempC, s_timerMinutes);
 }
 
 void updateHeatTimer() {
@@ -390,7 +399,7 @@ void updateLinkSafety() {
     return;
   }
   const bool heatingFromPrinter =
-      s_output.getLastCommand().mode == ControllerOutputMode::TargetTemperature &&
+      s_output->getLastCommand().mode == ControllerOutputMode::TargetTemperature &&
       s_targetSource == "klipper";
   if (policy::cutHeatForLinkLoss(printerSource, heatingFromPrinter, healthy,
                                  now, s_linkHealthyAtMs,
@@ -490,13 +499,15 @@ String htmlEscape(const char *raw) {
 void handleSetupPage() {
   if (captiveRedirectIfNeeded())
     return;
-  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--m)}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.check{display:flex;align-items:center;gap:10px}.check input{min-height:0;width:18px;height:18px;margin:0;padding:0}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>Blank password and API key fields keep their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label><label>Transmit power<select name=txPower><option value=34 __TXP_34__>8.5 dBm (default)</option><option value=44 __TXP_44__>11 dBm</option><option value=52 __TXP_52__>13 dBm</option><option value=60 __TXP_60__>15 dBm</option><option value=68 __TXP_68__>17 dBm</option><option value=78 __TXP_78__>19.5 dBm</option></select></label><p class=note>Higher power can help a weak signal; some C3 Super Mini boards fail to connect above 8.5 dBm. Changing it restarts the device.</p><p class=note>Signal: __RSSI__</p></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port id=port type=number value="__MOON_PORT__" min=1 max=65535></label><label class=check><input name=tls id=tls type=checkbox value=1 __MOON_TLS__>Use TLS (wss://, e.g. through Mainsail on 443)</label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div></section><section class=card><h2>Pairing</h2><label>Pairing token<input name=pairToken value="__PAIR_TOKEN__" maxlength=16 autocomplete=off autocapitalize=characters spellcheck=false></label><label class=check><input name=regenToken type=checkbox value=1>Generate a new token on save</label><p class=note>Put this in your [heater_virtual] section as remote_token: __PAIR_TOKEN__. After a wipe, type your old token here to keep your printer.cfg unchanged.</p></section><section class=card><h2>iHeater target range</h2><p class=note>These values do not change any setting on the iHeater. Stock v0.5.0 firmware accepts 45–90 and faults when the air reaches 90.</p><p class=note>Min must not be lower than your iHeater's minimum: lower targets are ignored by the iHeater, which keeps its previous target.</p><p class=note>We recommend a Max no higher than 80 (10 °C below the iHeater's MAX_AIR_TEMP).</p><label>Min target (C)<input name=minTargetC type=number value="__MIN_TARGET__" min=11 max=90></label><label>Max target (C)<input name=maxTargetC type=number value="__MAX_TARGET__" min=11 max=90></label></section><button>Save local setup</button></form></main><script>function showSource(){document.getElementById('moon').style.display=document.getElementById('source').value==='moonraker'?'block':'none'}showSource();document.getElementById('tls').onchange=e=>{let p=document.getElementById('port');if(e.target.checked&&p.value==='7125')p.value='443';else if(!e.target.checked&&p.value==='443')p.value='7125'}</script></html>)HTML";
+  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--m)}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.check{display:flex;align-items:center;gap:10px}.check input{min-height:0;width:18px;height:18px;margin:0;padding:0}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>Blank password and API key fields keep their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label><label>Transmit power<select name=txPower><option value=34 __TXP_34__>8.5 dBm (default)</option><option value=44 __TXP_44__>11 dBm</option><option value=52 __TXP_52__>13 dBm</option><option value=60 __TXP_60__>15 dBm</option><option value=68 __TXP_68__>17 dBm</option><option value=78 __TXP_78__>19.5 dBm</option></select></label><p class=note>Higher power can help a weak signal; some C3 Super Mini boards fail to connect above 8.5 dBm. Changing it restarts the device.</p><p class=note>Signal: __RSSI__</p></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port id=port type=number value="__MOON_PORT__" min=1 max=65535></label><label class=check><input name=tls id=tls type=checkbox value=1 __MOON_TLS__>Use TLS (wss://, e.g. through Mainsail on 443)</label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div></section><section class=card><h2>Pairing</h2><label>Pairing token<input name=pairToken value="__PAIR_TOKEN__" maxlength=16 autocomplete=off autocapitalize=characters spellcheck=false></label><label class=check><input name=regenToken type=checkbox value=1>Generate a new token on save</label><p class=note>Put this in your [heater_virtual] section as remote_token: __PAIR_TOKEN__. After a wipe, type your old token here to keep your printer.cfg unchanged.</p></section><section class=card><h2>Output</h2><label>iHeater output<select name=output><option value=pulse __OUT_PULSE__>Pulse on GPIO3</option><option value=uart __OUT_UART__>UART on GPIO4–5</option></select></label><p class=note>Switching restarts the Remote. The iHeater must run the matching build (pulse or UART).</p></section><section class=card><h2>iHeater target range</h2><p class=note>These values do not change any setting on the iHeater. Stock v0.5.0 firmware accepts 45–90 and faults when the air reaches 90.</p><p class=note>Min must not be lower than your iHeater's minimum: lower targets are ignored by the iHeater, which keeps its previous target.</p><p class=note>We recommend a Max no higher than 80 (10 °C below the iHeater's MAX_AIR_TEMP).</p><label>Min target (C)<input name=minTargetC type=number value="__MIN_TARGET__" min=11 max=90></label><label>Max target (C)<input name=maxTargetC type=number value="__MAX_TARGET__" min=11 max=90></label></section><button>Save local setup</button></form></main><script>function showSource(){document.getElementById('moon').style.display=document.getElementById('source').value==='moonraker'?'block':'none'}showSource();document.getElementById('tls').onchange=e=>{let p=document.getElementById('port');if(e.target.checked&&p.value==='7125')p.value='443';else if(!e.target.checked&&p.value==='443')p.value='7125'}</script></html>)HTML";
   page.replace("<h1>Wi-Fi &amp; printer setup</h1>",
                "<div style='font-size:23px;font-weight:800;letter-spacing:-1px'><span style='color:#5ba9ff'>i</span>Dryer</div><h1>Wi-Fi &amp; printer setup</h1>");
   page.replace("</form></main>",
                String("</form><p class=note><a href='/fw'>Firmware update</a> · iHeater Remote v") + VERSION_STR + "</p></main>");
   for (const int txp : {34, 44, 52, 60, 68, 78})
     page.replace(String("__TXP_") + txp + "__", s_txPower == txp ? "selected" : "");
+  page.replace("__OUT_PULSE__", s_outputKind == OutputKind::Pulse ? "selected" : "");
+  page.replace("__OUT_UART__", s_outputKind == OutputKind::Uart ? "selected" : "");
   const int rssi = wifiRssi();
   page.replace("__RSSI__", rssi ? String(rssi) + " dBm" : String("not connected"));
   const bool klipper = klipperSource();
@@ -535,17 +546,19 @@ String statusJson() {
 
   StaticJsonDocument<1024> doc;
   doc["mode"] = s_mode;
-  const auto output = s_output.getLastCommand();
+  const auto output = s_output->getLastCommand();
   doc["targetTempC"] = output.targetTempC;
   doc["heating"] = output.mode == ControllerOutputMode::TargetTemperature;
   doc["timerMinutes"] = s_timerMinutes;
   doc["timerActive"] = s_mode != 0 && s_timerOffAtMs != 0;
   doc["timerRemainingSeconds"] = timerRemainingSeconds();
-  doc["pulseCode"] = s_output.getLastPulseCode();
+  if (s_outputKind == OutputKind::Pulse)
+    doc["pulseCode"] = s_rmt.getLastPulseCode();
+  doc["output"] = s_outputKind == OutputKind::Uart ? "uart" : "pulse";
   doc["minTargetC"] = s_range.minC;
   doc["maxTargetC"] = s_range.maxC;
   doc["targetSource"] = s_targetSource;
-  doc["rmtEnabled"] = s_output.isEnabled();
+  doc["rmtEnabled"] = s_output->isEnabled();
   doc["wifiMode"] = wifiModeString();
   doc["ip"] = localIpString();
   doc["ssid"] = s_apMode ? s_apSsid : WiFi.SSID();
@@ -640,6 +653,19 @@ bool applySetupForm(String &error) {
   if (txPower.length() && !policy::validTxPower(txPower.toInt())) {
     error = "Invalid transmit power.";
     return false;
+  }
+
+  const String outputArg = s_server.arg("output");
+  OutputKind nextOutput = s_outputKind;
+  if (outputArg.length()) {
+    if (outputArg == "pulse") {
+      nextOutput = OutputKind::Pulse;
+    } else if (outputArg == "uart") {
+      nextOutput = OutputKind::Uart;
+    } else {
+      error = "Unknown output.";
+      return false;
+    }
   }
 
   const String type = s_server.arg("type");
@@ -770,6 +796,19 @@ bool applySetupForm(String &error) {
       error = "Could not save transmit power.";
       return false;
     }
+    scheduleRestart();
+  }
+  if (nextOutput != s_outputKind) {
+    // Stop heating under the old output before the restart switches it.
+    const String keepSource = s_targetSource;
+    applyIntegrationTarget(0.0f, "output changed", keepSource.c_str());
+    if (!saveOutputKind(nextOutput)) {
+      error = "Could not save the output.";
+      return false;
+    }
+    if (s_setupNotice.length())
+      s_setupNotice += " ";
+    s_setupNotice += "Restarting to switch the output.";
     scheduleRestart();
   }
   return true;
@@ -1167,7 +1206,9 @@ void setup() {
   }
   pinMode(IHEATER_BOOT_BUTTON_PIN, INPUT_PULLUP);
 
-  s_output.begin();
+  s_outputKind = loadOutputKind();
+  s_output = &s_rmt;  // Task 8 selects the UART port for OutputKind::Uart
+  s_output->begin();
   applyMode(0, "boot", false); // output off first; the binding is untouched
 
   if (!LittleFS.begin()) {
