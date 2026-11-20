@@ -126,6 +126,23 @@ int s_wifiRssi = 0;
 uint32_t s_wifiRssiAtMs = 0;
 uint32_t s_heapLogAtMs = 0;
 
+// Manual-mode resume record. RTC no-init memory survives a software reset
+// (crash, watchdog, OTA, Setup save) but is garbage after a power-on or
+// brownout, so it is only trusted after a software reset (resumeValid).
+RTC_NOINIT_ATTR policy::ResumeRecord s_resume;
+constexpr uint32_t kResumeRefreshMs = 1000;
+// Held from the top of setup() until the boot decision, so the early pulse
+// boot applyMode(0) cannot overwrite the record before it is read.
+bool s_resumeLocked = false;
+uint32_t s_resumeRefreshAtMs = 0;
+// Set once a Setup save has switched the Output: the restart is pending and no
+// heat may be started on the old output in the meantime.
+bool s_outputSwitchPending = false;
+bool s_outputSwitchRefusalLogged = false;
+// UART output, Klipper source: until Moonraker delivers a target (or anything
+// else decides one), adopt the target the iHeater is already holding.
+bool s_klipperRecoveryPending = false;
+
 bool s_buttonStableDown = false;
 bool s_buttonLastRawDown = false;
 bool s_longPressHandled = false;
@@ -162,8 +179,38 @@ void resetLedPattern();
 
 bool klipperSource() { return s_settings.source == ControlSource::Klipper; }
 
+uint32_t timerRemainingSeconds();
+
+// Records the current manual mode and timer for a software restart. Quiet
+// while the boot decision is pending and once an Output switch is pending (the
+// record was invalidated and must stay so).
+void writeResumeRecord() {
+  if (s_resumeLocked || s_outputSwitchPending)
+    return;
+  s_resume.mode = s_mode;
+  s_resume.timerMinutes = s_timerMinutes;
+  s_resume.remainingS = timerRemainingSeconds();
+  policy::sealResume(s_resume);
+}
+
+// True (and logged once) while an Output switch is pending: heat must not be
+// raised on the old output during the restart delay.
+bool refuseHeatForOutputSwitch() {
+  if (!s_outputSwitchPending)
+    return false;
+  if (!s_outputSwitchRefusalLogged) {
+    s_outputSwitchRefusalLogged = true;
+    Serial.println("[REMOTE] output switch pending: heat request refused");
+  }
+  return true;
+}
+
 void applyIntegrationTarget(float targetTempC, const char *source,
                             const char *targetSource) {
+  // Any target decision supersedes the boot read-back of the iHeater's target.
+  s_klipperRecoveryPending = false;
+  if (targetTempC > 0.0f && refuseHeatForOutputSwitch())
+    targetTempC = 0.0f;
   targetTempC = policy::clampTargetC(targetTempC, s_range);
   s_targetSource = targetSource;
   ControllerOutputCommand cmd{};
@@ -175,6 +222,7 @@ void applyIntegrationTarget(float targetTempC, const char *source,
   }
   s_mode = 0; // Integration targets are not one of the seven manual modes.
   s_timerOffAtMs = 0;
+  writeResumeRecord();
   s_output->apply(cmd);
   s_output->forceFrame();
   resetLedPattern();
@@ -215,6 +263,9 @@ void resetLedPattern() {
 void applyMode(uint8_t mode, const char *source, bool releasePrinter = true) {
   if (mode > kMaxMode)
     mode = kMaxMode;
+  s_klipperRecoveryPending = false;
+  if (mode != 0 && refuseHeatForOutputSwitch())
+    mode = 0;
 
   if (releasePrinter && klipperSource()) {
     s_settings.source = ControlSource::Manual;
@@ -240,6 +291,7 @@ void applyMode(uint8_t mode, const char *source, bool releasePrinter = true) {
     cmd.targetTempC = policy::clampTargetC(kModeTempsC[mode], s_range);
   }
   s_targetSource = "manual";
+  writeResumeRecord();
   s_output->apply(cmd);
   s_output->forceFrame();
   resetLedPattern();
@@ -260,6 +312,17 @@ void updateHeatTimer() {
   if ((int32_t)(millis() - s_timerOffAtMs) >= 0) {
     applyMode(0, "timer", false);
   }
+}
+
+// While a Manual timer runs, keep the record's remaining seconds fresh.
+void updateResumeRefresh() {
+  if (s_mode == 0 || s_timerOffAtMs == 0)
+    return;
+  const uint32_t now = millis();
+  if (!policy::intervalElapsed(now, s_resumeRefreshAtMs, kResumeRefreshMs))
+    return;
+  s_resumeRefreshAtMs = now;
+  writeResumeRecord();
 }
 
 uint32_t timerRemainingSeconds() {
@@ -346,7 +409,6 @@ void loadDeviceSettings() {
     s_txPower = txPower;
   if (policy::validRange(minTarget, maxTarget))
     s_range = policy::TargetRange{minTarget, maxTarget};
-  s_uart.setSetupRange(s_range); // only stored; the UART task uses it once a target is set
 }
 
 bool saveRange(int minC, int maxC) {
@@ -572,8 +634,12 @@ void handleSetupPage() {
 void handleFirmwarePage() {
   if (captiveRedirectIfNeeded())
     return;
-  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iDryer firmware update</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;--bad:#ff8893;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:560px;margin:auto;padding:36px 15px}.logo{font-size:24px;font-weight:800;letter-spacing:-1px}.logo i{font-style:normal;color:var(--a)}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:18px;margin:16px 0}h1{font-size:22px;margin:14px 0 7px}.note{color:var(--m);font-size:13px;line-height:1.5}input,button{box-sizing:border-box;width:100%;min-height:45px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:8px;margin:8px 0}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;cursor:pointer}.warning{color:var(--bad)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><div class=logo><i>i</i>Dryer</div><h1>Firmware update</h1><p class=note>Installed: iHeater Remote v__VERSION__</p><section class=card><p class="note warning"><strong>Heating is stopped before the update is written.</strong> Do not disconnect power while the upload is in progress.</p><input id=file accept=".bin,application/octet-stream" type=file><button id=install>Install update</button><p class=note id=msg></p></section></main><script>const f=document.getElementById('file'),m=document.getElementById('msg');document.getElementById('install').onclick=()=>{let file=f.files[0];if(!file){m.textContent='Choose a firmware .bin first.';return}let x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST','/api/ota');x.upload.onprogress=e=>m.textContent=e.lengthComputable?'Uploading '+Math.round(e.loaded/e.total*100)+'%':'Uploading…';x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=200&&x.status<300){m.textContent='Update written. Rebooting…';setTimeout(waitForDevice,1500)}else m.textContent=r.error||'Update failed.'};x.onerror=()=>m.textContent='Update failed.';x.send(d)};function waitForDevice(){let end=Date.now()+120000,t=setInterval(async()=>{try{let r=await fetch('/',{cache:'no-store'});if(r.ok){clearInterval(t);location.href='/'}}catch(_){}if(Date.now()>end){clearInterval(t);m.textContent='The device is restarting. Reopen the dashboard when it is back online.'}},1000)}</script></main>)HTML";
+  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iDryer firmware update</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;--bad:#ff8893;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:560px;margin:auto;padding:36px 15px}.logo{font-size:24px;font-weight:800;letter-spacing:-1px}.logo i{font-style:normal;color:var(--a)}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:18px;margin:16px 0}h1{font-size:22px;margin:14px 0 7px}.note{color:var(--m);font-size:13px;line-height:1.5}input,button{box-sizing:border-box;width:100%;min-height:45px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:8px;margin:8px 0}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;cursor:pointer}.warning{color:var(--bad)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><div class=logo><i>i</i>Dryer</div><h1>Firmware update</h1><p class=note>Installed: iHeater Remote v__VERSION__</p><section class=card><p class="note warning"><strong>__HEATNOTE__</strong> Do not disconnect power while the upload is in progress.</p><input id=file accept=".bin,application/octet-stream" type=file><button id=install>Install update</button><p class=note id=msg></p></section></main><script>const f=document.getElementById('file'),m=document.getElementById('msg');document.getElementById('install').onclick=()=>{let file=f.files[0];if(!file){m.textContent='Choose a firmware .bin first.';return}let x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST','/api/ota');x.upload.onprogress=e=>m.textContent=e.lengthComputable?'Uploading '+Math.round(e.loaded/e.total*100)+'%':'Uploading…';x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=200&&x.status<300){m.textContent='Update written. Rebooting…';setTimeout(waitForDevice,1500)}else m.textContent=r.error||'Update failed.'};x.onerror=()=>m.textContent='Update failed.';x.send(d)};function waitForDevice(){let end=Date.now()+120000,t=setInterval(async()=>{try{let r=await fetch('/',{cache:'no-store'});if(r.ok){clearInterval(t);location.href='/'}}catch(_){}if(Date.now()>end){clearInterval(t);m.textContent='The device is restarting. Reopen the dashboard when it is back online.'}},1000)}</script></main>)HTML";
   page.replace("__VERSION__", VERSION_STR);
+  page.replace("__HEATNOTE__",
+               s_outputKind == OutputKind::Uart
+                   ? "Heating continues: the iHeater holds its target while the Remote restarts."
+                   : "Heating is stopped before the update is written.");
   s_server.send(200, "text/html", page);
 }
 
@@ -680,6 +746,7 @@ void handleTimerPost() {
     s_timerOffAtMs = 0;
   }
 
+  writeResumeRecord();
   Serial.printf("[REMOTE] web timer=%umin\n", s_timerMinutes);
   sendActionStatus();
 }
@@ -801,15 +868,23 @@ bool applySetupForm(String &error) {
       : "";
   // Apply the saved source live now, so a later failed save cannot leave the
   // output or the link following a source that is no longer stored.
+  // Pulse keeps today's rule (stop on any save that is not a Klipper no-op);
+  // the UART output leaves the target alone when nothing that matters changed.
+  const bool bindingChanged =
+      endpointChanged || next.pairToken != s_settings.pairToken;
+  const bool stopHeat = policy::setupSaveStopsHeat(
+      s_outputKind == OutputKind::Uart, wasKlipper, klipperSource(),
+      bindingChanged, nextOutput != s_outputKind);
   if (klipperSource()) {
     // Heat from before the change (manual, or another printer or pairing)
     // must not be held: Klipper's own target replaces it once subscribed.
-    if (!wasKlipper || endpointChanged || next.pairToken != s_settings.pairToken)
+    if (stopHeat)
       applyIntegrationTarget(0.0f, "binding changed", "klipper");
     s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
   } else {
     s_moonraker.stop();
-    applyIntegrationTarget(0.0f, "binding disabled", "manual");
+    if (stopHeat)
+      applyIntegrationTarget(0.0f, "binding disabled", "manual");
   }
   if (next.pairToken != s_settings.pairToken) {
     if (!savePairToken(next.pairToken.c_str())) {
@@ -845,6 +920,10 @@ bool applySetupForm(String &error) {
     if (s_setupNotice.length())
       s_setupNotice += " ";
     s_setupNotice += "Restarting to switch the output.";
+    // The record belongs to the old output, and nothing may heat until the
+    // restart (a Klipper target or a Manual POST could still arrive).
+    s_resume.magic = 0;
+    s_outputSwitchPending = true;
     scheduleRestart();
   }
   return true;
@@ -984,7 +1063,11 @@ void handleOtaUpload() {
     s_otaBytesWritten = 0;
     s_otaError = "";
 
-    applyMode(0, "ota:start", false);
+    // Pulse stops heat before the image is written. The UART output keeps its
+    // target: the iHeater holds it while the Remote restarts, and the boot
+    // recovery (Klipper read-back, Manual RTC record) picks it up again.
+    if (s_outputKind == OutputKind::Pulse)
+      applyMode(0, "ota:start", false);
     Serial.printf("[REMOTE] OTA upload start filename=%s\n",
                   upload.filename.c_str());
 
@@ -1228,9 +1311,71 @@ void updateLed() {
   }
 }
 
+// Klipper source on the UART output: until Moonraker delivers a target, adopt
+// the one the iHeater is holding, so the existing 10-minute link-loss rule
+// covers it. Any applyMode/applyIntegrationTarget (Moonraker's target, a
+// Setup-save stop, the link-loss cut) ends the wait first.
+void updateKlipperRecovery() {
+  if (!s_klipperRecoveryPending)
+    return;
+  if (!klipperSource() || s_outputKind != OutputKind::Uart) {
+    s_klipperRecoveryPending = false;
+    return;
+  }
+  const UartLinkView view = s_uart.view();
+  if (!view.hasSnapshot)
+    return;
+  applyIntegrationTarget(view.snap.airTargetT10 / 10.0f, "recovered", "klipper");
+}
+
+// True after a crash, watchdog, ESP.restart() (OTA, Setup save) and similar;
+// false for power-on, brownout and anything else, where RTC memory is garbage.
+bool softwareReset() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_SW:
+    case ESP_RST_PANIC:
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+      return true;
+    default:
+      return false;
+  }
+}
+
+// After loadRemoteSettings(): decide what the output does at boot.
+void bootDecision() {
+  s_resumeLocked = false;
+  if (klipperSource()) {
+    // Pulse is already off (early boot applyMode). UART writes nothing until
+    // the iHeater's own target has been read back, or Moonraker delivers one.
+    s_klipperRecoveryPending = s_outputKind == OutputKind::Uart;
+    writeResumeRecord();  // mode 0: a stale Manual record must not outlive this
+    return;
+  }
+  if (policy::resumeValid(s_resume, softwareReset(), kMaxMode)) {
+    const policy::ResumeRecord rec = s_resume;  // applyMode rewrites the record
+    s_timerMinutes = rec.timerMinutes;
+    applyMode(rec.mode, "resume", false);
+    uint32_t remainingS = 0;
+    if (rec.mode != 0 && rec.timerMinutes > 0 && rec.remainingS > 0) {
+      remainingS = rec.remainingS;
+      if (remainingS > (uint32_t)rec.timerMinutes * 60u)
+        remainingS = (uint32_t)rec.timerMinutes * 60u;
+      s_timerOffAtMs = millis() + remainingS * 1000u;
+      writeResumeRecord();
+    }
+    Serial.printf("[REMOTE] resumed mode=%u remaining=%us\n", rec.mode,
+                  (unsigned)remainingS);
+    return;
+  }
+  applyMode(0, "boot", false);
+}
+
 } // namespace
 
 void setup() {
+  s_resumeLocked = true;  // see bootDecision()
   Serial.begin(115200);
   delay(100);
   Serial.println();
@@ -1247,8 +1392,9 @@ void setup() {
     s_output = &s_uart;
     s_output->begin();
     // No boot applyMode(0, ...) here: in UART mode nothing is written to the
-    // iHeater until the app sets a desired target, and what happens at boot
-    // (Task 9) is decided separately. Do not add a boot Off write here.
+    // iHeater until the app sets a desired target, and bootDecision() (after
+    // loadRemoteSettings) decides what that target is. Do not add a boot Off
+    // write here.
   } else {
     s_output = &s_rmt;
     s_output->begin();
@@ -1260,9 +1406,13 @@ void setup() {
   }
 
   loadDeviceSettings(); // before Wi-Fi: carries the TX power setting
+  // Unconditional: loadDeviceSettings() returns early on first boot, before
+  // NVS exists. Only stored; the UART task uses it once a target is set.
+  s_uart.setSetupRange(s_range);
   configureWiFi();
   // After Wi-Fi: a first-boot pairing token needs esp_random() with RF entropy.
   loadRemoteSettings(s_settings);
+  bootDecision();
   s_moonraker.onTarget(onKlipperTarget);
   if (klipperSource())
     s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
@@ -1281,6 +1431,8 @@ void loop() {
   s_statusSocket.loop();
   updateButton();
   updateHeatTimer();
+  updateResumeRefresh();
+  updateKlipperRecovery();
   updateLed();
   updateRestart();
   updateWifiSupervisor();

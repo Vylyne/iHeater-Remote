@@ -149,6 +149,12 @@ bool UartLink::exchange(const policy::PollRequest &req, policy::Reply &reply) {
 
   // Anything still in the buffer belongs to an earlier, abandoned request.
   uart_flush_input(kPort);
+  // No gap is needed before the follow-up request. The iHeater turns its
+  // receiver off while it transmits and back on at transmit-complete
+  // (iHeater-Standalone-Firmware Core/Src/link_uart.c:157-168). This task
+  // cannot act on a reply until the ESP-IDF RX timeout expires, about ten
+  // symbol times after the last byte, so the next request always arrives
+  // with the iHeater's receiver already on again.
   uart_write_bytes(kPort, reinterpret_cast<const char *>(frame), sizeof(frame));
   uart_wait_tx_done(kPort, pdMS_TO_TICKS(10));
 
