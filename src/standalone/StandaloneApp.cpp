@@ -527,8 +527,6 @@ void updateUartLinkLog() {
   s_logged = true;
   s_lastLink = link;
   Serial.printf("[UART] link=%s\n", uartLinkName(link));
-  Serial.printf("[UART] poll task stack free=%u bytes\n",
-                static_cast<unsigned>(s_uart.stackHighWaterBytes()));
 }
 
 void updateHeapLog() {
