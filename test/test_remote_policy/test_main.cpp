@@ -177,6 +177,25 @@ void test_default_port() {
   TEST_ASSERT_EQUAL_UINT16(7125, defaultMoonrakerPort(false));
 }
 
+void test_keep_stored_api_key() {
+  TEST_ASSERT_TRUE(keepStoredApiKey(false, true));    // same endpoint
+  TEST_ASSERT_FALSE(keepStoredApiKey(true, true));    // new endpoint
+  TEST_ASSERT_FALSE(keepStoredApiKey(false, false));  // new key typed
+  TEST_ASSERT_FALSE(keepStoredApiKey(true, false));
+}
+
+void test_handshake_hint() {
+  TEST_ASSERT_EQUAL(HandshakeHint::ApiKey, handshakeFailureHint(401, 7125, false));
+  TEST_ASSERT_EQUAL(HandshakeHint::ApiKey, handshakeFailureHint(403, 443, true));
+  TEST_ASSERT_EQUAL(HandshakeHint::TurnTlsOn, handshakeFailureHint(400, 443, false));
+  TEST_ASSERT_EQUAL(HandshakeHint::CheckEndpoint, handshakeFailureHint(400, 443, true));
+  TEST_ASSERT_EQUAL(HandshakeHint::CheckEndpoint, handshakeFailureHint(400, 7125, false));
+  TEST_ASSERT_EQUAL(HandshakeHint::CheckEndpoint, handshakeFailureHint(404, 443, false));
+  TEST_ASSERT_EQUAL(HandshakeHint::CheckEndpoint, handshakeFailureHint(502, 443, true));
+  TEST_ASSERT_EQUAL(HandshakeHint::CheckEndpoint, handshakeFailureHint(503, 80, false));
+  TEST_ASSERT_EQUAL(HandshakeHint::CheckEndpoint, handshakeFailureHint(0, 7125, false));
+}
+
 void setup() {
   delay(2000);
   UNITY_BEGIN();
@@ -189,6 +208,8 @@ void setup() {
   RUN_TEST(test_backoff);
   RUN_TEST(test_interval_elapsed);
   RUN_TEST(test_default_port);
+  RUN_TEST(test_keep_stored_api_key);
+  RUN_TEST(test_handshake_hint);
   RUN_TEST(test_wifi_connected_none);
   RUN_TEST(test_wifi_sta_reconnect_due);
   RUN_TEST(test_wifi_sta_reconnect_not_due);

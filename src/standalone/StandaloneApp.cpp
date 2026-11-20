@@ -111,6 +111,9 @@ size_t s_otaBytesWritten = 0;
 String s_otaError;
 policy::TargetRange s_range{policy::kDefaultMinC, policy::kDefaultMaxC};
 String s_targetSource = "manual";
+// One-shot message from the last setup save, shown on the next Setup page and
+// returned by /api/integration.
+String s_setupNotice;
 // Last loop() pass on which the active printer link was healthy.
 uint32_t s_linkHealthyAtMs = 0;
 uint32_t s_wifiLastAttemptMs = 0;
@@ -510,6 +513,12 @@ void handleSetupPage() {
   page.replace("__PAIR_TOKEN__", token);
   page.replace("__MOON_HOST__", htmlEscape(s_settings.moon.host.c_str()));
   page.replace("__SSID__", htmlEscape(s_stationSsid.c_str()));
+  if (s_setupNotice.length()) {
+    page.replace("<h1>Wi-Fi &amp; printer setup</h1>",
+                 "<h1>Wi-Fi &amp; printer setup</h1><p class=note style='color:#ffb347'>" +
+                     s_setupNotice + "</p>");
+    s_setupNotice = "";
+  }
   s_server.send(200, "text/html", page);
 }
 
@@ -635,6 +644,9 @@ bool applySetupForm(String &error) {
 
   const String type = s_server.arg("type");
   RemoteSettings next = s_settings;
+  const bool wasKlipper = klipperSource();
+  bool endpointChanged = false;
+  bool apiKeyCleared = false;
   if (type == "manual" || type == "none") {
     next.source = ControlSource::Manual;
   } else if (type == "moonraker" || type == "klipper") {
@@ -693,10 +705,20 @@ bool applySetupForm(String &error) {
       error = "Port 7125 is Moonraker's plain port: turn TLS off, or use 443 through Mainsail.";
       return false;
     }
-    // Secrets are write-only: a blank field keeps the stored key.
+    // Secrets are write-only: a blank field keeps the stored key, but only
+    // for the endpoint it was entered for. Otherwise a LAN POST naming a new
+    // host would make the Remote send the key to that host, so it is cleared.
+    endpointChanged = next.moon.host != s_settings.moon.host ||
+                      next.moon.port != s_settings.moon.port ||
+                      next.moon.tls != s_settings.moon.tls;
     const String apiKey = s_server.arg("apiKey");
-    if (apiKey.length())
+    if (apiKey.length()) {
       next.moon.apiKey = apiKey;
+    } else if (!policy::keepStoredApiKey(endpointChanged, true) &&
+               !next.moon.apiKey.isEmpty()) {
+      next.moon.apiKey = "";
+      apiKeyCleared = true;
+    }
   }
 
   if (regenToken)
@@ -712,9 +734,16 @@ bool applySetupForm(String &error) {
   }
   s_settings.source = next.source;
   s_settings.moon = next.moon;
+  s_setupNotice = apiKeyCleared
+      ? "API key cleared because the host, port or TLS changed: re-enter it if this Moonraker needs one."
+      : "";
   // Apply the saved source live now, so a later failed save cannot leave the
   // output or the link following a source that is no longer stored.
   if (klipperSource()) {
+    // Heat from before the change (manual, or another printer or pairing)
+    // must not be held: Klipper's own target replaces it once subscribed.
+    if (!wasKlipper || endpointChanged || next.pairToken != s_settings.pairToken)
+      applyIntegrationTarget(0.0f, "binding changed", "klipper");
     s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
   } else {
     s_moonraker.stop();
@@ -752,7 +781,14 @@ void handleIntegrationPost() {
     s_server.send(400, "application/json", String("{\"error\":\"") + error + "\"}");
     return;
   }
-  sendActionStatus();
+  String status = statusJson();
+  if (s_setupNotice.length() && status.endsWith("}")) {
+    // The notice text is fixed ASCII without quotes, so it needs no escaping.
+    status.remove(status.length() - 1);
+    status += ",\"notice\":\"" + s_setupNotice + "\"}";
+  }
+  s_setupNotice = "";
+  s_server.send(200, "application/json", status);
 }
 
 void handleSetupPost() {

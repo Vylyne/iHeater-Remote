@@ -140,4 +140,14 @@ bool intervalElapsed(uint32_t nowMs, uint32_t sinceMs, uint32_t intervalMs) {
 
 uint16_t defaultMoonrakerPort(bool tls) { return tls ? 443 : 7125; }
 
+bool keepStoredApiKey(bool endpointChanged, bool keyFieldBlank) {
+  return keyFieldBlank && !endpointChanged;
+}
+
+HandshakeHint handshakeFailureHint(int httpCode, uint16_t port, bool tls) {
+  if (httpCode == 401 || httpCode == 403) return HandshakeHint::ApiKey;
+  if (httpCode == 400 && port == 443 && !tls) return HandshakeHint::TurnTlsOn;
+  return HandshakeHint::CheckEndpoint;
+}
+
 }  // namespace iheaterlink::policy

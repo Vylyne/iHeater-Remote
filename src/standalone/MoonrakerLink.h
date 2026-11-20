@@ -71,6 +71,7 @@ class MoonrakerLink {
   void sendHeaterRequest(const char *method, Pending kind);
   void applyStatus(JsonObjectConst status);
   void resetSession();
+  void goUnpaired(const char *error);  // clears the heater and commands off
   bool following() const;  // a paired heater is known (not Unpaired)
   bool anyPending() const;
   void requestDisconnect();  // runs from loop(), outside the library's stack

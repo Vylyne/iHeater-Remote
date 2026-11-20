@@ -92,4 +92,17 @@ constexpr uint8_t kMissedPongs = 2;
 constexpr uint32_t kQueryIntervalMs = 30000;
 constexpr uint32_t kRequestTimeoutMs = 5000;
 
+// --- Setup form and diagnostics ---------------------------------------------
+// Keep the stored API key only when the form left the field blank and the
+// endpoint (host, port, TLS) is unchanged: a key must never follow the Remote
+// to a host it was not entered for.
+bool keepStoredApiKey(bool endpointChanged, bool keyFieldBlank);
+
+enum class HandshakeHint : uint8_t { ApiKey, TurnTlsOn, CheckEndpoint };
+
+// What a rejected WebSocket upgrade most likely means. 401/403: API key.
+// 400 on port 443 with TLS off: plain HTTP sent to an HTTPS proxy.
+// Anything else: the host, port, path or proxy.
+HandshakeHint handshakeFailureHint(int httpCode, uint16_t port, bool tls);
+
 }  // namespace iheaterlink::policy

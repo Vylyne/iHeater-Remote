@@ -44,6 +44,26 @@ bool skipUnparsed(const uint8_t *payload, size_t length) {
          !containsBytes(payload, length, kNotifyDisconnected);
 }
 
+// The status code in "HTTP <code>" or "WebSocket handshake failed - HTTP
+// <code>"; 0 when the reason carries none.
+int httpCodeFromReason(const char *reason, size_t len) {
+  if (reason == nullptr) return 0;
+  static const char kMarker[] = "HTTP ";
+  const size_t n = sizeof(kMarker) - 1;
+  for (size_t i = 0; i + n <= len; ++i) {
+    if (memcmp(reason + i, kMarker, n) != 0) continue;
+    int code = 0;
+    size_t digits = 0;
+    for (size_t j = i + n; j < len && reason[j] >= '0' && reason[j] <= '9' &&
+                           digits < 4;
+         ++j, ++digits) {
+      code = code * 10 + (reason[j] - '0');
+    }
+    return code;
+  }
+  return 0;
+}
+
 const char *klippyName(policy::KlippyState s) {
   switch (s) {
     case policy::KlippyState::Ready: return "ready";
@@ -223,7 +243,18 @@ void MoonrakerLink::onDisconnected(const char *reason, size_t length) {
         startsWith(reason, length, "WebSocket handshake failed")) {
       lastError_ = "Moonraker refused the connection (";
       for (size_t i = 0; i < length; ++i) lastError_ += reason[i];
-      lastError_ += "): check the API key";
+      switch (policy::handshakeFailureHint(httpCodeFromReason(reason, length),
+                                           settings_.port, settings_.tls)) {
+        case policy::HandshakeHint::ApiKey:
+          lastError_ += "): check the API key";
+          break;
+        case policy::HandshakeHint::TurnTlsOn:
+          lastError_ += "): port 443 expects TLS, turn TLS on";
+          break;
+        default:
+          lastError_ += "): check host, port and TLS";
+          break;
+      }
     } else {
       lastError_ = "could not connect";
       if (settings_.tls) lastError_ += " (TLS: check certificate and host name)";
@@ -336,10 +367,7 @@ void MoonrakerLink::handleResult(Pending kind, JsonVariantConst result) {
       }
       subscribed_ = false;
       if (n == 0) {
-        heater_ = "";
-        lastError_ = "no heater_virtual in Klipper";
-        phase_ = Phase::Unpaired;
-        Serial.println("[MOON] no heater_virtual in Klipper");
+        goUnpaired("no heater_virtual in Klipper");
         break;
       }
       const int idx = policy::matchPairedHeater(tokens, n, token_);
@@ -350,19 +378,14 @@ void MoonrakerLink::handleResult(Pending kind, JsonVariantConst result) {
           policy::formatPairToken(token_, formatted);
           shown = formatted;
         }
-        heater_ = "";
-        lastError_ = "not paired: add remote_token: " + shown +
-                     " to your [heater_virtual] section";
-        phase_ = Phase::Unpaired;
         Serial.printf("[MOON] no heater_virtual has remote_token %s\n",
                       shown.c_str());
+        goUnpaired(("not paired: add remote_token: " + shown +
+                    " to your [heater_virtual] section").c_str());
         break;
       }
       if (idx == policy::kHeaterDuplicate) {
-        heater_ = "";
-        lastError_ = "remote_token used by more than one heater";
-        phase_ = Phase::Unpaired;
-        Serial.println("[MOON] remote_token used by more than one heater");
+        goUnpaired("remote_token used by more than one heater");
         break;
       }
       heater_ = names[idx];
@@ -488,10 +511,7 @@ void MoonrakerLink::sendTokenQuery(JsonArrayConst objects) {
 
   if (found == 0) {
     subscribed_ = false;
-    heater_ = "";
-    lastError_ = "no heater_virtual in Klipper";
-    phase_ = Phase::Unpaired;
-    Serial.println("[MOON] no heater_virtual in Klipper");
+    goUnpaired("no heater_virtual in Klipper");
     return;
   }
   if (found > kMaxHeaters) {
@@ -550,6 +570,17 @@ void MoonrakerLink::resetSession() {
   subscribed_ = false;
   phase_ = Phase::Identifying;
   klippy_ = policy::KlippyState::Unknown;
+}
+
+// Discovery ended with no single paired heater. Any heat commanded through an
+// earlier pairing is no longer ours to hold: command off ("never heats from
+// Klipper" without a match) rather than waiting out the link-loss backstop.
+void MoonrakerLink::goUnpaired(const char *error) {
+  heater_ = "";
+  lastError_ = error;
+  phase_ = Phase::Unpaired;
+  Serial.printf("[MOON] unpaired: %s, target off\n", error);
+  if (targetCb_ != nullptr) targetCb_(0.0f);
 }
 
 bool MoonrakerLink::following() const {
