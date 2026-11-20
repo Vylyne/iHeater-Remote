@@ -28,19 +28,35 @@ bool hasSourceKey() {
   return present;
 }
 
-void migrateLegacy() {
+// Returns true only when the source key (the commit marker) was persisted.
+bool migrateLegacy() {
+  Preferences prefs;
+  if (!prefs.begin(kNs, false))
+    return false;
+
+  // A previous attempt may have written the moon-* keys but not the source.
+  // The legacy namespaces could already be erased, so keep what is stored.
+  const bool haveMoon = prefs.isKey(kHostKey);
+
   String host, apiKey;
   uint16_t port = 7125;
   bool tls = false;
   uint8_t active = 0;
 
-  Preferences moon;
-  if (moon.begin("li_moon", true)) {
-    host = moon.getString("host", "");
-    port = moon.getUShort("port", 7125);
-    tls = moon.getBool("ssl", false);
-    apiKey = moon.getString("apiKey", "");
-    moon.end();
+  if (haveMoon) {
+    host = prefs.getString(kHostKey, "");
+    port = prefs.getUShort(kPortKey, 7125);
+    tls = prefs.getBool(kTlsKey, false);
+    apiKey = prefs.getString(kKeyKey, "");
+  } else {
+    Preferences moon;
+    if (moon.begin("li_moon", true)) {
+      host = moon.getString("host", "");
+      port = moon.getUShort("port", 7125);
+      tls = moon.getBool("ssl", false);
+      apiKey = moon.getString("apiKey", "");
+      moon.end();
+    }
   }
   Preferences common;
   if (common.begin("li_common", true)) {
@@ -53,24 +69,30 @@ void migrateLegacy() {
   if (port == 0)
     port = policy::defaultMoonrakerPort(tls);
 
-  Preferences prefs;
-  if (!prefs.begin(kNs, false)) {
-    Serial.println("[REMOTE] migration skipped, settings namespace unavailable");
-    return;
+  bool ok = true;
+  if (!haveMoon) {
+    // putString returns 0 for an empty value, so confirm with isKey().
+    prefs.putString(kHostKey, host);
+    prefs.putString(kKeyKey, apiKey);
+    ok = prefs.isKey(kHostKey) && prefs.isKey(kKeyKey);
+    ok = (prefs.putUShort(kPortKey, port) == 2) && ok;
+    ok = (prefs.putBool(kTlsKey, tls) == 1) && ok;
   }
-  prefs.putString(kHostKey, host);
-  prefs.putUShort(kPortKey, port);
-  prefs.putBool(kTlsKey, tls);
-  prefs.putString(kKeyKey, apiKey);
-  prefs.putUChar(kSourceKey, klipper ? 1 : 0);
-  prefs.remove("auto-target");
-  prefs.remove("auto-bed");
+  if (ok)
+    ok = prefs.putUChar(kSourceKey, klipper ? 1 : 0) == 1;
+  if (ok) {
+    prefs.remove("auto-target");
+    prefs.remove("auto-bed");
+  }
   prefs.end();
+  if (!ok)
+    return false;
 
   Serial.printf("[REMOTE] migrated settings source=%s host=%s port=%u tls=%d key=%s\n",
                 klipper ? "klipper" : "manual", host.c_str(),
                 static_cast<unsigned>(port), tls ? 1 : 0,
                 apiKey.length() ? "set" : "none");
+  return true;
 }
 
 void eraseLegacy() {
@@ -99,9 +121,11 @@ String generatePairToken() {
 }
 
 void loadRemoteSettings(RemoteSettings &out) {
-  if (!hasSourceKey())
-    migrateLegacy();
-  eraseLegacy();
+  if (!hasSourceKey() && !migrateLegacy())
+    Serial.println("[REMOTE] settings migration failed; legacy NVS kept");
+  // The source key is the commit marker: erase legacy data only once it is set.
+  if (hasSourceKey())
+    eraseLegacy();
 
   Preferences prefs;
   if (prefs.begin(kNs, true)) {
