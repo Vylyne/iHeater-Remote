@@ -84,10 +84,31 @@ Klipper restart in about a second instead of 30.
   user turns on Moonraker authorization.
 - On connect: `server.connection.identify` (client name `iheater-remote`,
   type `other`, `api_key` when one is set), then `printer.objects.list`.
-- **Heater discovery:** the first object whose name starts with
-  `heater_virtual ` is the heater. More than one: use the first in sorted
-  order and log the others. None: link is up but there is nothing to
-  follow; the Remote never heats from Klipper.
+- **Pairing token:** the Remote and its heater are paired by a token, not
+  by name or order.
+  - The Remote generates a random token on first boot: 8 characters of
+    Crockford base32 (no I, L, O or U), shown as `7K3P-9QXM`.
+  - Input is case-insensitive and ignores the hyphen.
+  - The Setup page shows the token, can regenerate it, and accepts one
+    typed in by hand. That way, after a wipe or a board swap, the old
+    token is re-entered and the Klipper config needs no change.
+  - The user copies the token into the heater's section as
+    `remote_token: 7K3P-9QXM`.
+  - The token identifies the heater; it is not a secret. Anyone who can
+    read Moonraker can see it, and Moonraker access is protected by the
+    API key and TLS.
+- **Heater discovery:** after `printer.objects.list`, query every
+  `heater_virtual ` object for `remote_token` in one
+  `printer.objects.query`. The heater whose token matches is the one to
+  follow.
+  - **No match:** the link is up but the Remote is not paired, so it never
+    heats from Klipper. `moonrakerError` shows `not paired: add
+    remote_token: 7K3P-9QXM to your [heater_virtual] section`.
+  - **More than one match:** cannot happen, because the Klipper module
+    rejects a duplicate token at config load. If it is seen anyway, the
+    Remote treats it as not paired.
+  - Discovery re-runs on every resubscribe, so a token edit in
+    `printer.cfg` takes effect after the Klipper restart that applies it.
 - **Subscribe** to `{"<heater>": ["target"], "webhooks": ["state"]}`.
   The initial response and every `notify_status_update` carry the target;
   it is applied through the existing clamp to the target range. `0` means
@@ -121,7 +142,8 @@ Klipper restart in about a second instead of 30.
 
 - Stored in the Remote's own `iheater-remote` namespace: `source`
   (`manual` / `klipper`), `moon-host`, `moon-port` (default 7125, or 443
-  with TLS), `moon-tls`, `moon-key`.
+  with TLS), `moon-tls`, `moon-key`, `pair-token` (generated when absent,
+  including on the first boot after this update).
 - **Migration** on first boot when `source` is absent: read `li_common`
   `active` (3 = Moonraker) and `li_moon` `host` / `port` / `ssl` /
   `apiKey`, write
@@ -129,7 +151,8 @@ Klipper restart in about a second instead of 30.
   and `li_ha` namespaces. Old auto-target and bed-threshold keys are
   removed from `iheater-remote`.
 - Setup page: source is Manual or Klipper (Moonraker); host, port, TLS
-  and API key (write-only, blank keeps it). Auto target and bed threshold fields
+  and API key (write-only, blank keeps it); pairing token with Regenerate
+  and manual entry (format-checked). Auto target and bed threshold fields
   are removed. Status JSON drops `bambuState`, `bambuFilament`,
   `bambuPrintState` and `integration`, and gains `source`,
   `moonrakerState` (`disconnected` / `connecting` / `klippy-not-ready` /
@@ -147,6 +170,16 @@ Klipper restart in about a second instead of 30.
   gets a clear error; the update note in `klipper/README.md` says to
   delete `mirror_macro` and the `VIRTUAL_CHAMBER` macro.
 - Remove the macro from `klipper/iheater_remote.cfg`; tests updated.
+- New option `remote_token`:
+  - It is optional for Klipper, but without it no Remote pairs.
+  - It is normalized to upper case without the hyphen, and its format is
+    checked at config load.
+  - It is exposed in `get_status` as `remote_token`.
+  - Two `heater_virtual` sections with the same token are a config error.
+  - The example config and `klipper/README.md` show where it goes. The
+    update note says pairing is required after this update: until the
+    token is added, the Remote shows "not paired" and does not heat from
+    Klipper.
 
 ### Feeding iHeater data back into Klipper (decided, built later)
 
@@ -157,7 +190,9 @@ arrive through the queue it is blocking. Instead, with the UART project:
 - A small **Moonraker plugin** (`moonraker/iheater.py`, installed next to
   the Klipper module) registers a JSON-RPC method, e.g. `iheater.report`.
 - The Remote calls it over its existing Moonraker socket whenever iHeater
-  values change (air and element temperature, PWM, state, fault).
+  values change (air and element temperature, PWM, state, fault). Each
+  call carries the pairing token, which routes the data to the right
+  `heater_virtual`.
 - The plugin forwards to an endpoint `heater_virtual` registers with
   Klipper's webhooks, which runs immediately, outside the G-code queue.
 - Moonraker has no public pass-through to Klipper endpoints, so the plugin
@@ -192,7 +227,12 @@ arrive through the queue it is blocking. Instead, with the UART project:
    Klipper shutdown still turns heat off at once, because
    `heater_virtual` sets its target to 0 on shutdown and the Remote applies
    target updates whatever the Klipper state.
-5. Heater found automatically; with several, the first in sorted order.
+5. Pairing is by a token the Remote generates, which the user can
+   regenerate or type in, and which goes in `printer.cfg` as
+   `remote_token`.
+   - Pairing is strict: with no token in the config there is no
+     fallback, and the Remote does not heat from Klipper.
+   - The token is an identifier, not a secret.
 6. The upstream multilingual docs under `docs/<lang>/` are removed because
    they document a product this repo no longer builds; the README stays in
    English (Canadian).
