@@ -196,6 +196,13 @@ void test_handshake_hint() {
   TEST_ASSERT_EQUAL(HandshakeHint::CheckEndpoint, handshakeFailureHint(0, 7125, false));
 }
 
+void test_connect_failure_tls_hint() {
+  TEST_ASSERT_TRUE(suggestTlsForPort(443, false));
+  TEST_ASSERT_FALSE(suggestTlsForPort(443, true));
+  TEST_ASSERT_FALSE(suggestTlsForPort(7125, false));
+  TEST_ASSERT_FALSE(suggestTlsForPort(80, false));
+}
+
 void setup() {
   delay(2000);
   UNITY_BEGIN();
@@ -210,6 +217,7 @@ void setup() {
   RUN_TEST(test_default_port);
   RUN_TEST(test_keep_stored_api_key);
   RUN_TEST(test_handshake_hint);
+  RUN_TEST(test_connect_failure_tls_hint);
   RUN_TEST(test_wifi_connected_none);
   RUN_TEST(test_wifi_sta_reconnect_due);
   RUN_TEST(test_wifi_sta_reconnect_not_due);

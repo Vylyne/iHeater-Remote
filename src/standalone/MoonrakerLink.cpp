@@ -257,7 +257,10 @@ void MoonrakerLink::onDisconnected(const char *reason, size_t length) {
       }
     } else {
       lastError_ = "could not connect";
-      if (settings_.tls) lastError_ += " (TLS: check certificate and host name)";
+      if (settings_.tls)
+        lastError_ += " (TLS: check certificate and host name)";
+      else if (policy::suggestTlsForPort(settings_.port, settings_.tls))
+        lastError_ += " (port 443 usually needs TLS: turn TLS on)";
     }
   }
   backoffMs_ = policy::nextBackoffMs(backoffMs_);

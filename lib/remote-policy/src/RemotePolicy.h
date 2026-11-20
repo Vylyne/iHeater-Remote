@@ -105,4 +105,8 @@ enum class HandshakeHint : uint8_t { ApiKey, TurnTlsOn, CheckEndpoint };
 // Anything else: the host, port, path or proxy.
 HandshakeHint handshakeFailureHint(int httpCode, uint16_t port, bool tls);
 
+// A plain connection to 443 that fails before any HTTP reply (nginx often
+// drops it first) most likely needs TLS.
+bool suggestTlsForPort(uint16_t port, bool tls);
+
 }  // namespace iheaterlink::policy

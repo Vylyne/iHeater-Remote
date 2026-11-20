@@ -150,4 +150,6 @@ HandshakeHint handshakeFailureHint(int httpCode, uint16_t port, bool tls) {
   return HandshakeHint::CheckEndpoint;
 }
 
+bool suggestTlsForPort(uint16_t port, bool tls) { return !tls && port == 443; }
+
 }  // namespace iheaterlink::policy
