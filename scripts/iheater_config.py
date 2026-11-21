@@ -237,35 +237,57 @@ def has_section(text, name):
     return any(_is_header(l, name) for l in text.splitlines(True))
 
 
+def _is_comment(line):
+    return line.lstrip()[:1] in ("#", ";") and bool(line.strip())
+
+
+def _kept_after_section(body):
+    # type: (List[str]) -> List[str]
+    """Return the lines at the end of a removed body that stay behind.
+
+    A comment run directly above the next header, preceded by a blank line,
+    belongs to the next section. Otherwise only trailing blank lines stay.
+    """
+    end = len(body)
+    c = end
+    while c > 0 and _is_comment(body[c - 1]):
+        c -= 1
+    if c < end and c > 0 and not body[c - 1].strip():
+        b = c - 1
+        while b > 0 and not body[b - 1].strip():
+            b -= 1
+        return body[b:]
+    if c < end:
+        return []
+    b = end
+    while b > 0 and not body[b - 1].strip():
+        b -= 1
+    return body[b:]
+
+
 def remove_section(text, name):
     # type: (str, str) -> str
-    """Remove every [name] section and the blank lines above it.
+    """Remove every [name] section and one blank line above it.
 
-    Blank lines at the end of a removed section that is followed by another
-    section are kept, so the neighbours stay separated.
+    When another section follows, the blank lines (and any comment block)
+    that belong to it stay, so the neighbours remain separated.
     """
+    lines = text.splitlines(True)
     out = []  # type: List[str]
-    pending = []  # type: List[str]
-    skipping = False
-    for line in text.splitlines(True):
-        if _is_header(line, name):
-            while out and not out[-1].strip():
-                out.pop()
-            skipping = True
-            pending = []
+    i = 0
+    while i < len(lines):
+        if not _is_header(lines[i], name):
+            out.append(lines[i])
+            i += 1
             continue
-        if skipping:
-            if line.startswith("["):
-                skipping = False
-                out.extend(pending)
-                pending = []
-            elif line.strip():
-                pending = []
-                continue
-            else:
-                pending.append(line)
-                continue
-        out.append(line)
+        if out and not out[-1].strip():
+            out.pop()
+        j = i + 1
+        while j < len(lines) and not lines[j].startswith("["):
+            j += 1
+        if j < len(lines):
+            out.extend(_kept_after_section(lines[i + 1:j]))
+        i = j
     return "".join(out)
 
 
@@ -276,6 +298,8 @@ def append_block(text, block):
     if text and not text.endswith(("\n", "\r")):
         text += eol
     block = block.replace("\r\n", "\n").replace("\n", eol)
+    if block and not block.endswith(eol):
+        block += eol
     return text + eol + block
 
 
@@ -284,9 +308,12 @@ def print_state(json_text):
     """Return print_stats.state from a Moonraker objects/query reply."""
     try:
         reply = json.loads(json_text)
-        return reply["result"]["status"]["print_stats"]["state"]
+        state = reply["result"]["status"]["print_stats"]["state"]
     except (KeyError, TypeError, ValueError) as e:
         raise ValueError("no print state in reply (%s)" % e)
+    if not isinstance(state, str):
+        raise ValueError("print state is not a string: %r" % (state,))
+    return state
 
 
 def _cmd_version(args):

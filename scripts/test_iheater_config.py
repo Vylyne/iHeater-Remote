@@ -443,6 +443,8 @@ class SectionTests(unittest.TestCase):
         block = "[iheater_remote]\nfoo: bar\n"
         for t in ("[server]\nhost: 0.0.0.0\n",
                   "[server]\r\nhost: 0.0.0.0\r\n",
+                  "[server]\nhost: 0.0.0.0\n\n",
+                  "[server]\r\nhost: 0.0.0.0\r\n\r\n\r\n",
                   ""):
             with self.subTest(t=t):
                 added = iheater_config.append_block(t, block)
@@ -450,6 +452,24 @@ class SectionTests(unittest.TestCase):
                     iheater_config.has_section(added, "iheater_remote"))
                 self.assertEqual(
                     iheater_config.remove_section(added, "iheater_remote"), t)
+
+    def test_remove_keeps_next_sections_comment(self):
+        t = ("[server]\nh\n\n[iheater_remote]\nfoo\n\n# about auth\n"
+             "[authorization]\nx\n")
+        self.assertEqual(
+            iheater_config.remove_section(t, "iheater_remote"),
+            "[server]\nh\n\n# about auth\n[authorization]\nx\n")
+
+    def test_remove_drops_own_comments(self):
+        t = ("[server]\nh\n\n[iheater_remote]\n# own\n# notes\n"
+             "[authorization]\nx\n")
+        self.assertEqual(
+            iheater_config.remove_section(t, "iheater_remote"),
+            "[server]\nh\n[authorization]\nx\n")
+
+    def test_append_adds_final_newline_to_block(self):
+        got = iheater_config.append_block("[a]\nx: 1\n", "[b]\ny: 2")
+        self.assertEqual(got, "[a]\nx: 1\n\n[b]\ny: 2\n")
 
     def test_append_converts_block_to_crlf(self):
         got = iheater_config.append_block("[a]\r\nx: 1\r\n", "[b]\ny: 2\n")
@@ -491,7 +511,9 @@ class PrintStateTests(unittest.TestCase):
         self.assertEqual(iheater_config.print_state(GOOD_STATE), "printing")
 
     def test_print_state_bad(self):
+        null = '{"result":{"status":{"print_stats":{"state":%s}}}}'
         for text in ("not json", "{}", '{"result":{"status":{}}}',
+                     null % "null", null % "3",
                      '{"result":[]}', "null"):
             with self.subTest(text=text):
                 with self.assertRaises(ValueError):
@@ -513,7 +535,8 @@ class PrintStateTests(unittest.TestCase):
         self.assertEqual(self._cli(GOOD_STATE), (0, "printing\n", ""))
 
     def test_cli_print_state_bad(self):
-        for text in ("not json", "{}"):
+        for text in ("not json", "{}",
+                     '{"result":{"status":{"print_stats":{"state":null}}}}'):
             rc, out, err = self._cli(text)
             self.assertEqual((rc, out), (1, ""))
             self.assertIn("error", err)
