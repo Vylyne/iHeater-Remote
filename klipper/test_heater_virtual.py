@@ -409,17 +409,28 @@ class HeaterVirtualTest(unittest.TestCase):
         hv = self.make_connected(remote_token='7K3P9QXM')
         self.printer.reactor.now = 100.
         self.post()
-        before = hv.get_status(100.)
+        self.printer.reactor.now = 111.
+        before = hv.get_status(111.)
         cases = [{'air': 'hot'}, {'air': False}, {'fault': None},
                  {'fault': True}, {'fan': 1}, {'link': 'sideways'},
                  {'next_within': 0}, {'next_within': 61},
                  {'next_within': True}, {'air': float('nan')},
-                 {'air': 10 ** 400}, {'state': 5}]
+                 {'air': 10 ** 400}, {'state': 5},
+                 {'power': 1.5}, {'power': -0.1}, {'fault': 256},
+                 {'fault': -1}, {'fault': 2 ** 70}, {'air': 5000},
+                 {'air': -100.5}, {'element': 1000.5}]
         for over in cases:
             with self.subTest(over=over):
+                args = {'air': 77.7, 'element': 66.6, 'power': 0.9}
+                args.update(over)
                 with self.assertRaises(CommandError):
-                    self.post(**over)
-                self.assertEqual(hv.get_status(100.), before)
+                    self.post(**args)
+                self.assertEqual(hv.get_status(111.), before)
+                self.assertEqual(hv.get_status(111.)['temperature'], 41.5)
+                self.assertTrue(hv.get_status(112.)['linked'])
+                self.assertFalse(hv.get_status(112.1)['linked'])
+                self.assertEqual(hv.get_reading('air'), 41.5)
+                self.assertEqual(hv.get_reading('element'), 88.0)
         no_state = report()
         del no_state['state']
         no_token = report()
@@ -430,7 +441,7 @@ class HeaterVirtualTest(unittest.TestCase):
                 with self.assertRaises(CommandError):
                     self.webhooks.endpoints['heater_virtual/report'](
                         FakeWebRequest(args))
-                self.assertEqual(hv.get_status(100.), before)
+                self.assertEqual(hv.get_status(111.), before)
 
     def test_unknown_report_field_ignored(self):
         hv = self.make_connected(remote_token='7K3P9QXM')

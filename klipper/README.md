@@ -77,6 +77,9 @@ heater: chamber          # the heater_virtual's short name
 reading: element         # element (default) or air
 ```
 
+The `iheater_remote` sensor type is for `[temperature_sensor]` sections only,
+not for heaters or temperature fans. It reports on the host clock.
+
 With no fresh reading it reports the last value received (0 before the
 first). The `[heater_virtual]` section must come before this
 `[temperature_sensor]` section in your configuration, because the sensor type

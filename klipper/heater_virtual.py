@@ -31,7 +31,7 @@ def _is_number(value):
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _check_number(report, key, nullable):
+def _check_number(report, key, nullable, lo=None, hi=None):
     value = report[key]
     if value is None and nullable:
         return None
@@ -44,6 +44,8 @@ def _check_number(report, key, nullable):
         raise ValueError("%s is out of range" % (key,))
     if not math.isfinite(value):
         raise ValueError("%s must be finite" % (key,))
+    if lo is not None and not lo <= value <= hi:
+        raise ValueError("%s must be between %g and %g" % (key, lo, hi))
     return value
 
 
@@ -59,8 +61,9 @@ def _validate_report(report):
     if not isinstance(link, str) or link not in _LINKS:
         raise ValueError("link must be one of %s" % (", ".join(_LINKS),))
     clean = {'link': link}
-    for key in ('air', 'element', 'power'):
-        clean[key] = _check_number(report, key, True)
+    for key in ('air', 'element'):
+        clean[key] = _check_number(report, key, True, -100., 1000.)
+    clean['power'] = _check_number(report, 'power', True, 0., 1.)
     if not isinstance(report['fan'], bool):
         raise ValueError("fan must be true or false")
     clean['fan'] = report['fan']
@@ -71,6 +74,8 @@ def _validate_report(report):
     fault = report['fault']
     if not isinstance(fault, int) or isinstance(fault, bool):
         raise ValueError("fault must be an integer")
+    if not 0 <= fault <= 255:
+        raise ValueError("fault must be between 0 and 255")
     clean['fault'] = fault
     next_within = _check_number(report, 'next_within', False)
     if not 0. < next_within <= 60.:
