@@ -4,6 +4,9 @@
 Standard library only; runs on Python 3.7 or later.
 """
 import argparse
+import fnmatch
+import json
+import posixpath
 import re
 import sys
 from typing import Dict, List, Optional, Tuple
@@ -12,6 +15,8 @@ _VERSION_RE = re.compile(r"^#\s*CONFIG_VERSION:\s*(\d+)\s*$", re.MULTILINE)
 _HEADING_RE = re.compile(r"^## (\d+)\s*$")
 _TOKEN_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{8}$")
 _SECTION_RE = re.compile(r"^\[heater_virtual\s+([^\]\s]+)\s*\]")
+_INCLUDE_RE = re.compile(
+    r"^\[include\s+(.+?)\s*\](\s*[#;].*)?$", re.IGNORECASE)
 _CARRIED_KEYS = ("remote_token", "sensor", "max_target")
 
 
@@ -167,6 +172,123 @@ def carry(old, new):
     return new, carried, renamed
 
 
+def _include_specs(lines):
+    # type: (List[str]) -> List[Tuple[int, str]]
+    """Return (line index, spec) for every active include line."""
+    found = []
+    for i, line in enumerate(lines):
+        m = _INCLUDE_RE.match(line.rstrip("\r\n"))
+        if m:
+            found.append((i, m.group(1).strip()))
+    return found
+
+
+def _split_path(config_dir, spec):
+    # type: (str, str) -> List[str]
+    return posixpath.normpath(posixpath.join(config_dir, spec)).split("/")
+
+
+def include_kind(printer_text, config_dir, target):
+    # type: (str, str, str) -> Optional[str]
+    """Return "exact" or "glob" if an include already covers target."""
+    want = _split_path(config_dir, target)
+    kind = None
+    for _, spec in _include_specs(printer_text.splitlines(True)):
+        got = _split_path(config_dir, spec)
+        if len(got) == len(want) and all(
+                fnmatch.fnmatchcase(w, g) for g, w in zip(got, want)):
+            if spec == target:
+                return "exact"
+            kind = "glob"
+    return kind
+
+
+def add_include(printer_text, target):
+    # type: (str, str) -> str
+    """Insert an include line after the last include, or at line 1."""
+    lines = printer_text.splitlines(True)
+    eol = _eol(printer_text)
+    specs = _include_specs(lines)
+    at = specs[-1][0] + 1 if specs else 0
+    if at > 0 and not lines[at - 1].endswith(("\n", "\r")):
+        lines[at - 1] += eol
+    lines.insert(at, "[include %s]%s" % (target, eol))
+    return "".join(lines)
+
+
+def remove_include(printer_text, target):
+    # type: (str, str) -> str
+    """Remove every active include line whose spec equals target."""
+    lines = printer_text.splitlines(True)
+    drop = set(i for i, spec in _include_specs(lines) if spec == target)
+    return "".join(l for i, l in enumerate(lines) if i not in drop)
+
+
+def _is_header(line, name):
+    # type: (str, str) -> bool
+    stripped = line.strip()
+    if not (stripped.startswith("[") and stripped.endswith("]")):
+        return False
+    return re.sub(r"\s+", " ", stripped[1:-1].strip()) == name
+
+
+def has_section(text, name):
+    # type: (str, str) -> bool
+    return any(_is_header(l, name) for l in text.splitlines(True))
+
+
+def remove_section(text, name):
+    # type: (str, str) -> str
+    """Remove every [name] section and the blank lines above it.
+
+    Blank lines at the end of a removed section that is followed by another
+    section are kept, so the neighbours stay separated.
+    """
+    out = []  # type: List[str]
+    pending = []  # type: List[str]
+    skipping = False
+    for line in text.splitlines(True):
+        if _is_header(line, name):
+            while out and not out[-1].strip():
+                out.pop()
+            skipping = True
+            pending = []
+            continue
+        if skipping:
+            if line.startswith("["):
+                skipping = False
+                out.extend(pending)
+                pending = []
+            elif line.strip():
+                pending = []
+                continue
+            else:
+                pending.append(line)
+                continue
+        out.append(line)
+    return "".join(out)
+
+
+def append_block(text, block):
+    # type: (str, str) -> str
+    """Append block after one blank line, using the text's line endings."""
+    eol = _eol(text)
+    if text and not text.endswith(("\n", "\r")):
+        text += eol
+    block = block.replace("\r\n", "\n").replace("\n", eol)
+    return text + eol + block
+
+
+def print_state(json_text):
+    # type: (str) -> str
+    """Return print_stats.state from a Moonraker objects/query reply."""
+    try:
+        reply = json.loads(json_text)
+        return reply["result"]["status"]["print_stats"]["state"]
+    except (KeyError, TypeError, ValueError) as e:
+        raise ValueError("no print state in reply (%s)" % e)
+
+
 def _cmd_version(args):
     print(config_version(_read(args.file)))
     return 0
@@ -207,6 +329,50 @@ def _cmd_carry(args):
     return 0
 
 
+def _cmd_has_include(args):
+    kind = include_kind(_read(args.printer_cfg), args.config_dir, args.target)
+    if kind is None:
+        return 1
+    print(kind)
+    return 0
+
+
+def _cmd_add_include(args):
+    _write(args.printer_cfg, add_include(_read(args.printer_cfg), args.target))
+    return 0
+
+
+def _cmd_remove_include(args):
+    _write(args.printer_cfg,
+           remove_include(_read(args.printer_cfg), args.target))
+    return 0
+
+
+def _cmd_has_section(args):
+    return 0 if has_section(_read(args.conf), args.name) else 1
+
+
+def _cmd_remove_section(args):
+    _write(args.conf, remove_section(_read(args.conf), args.name))
+    return 0
+
+
+def _cmd_append_block(args):
+    block = _read(args.template)
+    for pair in args.pairs:
+        name, sep, value = pair.partition("=")
+        if not sep or not name:
+            raise ValueError("expected NAME=VALUE, got %r" % pair)
+        block = block.replace("<%s>" % name, value)
+    _write(args.conf, append_block(_read(args.conf), block))
+    return 0
+
+
+def _cmd_print_state(args):
+    print(print_state(sys.stdin.read()))
+    return 0
+
+
 def _build_parser():
     parser = argparse.ArgumentParser(prog="iheater_config.py")
     sub = parser.add_subparsers(dest="command")
@@ -241,6 +407,42 @@ def _build_parser():
     p.add_argument("old")
     p.add_argument("new")
     p.set_defaults(func=_cmd_carry)
+
+    p = sub.add_parser("has-include", 
+                       help="exit 0 if an include covers TARGET")
+    p.add_argument("printer_cfg")
+    p.add_argument("config_dir")
+    p.add_argument("target")
+    p.set_defaults(func=_cmd_has_include)
+
+    p = sub.add_parser("add-include", help="add an include of TARGET")
+    p.add_argument("printer_cfg")
+    p.add_argument("target")
+    p.set_defaults(func=_cmd_add_include)
+
+    p = sub.add_parser("remove-include", help="remove the include of TARGET")
+    p.add_argument("printer_cfg")
+    p.add_argument("target")
+    p.set_defaults(func=_cmd_remove_include)
+
+    p = sub.add_parser("has-section", help="exit 0 if [NAME] is in CONF")
+    p.add_argument("conf")
+    p.add_argument("name")
+    p.set_defaults(func=_cmd_has_section)
+
+    p = sub.add_parser("remove-section", help="remove [NAME] from CONF")
+    p.add_argument("conf")
+    p.add_argument("name")
+    p.set_defaults(func=_cmd_remove_section)
+
+    p = sub.add_parser("append-block", help="append TEMPLATE to CONF")
+    p.add_argument("conf")
+    p.add_argument("template")
+    p.add_argument("pairs", nargs="*", metavar="NAME=VALUE")
+    p.set_defaults(func=_cmd_append_block)
+
+    p = sub.add_parser("print-state", help="read print state JSON on stdin")
+    p.set_defaults(func=_cmd_print_state)
 
     return parser
 

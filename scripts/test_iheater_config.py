@@ -281,5 +281,243 @@ class CarryTests(unittest.TestCase):
             self.assertIn("remote_token: ABCD-EFGH\n", iheater_config._read(new))
 
 
+
+CONFIG_DIR = "/home/pi/printer_data/config"
+TARGET = "addons/iheater_remote.cfg"
+INCLUDE_LINE = "[include addons/iheater_remote.cfg]"
+SAVE_CONFIG = (
+    "[printer]\nkinematics: corexy\n\n"
+    "#*# <---------------------- SAVE_CONFIG ---------------------->\n"
+    "#*# [probe]\n")
+ROUND_TRIP_FIXTURES = [
+    "[include a.cfg]\n[include b.cfg]\n\n[printer]\n",
+    "[printer]\nkinematics: corexy\n",
+    SAVE_CONFIG,
+    "[include a.cfg]\r\n\r\n[printer]\r\n",
+    "",
+]
+
+
+class IncludeTests(unittest.TestCase):
+    def _kind(self, text):
+        return iheater_config.include_kind(text, CONFIG_DIR, TARGET)
+
+    def _cli(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = iheater_config.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_has_include_exact(self):
+        self.assertEqual(self._kind(INCLUDE_LINE + "\n"), "exact")
+
+    def test_has_include_glob(self):
+        self.assertEqual(self._kind("[include addons/*.cfg]\n"), "glob")
+
+    def test_glob_does_not_cross_dirs(self):
+        self.assertIsNone(self._kind("[include *.cfg]\n"))
+
+    def test_has_include_dot_slash(self):
+        self.assertEqual(
+            self._kind("[include ./addons/iheater_remote.cfg]\n"), "glob")
+
+    def test_has_include_absolute(self):
+        self.assertEqual(self._kind(
+            "[include /home/pi/printer_data/config/addons/"
+            "iheater_remote.cfg]\n"), "glob")
+
+    def test_commented_include_ignored(self):
+        self.assertIsNone(self._kind("#" + INCLUDE_LINE + "\n"))
+
+    def test_include_with_trailing_comment(self):
+        self.assertEqual(self._kind(INCLUDE_LINE + "  # chamber\n"), "exact")
+
+    def test_add_after_last_include(self):
+        got = iheater_config.add_include(
+            "[include a.cfg]\n[include b.cfg]\n\n[printer]\n", TARGET)
+        self.assertEqual(
+            got, "[include a.cfg]\n[include b.cfg]\n" + INCLUDE_LINE
+            + "\n\n[printer]\n")
+
+    def test_add_at_top_when_none(self):
+        got = iheater_config.add_include(
+            "[printer]\nkinematics: corexy\n", TARGET)
+        self.assertEqual(
+            got, INCLUDE_LINE + "\n[printer]\nkinematics: corexy\n")
+
+    def test_add_above_save_config(self):
+        got = iheater_config.add_include(SAVE_CONFIG, TARGET)
+        self.assertEqual(got, INCLUDE_LINE + "\n" + SAVE_CONFIG)
+
+    def test_add_last_line_no_newline(self):
+        got = iheater_config.add_include("[include a.cfg]", TARGET)
+        self.assertEqual(got, "[include a.cfg]\n" + INCLUDE_LINE + "\n")
+
+    def test_add_keeps_crlf(self):
+        got = iheater_config.add_include(
+            "[include a.cfg]\r\n[printer]\r\n", TARGET)
+        self.assertEqual(
+            got, "[include a.cfg]\r\n" + INCLUDE_LINE + "\r\n[printer]\r\n")
+
+    def test_add_remove_round_trip(self):
+        for t in ROUND_TRIP_FIXTURES:
+            with self.subTest(t=t):
+                added = iheater_config.add_include(t, TARGET)
+                self.assertEqual(
+                    iheater_config.remove_include(added, TARGET), t)
+
+    def test_remove_ignores_other_and_commented(self):
+        t = "#" + INCLUDE_LINE + "\n[include b.cfg]\n"
+        self.assertEqual(iheater_config.remove_include(t, TARGET), t)
+
+    def test_remove_with_trailing_comment(self):
+        t = "[include a.cfg]\n" + INCLUDE_LINE + " # x\n[printer]\n"
+        self.assertEqual(
+            iheater_config.remove_include(t, TARGET),
+            "[include a.cfg]\n[printer]\n")
+
+    def test_cli_has_include(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = os.path.join(d, "printer.cfg")
+            iheater_config._write(cfg, "[include addons/*.cfg]\n")
+            self.assertEqual(
+                self._cli(["has-include", cfg, CONFIG_DIR, TARGET]),
+                (0, "glob\n", ""))
+            iheater_config._write(cfg, "[printer]\n")
+            self.assertEqual(
+                self._cli(["has-include", cfg, CONFIG_DIR, TARGET]),
+                (1, "", ""))
+
+    def test_cli_add_remove_include(self):
+        with tempfile.TemporaryDirectory() as d:
+            cfg = os.path.join(d, "printer.cfg")
+            iheater_config._write(cfg, "[printer]\n")
+            self.assertEqual(
+                iheater_config.main(["add-include", cfg, TARGET]), 0)
+            self.assertEqual(iheater_config._read(cfg),
+                             INCLUDE_LINE + "\n[printer]\n")
+            self.assertEqual(
+                iheater_config.main(["remove-include", cfg, TARGET]), 0)
+            self.assertEqual(iheater_config._read(cfg), "[printer]\n")
+
+    def test_cli_missing_file_is_error(self):
+        rc, _, err = self._cli(
+            ["has-include", "/nonexistent/printer.cfg", CONFIG_DIR, TARGET])
+        self.assertEqual(rc, 1)
+        self.assertIn("error", err)
+
+
+MOONRAKER_CONF = (
+    "[server]\nhost: 0.0.0.0\n\n"
+    "[iheater_remote]\nfoo: bar\n\n"
+    "[authorization]\ncors_domains:\n")
+
+
+class SectionTests(unittest.TestCase):
+    def test_has_section(self):
+        self.assertTrue(
+            iheater_config.has_section(MOONRAKER_CONF, "iheater_remote"))
+        self.assertFalse(iheater_config.has_section(
+            "[iheater_remote_x]\n", "iheater_remote"))
+        self.assertTrue(iheater_config.has_section(
+            "[update_manager  iheater-remote]\n",
+            "update_manager iheater-remote"))
+
+    def test_remove_section_middle(self):
+        self.assertEqual(
+            iheater_config.remove_section(MOONRAKER_CONF, "iheater_remote"),
+            "[server]\nhost: 0.0.0.0\n\n[authorization]\ncors_domains:\n")
+
+    def test_remove_section_last(self):
+        t = "[server]\nhost: 0.0.0.0\n\n[iheater_remote]\nfoo: bar\n"
+        self.assertEqual(
+            iheater_config.remove_section(t, "iheater_remote"),
+            "[server]\nhost: 0.0.0.0\n")
+
+    def test_remove_section_absent_unchanged(self):
+        self.assertEqual(
+            iheater_config.remove_section(MOONRAKER_CONF, "nope"),
+            MOONRAKER_CONF)
+
+    def test_append_remove_round_trip(self):
+        block = "[iheater_remote]\nfoo: bar\n"
+        for t in ("[server]\nhost: 0.0.0.0\n",
+                  "[server]\r\nhost: 0.0.0.0\r\n",
+                  ""):
+            with self.subTest(t=t):
+                added = iheater_config.append_block(t, block)
+                self.assertTrue(
+                    iheater_config.has_section(added, "iheater_remote"))
+                self.assertEqual(
+                    iheater_config.remove_section(added, "iheater_remote"), t)
+
+    def test_append_converts_block_to_crlf(self):
+        got = iheater_config.append_block("[a]\r\nx: 1\r\n", "[b]\ny: 2\n")
+        self.assertEqual(got, "[a]\r\nx: 1\r\n\r\n[b]\r\ny: 2\r\n")
+
+    def test_cli_append_block_substitutes(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = os.path.join(d, "moonraker.conf")
+            tpl = os.path.join(d, "block.tpl")
+            iheater_config._write(conf, "[server]\nhost: 0.0.0.0\n")
+            iheater_config._write(
+                tpl, "[iheater_remote]\npath: <INSTALL_PATH>\nx: <OTHER>\n")
+            rc = iheater_config.main(
+                ["append-block", conf, tpl,
+                 "INSTALL_PATH=/home/pi/iHeater-Remote", "OTHER=a&b|c=d"])
+            self.assertEqual(rc, 0)
+            self.assertEqual(
+                iheater_config._read(conf),
+                "[server]\nhost: 0.0.0.0\n\n[iheater_remote]\n"
+                "path: /home/pi/iHeater-Remote\nx: a&b|c=d\n")
+
+    def test_cli_has_and_remove_section(self):
+        with tempfile.TemporaryDirectory() as d:
+            conf = os.path.join(d, "moonraker.conf")
+            iheater_config._write(conf, MOONRAKER_CONF)
+            main = iheater_config.main
+            self.assertEqual(main(["has-section", conf, "iheater_remote"]), 0)
+            self.assertEqual(main(["has-section", conf, "nope"]), 1)
+            self.assertEqual(
+                main(["remove-section", conf, "iheater_remote"]), 0)
+            self.assertEqual(main(["has-section", conf, "iheater_remote"]), 1)
+
+
+GOOD_STATE = '{"result":{"status":{"print_stats":{"state":"printing"}}}}'
+
+
+class PrintStateTests(unittest.TestCase):
+    def test_print_state(self):
+        self.assertEqual(iheater_config.print_state(GOOD_STATE), "printing")
+
+    def test_print_state_bad(self):
+        for text in ("not json", "{}", '{"result":{"status":{}}}',
+                     '{"result":[]}', "null"):
+            with self.subTest(text=text):
+                with self.assertRaises(ValueError):
+                    iheater_config.print_state(text)
+
+    def _cli(self, text):
+        out, err = io.StringIO(), io.StringIO()
+        old = sys.stdin
+        sys.stdin = io.StringIO(text)
+        try:
+            with contextlib.redirect_stdout(out), \
+                    contextlib.redirect_stderr(err):
+                rc = iheater_config.main(["print-state"])
+        finally:
+            sys.stdin = old
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_cli_print_state(self):
+        self.assertEqual(self._cli(GOOD_STATE), (0, "printing\n", ""))
+
+    def test_cli_print_state_bad(self):
+        for text in ("not json", "{}"):
+            rc, out, err = self._cli(text)
+            self.assertEqual((rc, out), (1, ""))
+            self.assertIn("error", err)
+
+
 if __name__ == "__main__":
     unittest.main()
