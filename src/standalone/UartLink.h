@@ -32,6 +32,9 @@ struct UartLinkView {
   policy::ClearPhase clear = policy::ClearPhase::Idle;
   uint8_t blockedFault = 0;
   bool lastClearOk = false;
+  // Diagnostics: millis() at the first Ok reply since boot (0 = none yet),
+  // requests that got no reply in time, and replies that did not parse.
+  uint32_t firstOkMs = 0, timeouts = 0, badReplies = 0;
 };
 
 // The Remote as Modbus RTU master to the iHeater on UART1. A FreeRTOS task
@@ -70,6 +73,7 @@ class UartLink : public OutputPort {
   // Task-private after begin(): never touched outside taskLoop().
   policy::UartPollPolicy policy_;
   bool watchdogOn_ = false;
+  uint32_t firstOkMs_ = 0, timeouts_ = 0, badReplies_ = 0;
 
   mutable portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
   // Everything below is guarded by mux_.

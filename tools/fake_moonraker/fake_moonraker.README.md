@@ -13,6 +13,11 @@ unpaired Remote, noisy traffic and a large object list.
   subscribe return a JSON-RPC error only during the start-up window after
   `restart`. After `shutdown` they still answer, with `webhooks.state`
   `shutdown`, as real Moonraker does.
+- Accepts `server.iheater_remote.report` and logs one line per report, for
+  example `report link=up air=41.5 element=88.0 power=0.42 state=heating
+  next=5` (null values print as `-`). It replies `{"ok": true}`, or an
+  error: -32601 after `plugin off`, 503 during the `restart` window, and
+  400 if the report's `remote_token` matches no heater.
 - Simulates `heater_virtual chamber`, which carries the `--token` value as
   its `remote_token`. With `--heaters N`, extra heaters get other tokens.
 - Sends `notify_proc_stat_update` every second as noise, like a real
@@ -43,6 +48,8 @@ Type these commands on stdin, then Enter:
 | `freeze` | Stop answering everything, pings included, until `thaw` |
 | `thaw` | Resume after `freeze` |
 | `drop` | Close all sockets |
+| `plugin off` | Report answers -32601 "Method not found", as when the Klipper component is missing |
+| `plugin on` | Report is accepted again |
 
 ## Set up the Remote
 
@@ -97,6 +104,13 @@ Each item matches a Review Focus scenario in
      `notify_klippy_ready` and the link turns healthy.
 6. **Several heaters.** Run with `--heaters 3`. The Remote pairs only with
    the heater whose `remote_token` matches.
+
+7. **Reports.** Pair with the Remote's token.
+   - Reports arrive about every 15 s when idle, and every 5 s with `t 60`.
+8. **Plugin missing.** Enter `plugin off`, then `drop`.
+   - The dashboard shows the plugin-missing note.
+9. **Plugin back.** Enter `plugin on`, then `drop`.
+   - Reports resume.
 
 Also check the real server (`wss://hestia.brunton.ca`, TLS on port 443)
 with the real `remote_token`.

@@ -203,9 +203,14 @@ void UartLink::runRequest(const policy::PollRequest &req, bool &gotOk) {
   if (got) {
     policy_.onReply(req, reply, now);
     gotOk = reply.kind == policy::ReplyKind::Ok;
+    if (gotOk && firstOkMs_ == 0)
+      firstOkMs_ = now ? now : 1;
+    if (reply.kind == policy::ReplyKind::Invalid)
+      ++badReplies_;
   } else {
     policy_.onNoReply(req, now);
     gotOk = false;
+    ++timeouts_;
   }
 }
 
@@ -224,6 +229,9 @@ void UartLink::publishView() {
   v.clear = policy_.clearPhase();
   v.blockedFault = policy_.blockedFault();
   v.lastClearOk = policy_.lastClearOk();
+  v.firstOkMs = firstOkMs_;
+  v.timeouts = timeouts_;
+  v.badReplies = badReplies_;
 
   portENTER_CRITICAL(&mux_);
   view_ = v;

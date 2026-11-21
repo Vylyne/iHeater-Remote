@@ -212,6 +212,7 @@ void test_decode_settings() {
 void test_fault_names() {
   TEST_ASSERT_EQUAL_STRING("air over-temperature", faultName(0x07));
   TEST_ASSERT_EQUAL_STRING("unknown fault", faultName(0x42));
+  TEST_ASSERT_EQUAL_STRING("none", faultName(0x00));
 }
 
 void test_uart_target_inside() {

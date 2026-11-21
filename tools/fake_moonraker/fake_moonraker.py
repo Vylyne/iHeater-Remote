@@ -4,7 +4,8 @@ Fake Moonraker WebSocket server for bench-testing iHeater Remote.
 
 Listens on ws://0.0.0.0:<port>/websocket and answers the JSON-RPC calls the
 Remote makes: server.connection.identify, printer.objects.list,
-printer.objects.query and printer.objects.subscribe. It simulates one or
+printer.objects.query, printer.objects.subscribe and
+server.iheater_remote.report. It simulates one or
 more `heater_virtual` objects, each carrying a `remote_token`, and sends
 `notify_proc_stat_update` noise every second like a real Moonraker.
 
@@ -17,6 +18,9 @@ Commands on stdin (type then Enter):
   freeze     stop answering everything, pings included, until "thaw"
   thaw       resume after "freeze"
   drop       close all sockets
+  plugin off server.iheater_remote.report answers -32601 "Method not found",
+             as when the Klipper-side component is not installed
+  plugin on  report is accepted again
 """
 import argparse
 import asyncio
@@ -44,6 +48,7 @@ frozen = False
 klippy_state = "ready"  # "ready", "startup" (restart) or "shutdown" (sticky until restart)
 heaters = {}  # object name -> {"token": str, "target": float}
 PAIRED = "heater_virtual chamber"  # the heater that gets --token
+plugin_on = True  # False: server.iheater_remote.report answers "Method not found"
 
 
 def normalize_token(raw: str) -> str:
@@ -111,6 +116,40 @@ def make_object_list(padding: int):
     return objs
 
 
+def fmt_num(value) -> str:
+    """Short number for the report log line; null prints as '-'."""
+    if value is None:
+        return "-"
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:.2f}".rstrip("0").rstrip(".") if value != int(value) else f"{value:.1f}"
+    return str(value)
+
+
+def report_reply(params, reply: dict):
+    """Fill reply for server.iheater_remote.report. Check order: plugin off,
+    then Klippy start-up, then the token, then ok."""
+    if not plugin_on:
+        reply["error"] = {"code": -32601, "message": "Method not found"}
+        return
+    if klippy_state == "startup":
+        reply["error"] = {"code": 503, "message": "Klippy Host not connected"}
+        return
+    if not isinstance(params, dict):
+        reply["error"] = {"code": 400, "message": "malformed report"}
+        return
+    token = normalize_token(str(params.get("remote_token") or ""))
+    if not any(h["token"] and h["token"] == token for h in heaters.values()):
+        reply["error"] = {"code": 400,
+                          "message": f"no heater_virtual has remote_token {token}"}
+        return
+    log.info(f"report link={params.get('link')} air={fmt_num(params.get('air'))} "
+             f"element={fmt_num(params.get('element'))} power={fmt_num(params.get('power'))} "
+             f"state={params.get('state')} next={params.get('next_within')}")
+    if params.get("fault"):
+        log.info(f"report fault={params.get('fault')} {params.get('fault_name')}")
+    reply["result"] = {"ok": True}
+
+
 async def handle(ws):
     clients.add(ws)
     peer = ws.remote_address
@@ -135,6 +174,8 @@ async def handle(ws):
             reply = {"jsonrpc": "2.0", "id": mid}
             if method == "server.connection.identify":
                 reply["result"] = {"connection_id": 42}
+            elif method == "server.iheater_remote.report":
+                report_reply(msg.get("params"), reply)
             elif method in ("printer.objects.list", "printer.objects.query",
                             "printer.objects.subscribe") and klippy_state == "startup":
                 # Only the restart window errors. In "shutdown" Klipper still
@@ -187,7 +228,7 @@ async def restart_sequence():
 
 
 async def command_loop():
-    global frozen, klippy_state
+    global frozen, klippy_state, plugin_on
     loop = asyncio.get_running_loop()
     while True:
         line = await loop.run_in_executor(None, sys.stdin.readline)
@@ -224,8 +265,11 @@ async def command_loop():
         elif cmd == "drop":
             log.info("dropping all sockets")
             await asyncio.gather(*[c.close() for c in list(clients)], return_exceptions=True)
+        elif cmd == "plugin" and len(parts) == 2 and parts[1].lower() in ("on", "off"):
+            plugin_on = parts[1].lower() == "on"
+            log.info(f"plugin {'on' if plugin_on else 'off'}")
         else:
-            log.warning("commands: t <C>, restart, shutdown, freeze, thaw, drop")
+            log.warning("commands: t <C>, restart, shutdown, freeze, thaw, drop, plugin on|off")
 
 
 async def main():

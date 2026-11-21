@@ -43,15 +43,6 @@ namespace standalone {
 #define IHEATER_AP_PASSWORD ""
 #endif
 
-// Set by tools/git_url.py from the building checkout; these cover a build
-// without it.
-#ifndef IHEATER_GIT_URL
-#define IHEATER_GIT_URL "https://github.com/justinh-rahb/iHeater-Remote"
-#endif
-#ifndef IHEATER_GIT_COMMIT
-#define IHEATER_GIT_COMMIT ""
-#endif
-
 namespace {
 
 constexpr uint8_t kMaxMode = 7;
@@ -527,8 +518,28 @@ void updateUartLinkLog() {
   s_logged = true;
   s_lastLink = link;
   Serial.printf("[UART] link=%s\n", uartLinkName(link));
-  Serial.printf("[UART] poll task stack free=%u bytes\n",
-                static_cast<unsigned>(s_uart.stackHighWaterBytes()));
+}
+
+// Sends the iHeater's readings to the Klipper plugin. Only while the Remote
+// follows Klipper over UART; MoonrakerLink decides when a report is due.
+void updateKlipperReport() {
+  if (s_outputKind != OutputKind::Uart || !klipperSource())
+    return;
+  const UartLinkView view = s_uart.view();
+  policy::ReportInputs in{};
+  in.link = view.link;
+  in.hasSnapshot = view.hasSnapshot;
+  in.state = view.snap.state;
+  in.airT10 = view.snap.airT10;
+  in.heaterT10 = view.snap.heaterT10;
+  in.pwmPermille = view.snap.pwmPermille;
+  in.fanOn = view.snap.fanOn;
+  in.fault = view.snap.activeFault;
+  const auto last = s_uart.getLastCommand();
+  in.targetT10 = last.mode == ControllerOutputMode::TargetTemperature
+                     ? static_cast<uint16_t>(lroundf(last.targetTempC * 10.0f))
+                     : 0;
+  s_moonraker.report(in);
 }
 
 void updateHeapLog() {
@@ -633,15 +644,17 @@ String tenthsText(int16_t t10) {
 void handleSetupPage() {
   if (captiveRedirectIfNeeded())
     return;
-  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:13px;text-transform:uppercase;letter-spacing:.08em;color:var(--m)}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.check{display:flex;align-items:center;gap:10px}.check input{min-height:0;width:18px;height:18px;margin:0;padding:0}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>Blank password and API key fields keep their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label><label>Transmit power<select name=txPower><option value=34 __TXP_34__>8.5 dBm (default)</option><option value=44 __TXP_44__>11 dBm</option><option value=52 __TXP_52__>13 dBm</option><option value=60 __TXP_60__>15 dBm</option><option value=68 __TXP_68__>17 dBm</option><option value=78 __TXP_78__>19.5 dBm</option></select></label><p class=note>Higher power can help a weak signal; some C3 Super Mini boards fail to connect above 8.5 dBm. Changing it restarts the device.</p><p class=note>Signal: __RSSI__</p></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port id=port type=number value="__MOON_PORT__" min=1 max=65535></label><label class=check><input name=tls id=tls type=checkbox value=1 __MOON_TLS__>Use TLS (wss://, e.g. through Mainsail on 443)</label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div></section><section class=card><h2>Pairing</h2><label>Pairing token<input name=pairToken value="__PAIR_TOKEN__" maxlength=16 autocomplete=off autocapitalize=characters spellcheck=false></label><label class=check><input name=regenToken type=checkbox value=1>Generate a new token on save</label><p class=note>Put this in your [heater_virtual] section as remote_token: __PAIR_TOKEN__. After a wipe, type your old token here to keep your printer.cfg unchanged.</p></section><section class=card><h2>Output</h2><label>iHeater output<select name=output><option value=pulse __OUT_PULSE__>Pulse on GPIO3</option><option value=uart __OUT_UART__>UART on GPIO4–5</option></select></label><p class=note>Switching restarts the Remote. The iHeater must run the matching build (pulse or UART).</p></section><section class=card><h2>iHeater target range</h2>__RANGE_NOTES__<label>Min target (C)<input name=minTargetC type=number value="__MIN_TARGET__" min=11 max=90></label><label>Max target (C)<input name=maxTargetC type=number value="__MAX_TARGET__" min=11 max=90></label></section><button>Save local setup</button></form></main><script>function showSource(){document.getElementById('moon').style.display=document.getElementById('source').value==='moonraker'?'block':'none'}showSource();document.getElementById('tls').onchange=e=>{let p=document.getElementById('port');if(e.target.checked&&p.value==='7125')p.value='443';else if(!e.target.checked&&p.value==='443')p.value='7125'}</script></html>)HTML";
-  page.replace("<h1>Wi-Fi &amp; printer setup</h1>",
-               "<div style='font-size:23px;font-weight:800;letter-spacing:-1px'><span style='color:#5ba9ff'>i</span>Dryer</div><h1>Wi-Fi &amp; printer setup</h1>");
+  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:15px;font-weight:650;margin:0 0 4px}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.check{display:flex;align-items:center;gap:10px}.check input{min-height:0;width:18px;height:18px;margin:0;padding:0}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>Blank password and API key fields keep their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label><label>Transmit power<select name=txPower><option value=34 __TXP_34__>8.5 dBm (default)</option><option value=44 __TXP_44__>11 dBm</option><option value=52 __TXP_52__>13 dBm</option><option value=60 __TXP_60__>15 dBm</option><option value=68 __TXP_68__>17 dBm</option><option value=78 __TXP_78__>19.5 dBm</option></select></label><p class=note>Higher power can help a weak signal; some C3 Super Mini boards fail to connect above 8.5 dBm. Changing it restarts the device.</p><p class=note>Signal: __RSSI__</p></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port id=port type=number value="__MOON_PORT__" min=1 max=65535></label><label class=check><input name=tls id=tls type=checkbox value=1 __MOON_TLS__>Use TLS (wss://, e.g. through Mainsail on 443)</label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div></section><section class=card><h2>Pairing</h2><label>Pairing token<input name=pairToken value="__PAIR_TOKEN__" maxlength=16 autocomplete=off autocapitalize=characters spellcheck=false></label><label class=check><input name=regenToken type=checkbox value=1>Generate a new token on save</label><p class=note>Put this in your [heater_virtual] section as remote_token: __PAIR_TOKEN__. After a wipe, type your old token here to keep your printer.cfg unchanged.</p></section><section class=card><h2>Output</h2><label>iHeater output<select name=output><option value=pulse __OUT_PULSE__>Pulse on __PULSE_PIN__</option><option value=uart __OUT_UART__>UART on __UART_PINS__</option></select></label><p class=note>Switching restarts the Remote. The iHeater must run the matching build (pulse or UART).</p></section><section class=card><h2>iHeater target range</h2>__RANGE_NOTES__<label>Min target (C)<input name=minTargetC type=number value="__MIN_TARGET__" min=11 max=90></label><label>Max target (C)<input name=maxTargetC type=number value="__MAX_TARGET__" min=11 max=90></label></section><button>Save local setup</button></form></main><script>function showSource(){document.getElementById('moon').style.display=document.getElementById('source').value==='moonraker'?'block':'none'}showSource();document.getElementById('tls').onchange=e=>{let p=document.getElementById('port');if(e.target.checked&&p.value==='7125')p.value='443';else if(!e.target.checked&&p.value==='443')p.value='7125'}</script></html>)HTML";
   page.replace("</form></main>",
                String("</form><p class=note><a href='/fw'>Firmware update</a> · iHeater Remote v") + VERSION_STR + "</p></main>");
   for (const int txp : {34, 44, 52, 60, 68, 78})
     page.replace(String("__TXP_") + txp + "__", s_txPower == txp ? "selected" : "");
   page.replace("__OUT_PULSE__", s_outputKind == OutputKind::Pulse ? "selected" : "");
   page.replace("__OUT_UART__", s_outputKind == OutputKind::Uart ? "selected" : "");
+  // Pin labels come from the build flags so they always match the firmware.
+  page.replace("__PULSE_PIN__", String("GPIO") + String((int)IHEATER_TRIGGER_OUTPUT_PIN));
+  page.replace("__UART_PINS__", String("GPIO") + String((int)IHEATER_UART_TX_PIN) +
+                                    " (TX) / GPIO" + String((int)IHEATER_UART_RX_PIN) + " (RX)");
   if (s_outputKind == OutputKind::Uart) {
     const UartLinkView view = s_uart.view();
     String note = "<p class=note>These values do not change any setting on the iHeater. ";
@@ -685,7 +698,7 @@ void handleSetupPage() {
 void handleFirmwarePage() {
   if (captiveRedirectIfNeeded())
     return;
-  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iDryer firmware update</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;--bad:#ff8893;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:560px;margin:auto;padding:36px 15px}.logo{font-size:24px;font-weight:800;letter-spacing:-1px}.logo i{font-style:normal;color:var(--a)}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:18px;margin:16px 0}h1{font-size:22px;margin:14px 0 7px}.note{color:var(--m);font-size:13px;line-height:1.5}input,button{box-sizing:border-box;width:100%;min-height:45px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:8px;margin:8px 0}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;cursor:pointer}.warning{color:var(--bad)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><div class=logo><i>i</i>Dryer</div><h1>Firmware update</h1><p class=note>Installed: iHeater Remote v__VERSION__</p><section class=card><p class="note warning"><strong>__HEATNOTE__</strong> Do not disconnect power while the upload is in progress.</p><input id=file accept=".bin,application/octet-stream" type=file><button id=install>Install update</button><p class=note id=msg></p></section></main><script>const f=document.getElementById('file'),m=document.getElementById('msg');document.getElementById('install').onclick=()=>{let file=f.files[0];if(!file){m.textContent='Choose a firmware .bin first.';return}let x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST','/api/ota');x.upload.onprogress=e=>m.textContent=e.lengthComputable?'Uploading '+Math.round(e.loaded/e.total*100)+'%':'Uploading…';x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=200&&x.status<300){m.textContent='Update written. Rebooting…';setTimeout(waitForDevice,1500)}else m.textContent=r.error||'Update failed.'};x.onerror=()=>m.textContent='Update failed.';x.send(d)};function waitForDevice(){let end=Date.now()+120000,t=setInterval(async()=>{try{let r=await fetch('/',{cache:'no-store'});if(r.ok){clearInterval(t);location.href='/'}}catch(_){}if(Date.now()>end){clearInterval(t);m.textContent='The device is restarting. Reopen the dashboard when it is back online.'}},1000)}</script></main>)HTML";
+  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater firmware update</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;--bad:#ff8893;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:560px;margin:auto;padding:36px 15px}.logo{font-size:24px;font-weight:800;letter-spacing:-1px}.logo i{font-style:normal;color:var(--a)}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:18px;margin:16px 0}h1{font-size:22px;margin:14px 0 7px}.note{color:var(--m);font-size:13px;line-height:1.5}input,button{box-sizing:border-box;width:100%;min-height:45px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:8px;margin:8px 0}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;cursor:pointer}.warning{color:var(--bad)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><div class=logo><i>i</i>Heater</div><h1>Firmware update</h1><p class=note>Installed: iHeater Remote v__VERSION__</p><section class=card><p class="note warning"><strong>__HEATNOTE__</strong> Do not disconnect power while the upload is in progress.</p><input id=file accept=".bin,application/octet-stream" type=file><button id=install>Install update</button><p class=note id=msg></p></section></main><script>const f=document.getElementById('file'),m=document.getElementById('msg');document.getElementById('install').onclick=()=>{let file=f.files[0];if(!file){m.textContent='Choose a firmware .bin first.';return}let x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST','/api/ota');x.upload.onprogress=e=>m.textContent=e.lengthComputable?'Uploading '+Math.round(e.loaded/e.total*100)+'%':'Uploading…';x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=200&&x.status<300){m.textContent='Update written. Rebooting…';setTimeout(waitForDevice,1500)}else m.textContent=r.error||'Update failed.'};x.onerror=()=>m.textContent='Update failed.';x.send(d)};function waitForDevice(){let end=Date.now()+120000,t=setInterval(async()=>{try{let r=await fetch('/',{cache:'no-store'});if(r.ok){clearInterval(t);location.href='/'}}catch(_){}if(Date.now()>end){clearInterval(t);m.textContent='The device is restarting. Reopen the dashboard when it is back online.'}},1000)}</script></main>)HTML";
   page.replace("__VERSION__", VERSION_STR);
   page.replace("__HEATNOTE__",
                s_outputKind == OutputKind::Uart
@@ -718,25 +731,23 @@ const char *uartClearName(policy::ClearPhase phase) {
 // snapshot exists and the range fields once the settings have been read.
 void fillIheaterJson(JsonObject out) {
   const UartLinkView view = s_uart.view();
-  switch (view.link) {
-    case policy::LinkStatus::Waiting:
-      out["link"] = "waiting";
-      break;
-    case policy::LinkStatus::Up:
-      out["link"] = "up";
-      break;
-    case policy::LinkStatus::Restarting:
-      out["link"] = "restarting";
-      break;
-    case policy::LinkStatus::NoReply:
-      out["link"] = "no-reply";
-      break;
-  }
+  out["link"] = policy::linkStatusName(view.link);
+  // Link and report diagnostics for bench checks; the dashboard shows them
+  // behind the link details toggle.
+  JsonObject diag = out.createNestedObject("diag");
+  diag["uptimeMs"] = millis();
+  diag["firstOkMs"] = view.firstOkMs;
+  diag["timeouts"] = view.timeouts;
+  diag["badReplies"] = view.badReplies;
+  diag["stackFree"] = s_uart.stackHighWaterBytes();
+  const policy::ReportScheduler &reports = s_moonraker.reports();
+  diag["reportsSent"] = reports.sent();
+  diag["reportsRefused"] = reports.refused();
+  diag["reportsFailed"] = reports.failed();
+  diag["plugin"] = policy::pluginStateName(reports.plugin());
   if (view.hasSnapshot) {
     const policy::IheaterSnapshot &s = view.snap;
-    static const char *const kStates[] = {"booting", "idle", "heating", "hold", "fault"};
-    const uint8_t state = static_cast<uint8_t>(s.state);
-    out["state"] = state < 5 ? kStates[state] : "unknown";
+    out["state"] = policy::iheaterStateName(s.state);
     setTempC(out, "airC", s.airT10);
     setTempC(out, "heaterC", s.heaterT10);
     setTempC(out, "auxC", s.auxT10);
@@ -1260,47 +1271,7 @@ void handleRoot() {
   if (captiveRedirectIfNeeded())
     return;
 
-  String page(FPSTR(kRemoteDashboardHtml));
-  page.replace(
-      "<div class=\"brand\" aria-label=\"iDryer\" style=\"width:60px;background:transparent;color:#eaf1fa;font-size:14px;letter-spacing:-1px\"><span style=\"color:#5ba9ff\">i</span>Dryer</div>",
-      "<img class=\"brand\" src=\"/logo.png\" alt=\"iDryer\">");
-  page.replace(
-      "</style>",
-      R"HTML(
-/* Desktop refinement: anchor the interface, use the available canvas, and
-   keep the navigation pictographic rather than repeating labels. */
-.main{width:100%;max-width:1440px;margin:0 auto;padding:30px 42px}
-.brand{object-fit:cover}
-.connection{display:none}
-.tab{font-size:0;position:relative;line-height:0}
-.tab::before{content:"";position:absolute;inset:0;margin:auto;display:block;width:23px;height:23px;background:currentColor}
-.tab[data-page=home]::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m3 10 9-7 9 7'/%3E%3Cpath d='M5 9v11h14V9'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m3 10 9-7 9 7'/%3E%3Cpath d='M5 9v11h14V9'/%3E%3C/svg%3E") center/contain no-repeat}
-.tab[data-page=heat]::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2c3 3 3 6 0 9'/%3E%3Cpath d='M7 5c3 3 3 7 0 11'/%3E%3Cpath d='M17 5c3 3 3 7 0 11'/%3E%3Cpath d='M4 19c4 2 12 2 16 0'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 2c3 3 3 6 0 9'/%3E%3Cpath d='M7 5c3 3 3 7 0 11'/%3E%3Cpath d='M17 5c3 3 3 7 0 11'/%3E%3Cpath d='M4 19c4 2 12 2 16 0'/%3E%3C/svg%3E") center/contain no-repeat}
-.tab[data-page=timer]::before{-webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 7v5l3 2'/%3E%3C/svg%3E") center/contain no-repeat;mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='9'/%3E%3Cpath d='M12 7v5l3 2'/%3E%3C/svg%3E") center/contain no-repeat}
-.tab.settings::before{display:none}
-.grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start}
-.grid>.card:first-child{grid-column:auto;display:block}
-.grid>.card:first-child h2{margin-bottom:13px}
-.grid>.card:first-child .details{margin-top:18px;grid-template-columns:repeat(2,minmax(0,1fr))}
-.quick{grid-column:auto;align-self:stretch}
-.quick .actions{grid-template-columns:repeat(2,minmax(0,1fr));align-content:start}
-.footer a{color:inherit;text-decoration:none}.footer a:hover{color:var(--accent)}
-@media(max-width:650px){.rail{height:58px;padding:7px;gap:8px}.brand{width:37px;height:37px;border-radius:10px}.tab{width:42px;min-width:42px;height:39px;flex:0 0 42px;padding:0}.tab::before{width:21px;height:21px}.tab.settings{margin:0 0 0 auto;font-size:22px!important}.main{padding:15px}.card{padding:13px}.state{font-size:22px}.details{gap:7px;margin-top:14px}.metric{padding:9px}.metric strong{font-size:18px}.quick .actions{gap:7px}}
-@media(max-width:560px){.grid{grid-template-columns:1fr}.quick{grid-column:1/-1}.quick .actions{grid-template-columns:repeat(2,minmax(0,1fr))}}
-</style>)HTML");
-  page.replace("<button class=\"tab\" data-page=\"home\" aria-selected=\"true\">HOME</button>",
-               "<button class=\"tab\" data-page=\"home\" aria-label=\"Dashboard\" title=\"Dashboard\" aria-selected=\"true\">HOME</button>");
-  page.replace("<button class=\"tab\" data-page=\"heat\">HEAT</button>",
-               "<button class=\"tab\" data-page=\"heat\" aria-label=\"Heat controls\" title=\"Heat controls\">HEAT</button>");
-  page.replace("<button class=\"tab\" data-page=\"timer\">TIMER</button>",
-               "<button class=\"tab\" data-page=\"timer\" aria-label=\"Timer\" title=\"Timer\">TIMER</button>");
-  page.replace(
-      "iDryer Remote <span id=\"version\">—</span> · This remote reports the command it sends to iHeater. Current temperatures and safety-chain state are not available on this hardware.",
-      // The link points at the repository this firmware was built from
-      // (tools/git_url.py); the title names the commit.
-      "<a href=\"" IHEATER_GIT_URL "\" title=\"Built from " IHEATER_GIT_COMMIT
-      "\" target=\"_blank\" rel=\"noopener\">iHeater Remote <span id=\"version\">—</span></a>");
-  s_server.send(200, "text/html", page);
+  s_server.send_P(200, "text/html", kRemoteDashboardHtml);
 }
 
 void configureRoutes() {
@@ -1620,6 +1591,7 @@ void loop() {
   // call most likely to crash (TLS handshake, heap) while the printer is down.
   updateLinkSafety();
   s_moonraker.loop();
+  updateKlipperReport();
   updateUartLinkLog();
   updateHeapLog();
   pushStatusIfChanged();

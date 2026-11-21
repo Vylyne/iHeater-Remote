@@ -25,6 +25,9 @@ struct PollRequest {
   uint16_t value;  // register count for reads
 };
 
+// "waiting", "up", "restarting", "no-reply".
+const char *linkStatusName(LinkStatus s);
+
 class UartPollPolicy {
  public:
   // The first call makes the desired target known.

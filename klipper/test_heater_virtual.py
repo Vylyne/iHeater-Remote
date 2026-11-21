@@ -26,13 +26,14 @@ class FakeReactor:
 
     def __init__(self):
         self.timers = []
+        self.now = 0.
 
     def register_timer(self, callback, waketime=None):
         self.timers.append(callback)
         return callback
 
     def monotonic(self):
-        return 0.
+        return self.now
 
 
 class FakePrinter:
@@ -53,6 +54,11 @@ class FakePrinter:
 
     def load_object(self, config, name):
         return self.objects[name]
+
+    def add_object(self, name, obj):
+        if name in self.objects:
+            raise Exception("Printer object '%s' already created" % (name,))
+        self.objects[name] = obj
 
     def register_event_handler(self, event, callback):
         self.handlers.setdefault(event, []).append(callback)
@@ -109,12 +115,42 @@ class FakeHeaters:
         self.heaters = {}
         self.available_heaters = []
         self.registered_sensors = []
+        self.sensor_factories = {}
+
+    def add_sensor_factory(self, sensor_type, sensor_factory):
+        self.sensor_factories[sensor_type] = sensor_factory
 
     def register_sensor(self, config, psensor, gcode_id=None):
         self.registered_sensors.append(config.get_name())
 
     def set_temperature(self, heater, temp, wait=False):
         heater.set_temp(temp)
+
+
+class FakeWebhooks:
+    def __init__(self):
+        self.endpoints = {}
+        self.registrations = []
+
+    def register_endpoint(self, path, callback):
+        if path in self.endpoints:
+            raise Exception("Already registered handler for %s" % (path,))
+        self.endpoints[path] = callback
+        self.registrations.append(path)
+
+
+class FakeWebRequest:
+    error = CommandError
+
+    def __init__(self, args):
+        self.args = args
+        self.sent = []
+
+    def get_args(self):
+        return self.args
+
+    def send(self, data):
+        self.sent.append(data)
 
 
 class FakeGcode:
@@ -138,10 +174,12 @@ class HeaterVirtualTest(unittest.TestCase):
         self.printer = FakePrinter()
         self.heaters = FakeHeaters()
         self.gcode = FakeGcode()
+        self.webhooks = FakeWebhooks()
         self.sensor = FakeSensor(21.5)
         self.printer.objects.update({
             'heaters': self.heaters,
             'gcode': self.gcode,
+            'webhooks': self.webhooks,
             'temperature_sensor chamber_hexa': self.sensor,
         })
 
@@ -150,7 +188,10 @@ class HeaterVirtualTest(unittest.TestCase):
         opts = {'sensor': 'temperature_sensor chamber_hexa'}
         opts.update(options)
         self.config = FakeConfig(self.printer, 'heater_virtual chamber', opts)
-        return heater_virtual.load_config_prefix(self.config)
+        hv = heater_virtual.load_config_prefix(self.config)
+        # Klipper adds the object returned by load_config_prefix.
+        self.printer.objects['heater_virtual chamber'] = hv
+        return hv
 
     def make_connected(self, sensor_temp=21.5, **options):
         hv = self.make(sensor_temp, **options)
@@ -205,11 +246,6 @@ class HeaterVirtualTest(unittest.TestCase):
     def test_max_target_below_45_is_config_error(self):
         with self.assertRaises(ConfigError):
             self.make(max_target=44.)
-
-    def test_missing_sensor_option_is_config_error(self):
-        config = FakeConfig(self.printer, 'heater_virtual chamber', {})
-        with self.assertRaises(ConfigError):
-            heater_virtual.load_config_prefix(config)
 
     def test_missing_sensor_object_on_connect_is_config_error(self):
         del self.printer.objects['temperature_sensor chamber_hexa']
@@ -280,6 +316,195 @@ class HeaterVirtualTest(unittest.TestCase):
     def test_get_status_reports_sensor_temperature(self):
         hv = self.make_connected(sensor_temp=33.333)
         self.assertEqual(hv.get_status(0.)['temperature'], 33.33)
+
+    # --- Two-way link ---
+
+    def post(self, **over):
+        req = FakeWebRequest(report(**over))
+        self.webhooks.endpoints['heater_virtual/report'](req)
+        return req
+
+    def make_second(self, token='ABCDEFGH'):
+        config = FakeConfig(self.printer, 'heater_virtual tent',
+                            {'sensor': 'temperature_sensor chamber_hexa',
+                             'remote_token': token})
+        hv = heater_virtual.load_config_prefix(config)
+        self.printer.fire('klippy:connect')
+        return hv
+
+    def test_report_endpoint_registered_once(self):
+        self.make(remote_token='7K3P9QXM')
+        self.make_second()
+        self.assertEqual(self.webhooks.registrations,
+                         ['heater_virtual/report'])
+
+    def test_report_routes_by_token(self):
+        first = self.make_connected(remote_token='ABCDEFGH')
+        second = self.make_second('7K3P9QXM')
+        self.printer.reactor.now = 100.
+        req = self.post()
+        self.assertEqual(req.sent, [{'ok': True}])
+        self.assertTrue(second.get_status(100.)['linked'])
+        self.assertFalse(first.get_status(100.)['linked'])
+        self.assertEqual(first.get_status(100.)['iheater_state'], '')
+
+    def test_report_token_hyphen_and_case(self):
+        hv = self.make_connected(remote_token='7K3P9QXM')
+        self.printer.reactor.now = 100.
+        self.post(remote_token='7k3p-9qxm')
+        self.assertTrue(hv.get_status(100.)['linked'])
+
+    def test_report_unknown_token_is_error(self):
+        self.make_connected(remote_token='7K3P9QXM')
+        with self.assertRaises(CommandError) as ctx:
+            self.post(remote_token='7K3P9QXX')
+        self.assertIn('7K3P-9QXX', str(ctx.exception))
+
+    def test_report_sets_temperature_power_linked(self):
+        hv = self.make_connected(remote_token='7K3P9QXM')
+        self.printer.reactor.now = 100.
+        self.post()
+        st = hv.get_status(100.)
+        self.assertEqual(st['temperature'], 41.5)
+        self.assertEqual(st['power'], 0.42)
+        self.assertTrue(st['linked'])
+        self.assertEqual(st['iheater_state'], 'heating')
+        self.assertTrue(st['fan'])
+        self.assertEqual(st['fault'], 0)
+        self.assertEqual(st['fault_name'], 'none')
+
+    def test_report_goes_stale_after_2x_next_within_plus_2(self):
+        hv = self.make_connected(remote_token='7K3P9QXM')
+        self.printer.reactor.now = 100.
+        self.post(next_within=5)
+        self.assertTrue(hv.get_status(112.0)['linked'])
+        st = hv.get_status(112.1)
+        self.assertFalse(st['linked'])
+        self.assertEqual(st['temperature'], 21.5)
+
+    def test_link_not_up_falls_back_to_sensor(self):
+        hv = self.make_connected(remote_token='7K3P9QXM')
+        self.printer.reactor.now = 100.
+        self.post(link='no-reply', air=None, element=None, power=None)
+        st = hv.get_status(100.)
+        self.assertFalse(st['linked'])
+        self.assertEqual(st['temperature'], 21.5)
+        self.assertEqual(st['power'], 0.)
+        hv.set_temp(50.)
+        self.assertEqual(hv.get_status(100.)['power'], 1.)
+
+    def test_no_sensor_keeps_last_air(self):
+        config = FakeConfig(self.printer, 'heater_virtual chamber',
+                            {'remote_token': '7K3P9QXM'})
+        hv = heater_virtual.load_config_prefix(config)
+        self.printer.fire('klippy:connect')
+        self.assertEqual(hv.get_status(0.)['temperature'], 0.)
+        self.printer.reactor.now = 100.
+        self.post()
+        self.assertEqual(hv.get_status(100.)['temperature'], 41.5)
+        self.assertEqual(hv.get_status(500.)['temperature'], 41.5)
+        self.assertFalse(hv.get_status(500.)['linked'])
+
+    def test_malformed_report_raises_command_error_only(self):
+        hv = self.make_connected(remote_token='7K3P9QXM')
+        self.printer.reactor.now = 100.
+        self.post()
+        self.printer.reactor.now = 111.
+        before = hv.get_status(111.)
+        cases = [{'air': 'hot'}, {'air': False}, {'fault': None},
+                 {'fault': True}, {'fan': 1}, {'link': 'sideways'},
+                 {'next_within': 0}, {'next_within': 61},
+                 {'next_within': True}, {'air': float('nan')},
+                 {'air': 10 ** 400}, {'state': 5},
+                 {'power': 1.5}, {'power': -0.1}, {'fault': 256},
+                 {'fault': -1}, {'fault': 2 ** 70}, {'air': 5000},
+                 {'air': -100.5}, {'element': 1000.5}]
+        for over in cases:
+            with self.subTest(over=over):
+                args = {'air': 77.7, 'element': 66.6, 'power': 0.9}
+                args.update(over)
+                with self.assertRaises(CommandError):
+                    self.post(**args)
+                self.assertEqual(hv.get_status(111.), before)
+                self.assertEqual(hv.get_status(111.)['temperature'], 41.5)
+                self.assertTrue(hv.get_status(112.)['linked'])
+                self.assertFalse(hv.get_status(112.1)['linked'])
+                self.assertEqual(hv.get_reading('air'), 41.5)
+                self.assertEqual(hv.get_reading('element'), 88.0)
+        no_state = report()
+        del no_state['state']
+        no_token = report()
+        del no_token['remote_token']
+        for args in (no_state, no_token, report(remote_token=None),
+                     report(remote_token=12), report(remote_token='')):
+            with self.subTest(args=args):
+                with self.assertRaises(CommandError):
+                    self.webhooks.endpoints['heater_virtual/report'](
+                        FakeWebRequest(args))
+                self.assertEqual(hv.get_status(111.), before)
+
+    def test_unknown_report_field_ignored(self):
+        hv = self.make_connected(remote_token='7K3P9QXM')
+        self.printer.reactor.now = 100.
+        req = self.post(humidity=40)
+        self.assertEqual(req.sent, [{'ok': True}])
+        self.assertTrue(hv.get_status(100.)['linked'])
+
+    def test_set_temp_accepted_while_unlinked(self):
+        hv = self.make_connected(remote_token='7K3P9QXM')
+        hv.set_temp(60.)
+        self.assertEqual(hv.get_status(0.)['target'], 60.)
+        self.assertFalse(hv.get_status(0.)['linked'])
+
+    def make_remote_sensor(self, **options):
+        opts = {'sensor_type': 'iheater_remote', 'heater': 'chamber'}
+        opts.update(options)
+        config = FakeConfig(self.printer, 'temperature_sensor chamber_element',
+                            opts)
+        factory = self.heaters.sensor_factories['iheater_remote']
+        sensor = factory(config)
+        got = []
+        sensor.setup_callback(lambda t, v: got.append((t, v)))
+        sensor.setup_minmax(0., 100.)
+        return sensor, got
+
+    def test_iheater_remote_sensor_reports_element(self):
+        self.make_connected(remote_token='7K3P9QXM')
+        sensor, got = self.make_remote_sensor()
+        self.printer.fire('klippy:connect')
+        self.assertEqual(sensor.get_report_time_delta(), 1.0)
+        self.printer.reactor.now = 100.
+        self.post()
+        self.printer.reactor.timers[-1](101.)
+        self.assertEqual(got, [(101., 88.0)])
+
+    def test_iheater_remote_sensor_reading_air(self):
+        self.make_connected(remote_token='7K3P9QXM')
+        sensor, got = self.make_remote_sensor(reading='air')
+        self.printer.fire('klippy:connect')
+        self.printer.reactor.now = 100.
+        self.post()
+        self.printer.reactor.timers[-1](101.)
+        self.assertEqual(got, [(101., 41.5)])
+
+    def test_iheater_remote_sensor_bad_heater_is_config_error(self):
+        self.make_connected(remote_token='7K3P9QXM')
+        self.make_remote_sensor(heater='nope')
+        with self.assertRaises(ConfigError):
+            self.printer.fire('klippy:connect')
+
+    def test_iheater_remote_sensor_bad_reading_is_config_error(self):
+        self.make_connected(remote_token='7K3P9QXM')
+        with self.assertRaises(ConfigError):
+            self.make_remote_sensor(reading='aux')
+
+
+def report(**over):
+    r = {'remote_token': '7K3P9QXM', 'link': 'up', 'air': 41.5,
+         'element': 88.0, 'power': 0.42, 'fan': True, 'state': 'heating',
+         'fault': 0, 'fault_name': 'none', 'next_within': 5}
+    r.update(over)
+    return r
 
 
 if __name__ == '__main__':

@@ -62,9 +62,10 @@ document does not repeat the register map.
 ## Constraints
 
 - ESP32-C3 Super Mini, Arduino-ESP32 2.0.17, single core.
-- **Pins:** UART1, TX on GPIO4 to the iHeater's D+ (its RX), RX on GPIO5
+- **Pins:** UART1, TX on GPIO4 to the iHeater's D+ (its RX), RX on GPIO3
   from D− (its TX). The user's 5-pin JST carries 5V, GND, 3V3, GPIO4,
-  GPIO5. **The 3V3 wire stays unconnected at the iHeater end**: USB-C has
+  GPIO3 (changed from GPIO5 at the bench; GPIO3 is also the pulse pin, so
+  pulse mode must not be used with this cable). **The 3V3 wire stays unconnected at the iHeater end**: USB-C has
   no 3.3 V line and the iHeater makes its own from VBUS. GPIO20/21 are not
   used: they are UART0, where the ROM prints at every boot. If the wiring
   turns out reversed, the pins swap in firmware (build flags), no

@@ -1,6 +1,7 @@
 #include <unity.h>
 
 #include "RemotePolicy.h"
+#include "ReportPolicy.h"
 
 extern "C" {
 #include "modbus_rtu.h"
@@ -363,6 +364,244 @@ void test_link_loss_carry_adds_boot_time() {
   TEST_ASSERT_TRUE(linkLossExpired(carried, kLinkLossGraceMs));
 }
 
+static ReportInputs upIdle() {
+  ReportInputs in{};
+  in.link = LinkStatus::Up;
+  in.hasSnapshot = true;
+  in.state = IheaterState::Idle;
+  in.airT10 = 215;
+  in.heaterT10 = 230;
+  in.pwmPermille = 0;
+  in.fanOn = false;
+  in.fault = 0;
+  in.targetT10 = 0;
+  return in;
+}
+
+void test_link_and_state_names() {
+  TEST_ASSERT_EQUAL_STRING("no-reply", linkStatusName(LinkStatus::NoReply));
+  TEST_ASSERT_EQUAL_STRING("hold", iheaterStateName(IheaterState::Hold));
+  TEST_ASSERT_EQUAL_STRING("unknown", iheaterStateName(static_cast<IheaterState>(9)));
+  TEST_ASSERT_EQUAL_STRING("missing", pluginStateName(PluginState::Missing));
+}
+
+void test_report_values_null_when_link_not_up() {
+  ReportInputs in = upIdle();
+  in.link = LinkStatus::Restarting;
+  const ReportValues v = reportValues(in);
+  TEST_ASSERT_FALSE(v.hasAir);
+  TEST_ASSERT_FALSE(v.hasElement);
+  TEST_ASSERT_FALSE(v.hasPower);
+}
+
+void test_report_values_null_on_no_reading() {
+  ReportInputs in = upIdle();
+  in.airT10 = kNoReading;
+  const ReportValues v = reportValues(in);
+  TEST_ASSERT_FALSE(v.hasAir);
+  TEST_ASSERT_TRUE(v.hasElement);
+}
+
+void test_report_values_range_air_and_element() {
+  for (int which = 0; which < 2; which++) {
+    ReportInputs in = upIdle();
+    int16_t &field = which == 0 ? in.airT10 : in.heaterT10;
+    field = 10001;
+    ReportValues v = reportValues(in);
+    TEST_ASSERT_FALSE(which == 0 ? v.hasAir : v.hasElement);
+    TEST_ASSERT_TRUE(which == 0 ? v.hasElement : v.hasAir);
+    TEST_ASSERT_TRUE(v.hasPower);
+    field = -1001;
+    v = reportValues(in);
+    TEST_ASSERT_FALSE(which == 0 ? v.hasAir : v.hasElement);
+    field = 10000;
+    v = reportValues(in);
+    TEST_ASSERT_TRUE(which == 0 ? v.hasAir : v.hasElement);
+    TEST_ASSERT_EQUAL_INT16(10000, which == 0 ? v.airT10 : v.elementT10);
+    field = -1000;
+    v = reportValues(in);
+    TEST_ASSERT_TRUE(which == 0 ? v.hasAir : v.hasElement);
+    TEST_ASSERT_EQUAL_INT16(-1000, which == 0 ? v.airT10 : v.elementT10);
+  }
+}
+
+void test_report_values_range_power() {
+  ReportInputs in = upIdle();
+  in.pwmPermille = 1001;
+  ReportValues v = reportValues(in);
+  TEST_ASSERT_FALSE(v.hasPower);
+  TEST_ASSERT_TRUE(v.hasAir);
+  TEST_ASSERT_TRUE(v.hasElement);
+  in.pwmPermille = 1000;
+  v = reportValues(in);
+  TEST_ASSERT_TRUE(v.hasPower);
+  TEST_ASSERT_EQUAL_UINT16(1000, v.powerPermille);
+}
+
+void test_report_values_null_without_snapshot() {
+  ReportInputs in = upIdle();
+  in.hasSnapshot = false;
+  const ReportValues v = reportValues(in);
+  TEST_ASSERT_FALSE(v.hasAir);
+  TEST_ASSERT_FALSE(v.hasElement);
+  TEST_ASSERT_FALSE(v.hasPower);
+}
+
+void test_report_interval_idle_and_active() {
+  ReportInputs in = upIdle();
+  TEST_ASSERT_EQUAL_UINT32(15000, reportIntervalMs(in));
+  TEST_ASSERT_EQUAL_UINT32(15, reportValues(in).nextWithinS);
+  in.targetT10 = 600;
+  TEST_ASSERT_EQUAL_UINT32(5000, reportIntervalMs(in));
+  in = upIdle();
+  in.state = IheaterState::Heating;
+  TEST_ASSERT_EQUAL_UINT32(5000, reportIntervalMs(in));
+  in.state = IheaterState::Hold;
+  TEST_ASSERT_EQUAL_UINT32(5000, reportIntervalMs(in));
+}
+
+void test_report_first_send_due() {
+  ReportScheduler s;
+  TEST_ASSERT_TRUE(s.due(upIdle(), 0));
+}
+
+void test_report_not_due_while_in_flight() {
+  ReportScheduler s;
+  const ReportInputs in = upIdle();
+  s.onSent(in, 0);
+  TEST_ASSERT_FALSE(s.due(in, 20000));
+  s.onAccepted();
+  TEST_ASSERT_TRUE(s.due(in, 20000));
+}
+
+void test_report_change_waits_min_gap() {
+  ReportScheduler s;
+  ReportInputs in = upIdle();
+  s.onSent(in, 1000);
+  s.onAccepted();
+  in.airT10 = 216;
+  TEST_ASSERT_FALSE(s.due(in, 1999));
+  TEST_ASSERT_TRUE(s.due(in, 2000));
+}
+
+void test_report_power_change_by_percent() {
+  ReportScheduler s;
+  ReportInputs in = upIdle();
+  s.onSent(in, 0);
+  s.onAccepted();
+  in.pwmPermille = 9;
+  TEST_ASSERT_FALSE(s.due(in, 5000));
+  in.pwmPermille = 10;
+  TEST_ASSERT_TRUE(s.due(in, 5000));
+}
+
+void test_report_heartbeat_idle_15s() {
+  ReportScheduler s;
+  const ReportInputs in = upIdle();
+  s.onSent(in, 0);
+  s.onAccepted();
+  TEST_ASSERT_FALSE(s.due(in, 14999));
+  TEST_ASSERT_TRUE(s.due(in, 15000));
+}
+
+void test_report_heartbeat_active_5s() {
+  ReportScheduler s;
+  ReportInputs in = upIdle();
+  in.targetT10 = 600;
+  s.onSent(in, 0);
+  s.onAccepted();
+  TEST_ASSERT_FALSE(s.due(in, 4999));
+  TEST_ASSERT_TRUE(s.due(in, 5000));
+}
+
+void test_report_target_change_is_change() {
+  ReportScheduler s;
+  ReportInputs in = upIdle();
+  s.onSent(in, 0);
+  s.onAccepted();
+  in.targetT10 = 600;
+  TEST_ASSERT_TRUE(s.due(in, 1000));
+}
+
+void test_report_link_drop_sends_nulls() {
+  ReportScheduler s;
+  ReportInputs in = upIdle();
+  s.onSent(in, 0);
+  s.onAccepted();
+  in.link = LinkStatus::NoReply;
+  TEST_ASSERT_TRUE(s.due(in, 1000));
+  TEST_ASSERT_FALSE(reportValues(in).hasAir);
+}
+
+void test_report_method_not_found_stops_until_reset() {
+  ReportScheduler s;
+  const ReportInputs in = upIdle();
+  s.onSent(in, 0);
+  s.onMethodNotFound();
+  TEST_ASSERT_EQUAL(PluginState::Missing, s.plugin());
+  TEST_ASSERT_FALSE(s.due(in, 60000));
+  s.reset();
+  TEST_ASSERT_TRUE(s.due(in, 60000));
+  TEST_ASSERT_EQUAL(PluginState::Unknown, s.plugin());
+}
+
+void test_report_force_next_sends_without_change() {
+  ReportScheduler s;
+  const ReportInputs in = upIdle();
+  s.onSent(in, 0);
+  s.onAccepted();
+  s.forceNext();
+  TEST_ASSERT_FALSE(s.due(in, 999));
+  TEST_ASSERT_TRUE(s.due(in, 1000));
+  s.onSent(in, 1000);
+  s.onAccepted();
+  TEST_ASSERT_FALSE(s.due(in, 2000));
+}
+
+void test_report_force_next_keeps_in_flight_and_missing() {
+  ReportScheduler s;
+  const ReportInputs in = upIdle();
+  s.onSent(in, 0);
+  s.forceNext();
+  TEST_ASSERT_FALSE(s.due(in, 5000));
+  s.onAccepted();
+  TEST_ASSERT_TRUE(s.due(in, 5000));
+
+  ReportScheduler m;
+  m.onSent(in, 0);
+  m.onMethodNotFound();
+  m.forceNext();
+  TEST_ASSERT_FALSE(m.due(in, 60000));
+  TEST_ASSERT_EQUAL(PluginState::Missing, m.plugin());
+}
+
+void test_report_counters() {
+  ReportScheduler s;
+  const ReportInputs in = upIdle();
+  s.onSent(in, 0);
+  s.onAccepted();
+  s.onSent(in, 1000);
+  s.onRefused();
+  s.onSent(in, 2000);
+  s.onFailed();
+  TEST_ASSERT_EQUAL_UINT32(3, s.sent());
+  TEST_ASSERT_EQUAL_UINT32(1, s.refused());
+  TEST_ASSERT_EQUAL_UINT32(1, s.failed());
+  s.reset();
+  TEST_ASSERT_EQUAL_UINT32(3, s.sent());
+  TEST_ASSERT_EQUAL_UINT32(1, s.refused());
+  TEST_ASSERT_EQUAL_UINT32(1, s.failed());
+}
+
+void test_report_wraparound() {
+  ReportScheduler s;
+  const ReportInputs in = upIdle();
+  s.onSent(in, 0xFFFFFF00u);
+  s.onAccepted();
+  TEST_ASSERT_FALSE(s.due(in, 0xFFFFFF00u + 14999u));
+  TEST_ASSERT_TRUE(s.due(in, 0xFFFFFF00u + 15000u));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_token_normalize);
@@ -412,5 +651,25 @@ int main() {
   RUN_TEST(test_link_loss_carry_healthy_clears);
   RUN_TEST(test_link_loss_carry_zero_is_valid);
   RUN_TEST(test_link_loss_carry_adds_boot_time);
+  RUN_TEST(test_link_and_state_names);
+  RUN_TEST(test_report_values_null_when_link_not_up);
+  RUN_TEST(test_report_values_null_on_no_reading);
+  RUN_TEST(test_report_values_range_air_and_element);
+  RUN_TEST(test_report_values_range_power);
+  RUN_TEST(test_report_values_null_without_snapshot);
+  RUN_TEST(test_report_interval_idle_and_active);
+  RUN_TEST(test_report_first_send_due);
+  RUN_TEST(test_report_not_due_while_in_flight);
+  RUN_TEST(test_report_change_waits_min_gap);
+  RUN_TEST(test_report_power_change_by_percent);
+  RUN_TEST(test_report_heartbeat_idle_15s);
+  RUN_TEST(test_report_heartbeat_active_5s);
+  RUN_TEST(test_report_target_change_is_change);
+  RUN_TEST(test_report_link_drop_sends_nulls);
+  RUN_TEST(test_report_method_not_found_stops_until_reset);
+  RUN_TEST(test_report_force_next_sends_without_change);
+  RUN_TEST(test_report_force_next_keeps_in_flight_and_missing);
+  RUN_TEST(test_report_counters);
+  RUN_TEST(test_report_wraparound);
   return UNITY_END();
 }

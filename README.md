@@ -68,11 +68,14 @@ build). The dashboard then shows the iHeater's live state.
 | ESP32-C3 Super Mini | iHeater USB-C pin | Purpose |
 | --- | --- | --- |
 | `GPIO4` (TX) | `D+` | Remote to iHeater |
-| `GPIO5` (RX) | `D−` | iHeater to Remote |
+| `GPIO3` (RX) | `D−` | iHeater to Remote |
 | `5V` | `VBUS` | iHeater power |
 | `GND` | `GND` | common ground |
 
 - Leave `3V3` unconnected at the iHeater.
+- `GPIO3` is also the pulse output pin. Keep **Output** on UART while
+  this cable is fitted: in pulse mode the Remote would drive the iHeater's
+  TX line.
 - Never connect the iHeater's JST 5 V connector at the same time as the
   Remote's 5 V: the board has no 5 V regulator.
 - Do not connect or disconnect the cable with power applied.

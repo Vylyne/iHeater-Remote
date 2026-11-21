@@ -19,6 +19,9 @@ constexpr int16_t kNoReading = INT16_MIN;  // wire 0x8000
 
 enum class IheaterState : uint8_t { Booting = 0, Idle = 1, Heating = 2, Hold = 3, Fault = 4 };
 
+// "booting", "idle", "heating", "hold", "fault"; anything else "unknown".
+const char *iheaterStateName(IheaterState s);
+
 struct IheaterSnapshot {
   uint16_t proto, fwVersion, fwPatch;
   IheaterState state;

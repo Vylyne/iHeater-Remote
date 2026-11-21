@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "standalone/MoonrakerCa.h"
+#include <UartRegisters.h>
 #include "version.h"
 
 namespace iheaterlink::standalone {
@@ -13,6 +14,10 @@ constexpr const char *kPath = "/websocket";
 constexpr const char *kClientName = "iheater-remote";
 constexpr const char *kClientUrl = "https://github.com/Vylyne/iHeater-Remote";
 constexpr size_t kParseDocBytes = 8192;
+
+constexpr const char *kReportMethod = "server.iheater_remote.report";
+constexpr int kMethodNotFound = -32601;
+constexpr uint32_t kRefusedLogGapMs = 60000;
 
 constexpr const char *kNotifyStatus = "notify_status_update";
 constexpr const char *kNotifyReady = "notify_klippy_ready";
@@ -157,9 +162,19 @@ void MoonrakerLink::loop() {
   if (!socketUp_) return;
 
   const uint32_t now = millis();
-  for (const Slot &slot : slots_) {
+  for (Slot &slot : slots_) {
     if (slot.kind != Pending::None &&
         policy::intervalElapsed(now, slot.sentMs, policy::kRequestTimeoutMs)) {
+      if (slot.kind == Pending::Report) {
+        // A report is best effort: free its slot and let the next one go out.
+        // The link and target following carry on. A late reply for this id
+        // matches no slot and is ignored.
+        scheduler_.onFailed();
+        slot.kind = Pending::None;
+        Serial.printf("[MOON] report %u unanswered, dropped\n",
+                      static_cast<unsigned>(slot.id));
+        continue;
+      }
       lastError_ = "no reply from Moonraker";
       Serial.printf("[MOON] request %u timed out, reconnecting\n",
                     static_cast<unsigned>(slot.id));
@@ -311,7 +326,7 @@ void MoonrakerLink::onText(uint8_t *payload, size_t length) {
 
   JsonVariantConst error = root["error"];
   if (!error.isNull()) {
-    handleError(kind, error["message"] | "error");
+    handleError(kind, error["code"] | 0, error["message"] | "error");
   } else {
     handleResult(kind, root["result"]);
   }
@@ -325,6 +340,7 @@ void MoonrakerLink::handleNotification(const char *method,
     JsonObjectConst status = params[0].as<JsonObjectConst>();
     if (status.isNull() || !following()) return;  // unpaired: not ours
     subscribed_ = true;
+    scheduler_.forceNext();
     phase_ = Phase::Subscribed;
     applyStatus(status);
   } else if (strcmp(method, kNotifyReady) == 0) {
@@ -405,17 +421,22 @@ void MoonrakerLink::handleResult(Pending kind, JsonVariantConst result) {
       if (!following()) break;
       JsonObjectConst status = result["status"].as<JsonObjectConst>();
       subscribed_ = true;
+      scheduler_.forceNext();
       phase_ = Phase::Subscribed;
       applyStatus(status);
       break;
     }
+
+    case Pending::Report:
+      scheduler_.onAccepted();
+      break;
 
     case Pending::None:
       break;
   }
 }
 
-void MoonrakerLink::handleError(Pending kind, const char *message) {
+void MoonrakerLink::handleError(Pending kind, int code, const char *message) {
   switch (kind) {
     case Pending::Identify:
       Serial.printf("[MOON] identify failed: %s\n", message);
@@ -433,6 +454,24 @@ void MoonrakerLink::handleError(Pending kind, const char *message) {
       subscribed_ = false;
       klippy_ = policy::KlippyState::NotReady;
       phase_ = Phase::Discovering;
+      break;
+
+    case Pending::Report:
+      // Never touches subscribed_, klippy_ or phase_: a refused report says
+      // nothing about the target link.
+      if (code == kMethodNotFound) {
+        scheduler_.onMethodNotFound();
+        Serial.println("[MOON] Klipper plugin not installed: reports stopped until reconnect");
+      } else {
+        scheduler_.onRefused();
+        const uint32_t now = millis();
+        if (!refusedLogged_ ||
+            policy::intervalElapsed(now, lastRefusedLogMs_, kRefusedLogGapMs)) {
+          refusedLogged_ = true;
+          lastRefusedLogMs_ = now;
+          Serial.printf("[MOON] report refused (%d): %s\n", code, message);
+        }
+      }
       break;
 
     case Pending::None:
@@ -541,6 +580,40 @@ void MoonrakerLink::sendHeaterRequest(const char *method, Pending kind) {
   call(method, params.as<JsonVariantConst>(), kind);
 }
 
+void MoonrakerLink::report(const policy::ReportInputs &in) {
+  if (!running_ || !socketUp_ || !subscribed_ || token_[0] == '\0') return;
+  const uint32_t now = millis();
+  if (scheduler_.inFlight() || !scheduler_.due(in, now)) return;
+
+  const policy::ReportValues v = policy::reportValues(in);
+  StaticJsonDocument<384> params;
+  params["remote_token"] = token_;
+  params["link"] = policy::linkStatusName(in.link);
+  if (in.hasSnapshot) {
+    params["state"] = policy::iheaterStateName(in.state);
+    params["fan"] = in.fanOn;
+    params["fault"] = in.fault;
+    params["fault_name"] = policy::faultName(in.fault);
+  } else {
+    params["state"] = "unknown";
+    params["fan"] = false;
+    params["fault"] = 0;
+    params["fault_name"] = policy::faultName(0);
+  }
+  if (v.hasAir) params["air"] = v.airT10 / 10.0f; else params["air"] = static_cast<const char *>(nullptr);
+  if (v.hasElement) params["element"] = v.elementT10 / 10.0f; else params["element"] = static_cast<const char *>(nullptr);
+  if (v.hasPower) params["power"] = v.powerPermille / 1000.0f; else params["power"] = static_cast<const char *>(nullptr);
+  params["next_within"] = v.nextWithinS;
+  if (params.overflowed()) {
+    Serial.println("[MOON] report frame too large, not sent");
+    return;
+  }
+
+  const uint32_t id = call(kReportMethod, params.as<JsonVariantConst>(), Pending::Report);
+  scheduler_.onSent(in, now);
+  if (id == 0) scheduler_.onFailed();
+}
+
 void MoonrakerLink::applyStatus(JsonObjectConst status) {
   if (status.isNull()) return;
 
@@ -573,6 +646,7 @@ void MoonrakerLink::resetSession() {
   subscribed_ = false;
   phase_ = Phase::Identifying;
   klippy_ = policy::KlippyState::Unknown;
+  scheduler_.reset();
 }
 
 // Discovery ended with no single paired heater. Any heat commanded through an
