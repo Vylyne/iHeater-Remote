@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <RemotePolicy.h>
+#include <ReportPolicy.h>
 #include <WebSocketsClient.h>
 
 namespace iheaterlink::standalone {
@@ -36,8 +37,13 @@ class MoonrakerLink {
   const String &heaterObject() const;
   const String &lastError() const;
 
+  // Sends the iHeater's readings to the Klipper plugin when one is due. Call
+  // every loop() pass; it does nothing until the link is subscribed.
+  void report(const policy::ReportInputs &in);
+  const policy::ReportScheduler &reports() const { return scheduler_; }
+
  private:
-  enum class Pending : uint8_t { None, Identify, List, Discover, Subscribe, Query };
+  enum class Pending : uint8_t { None, Identify, List, Discover, Subscribe, Query, Report };
 
   // Where the session is between socket connect and a live subscription.
   enum class Phase : uint8_t {
@@ -62,7 +68,7 @@ class MoonrakerLink {
   void onText(uint8_t *payload, size_t length);
   void handleNotification(const char *method, JsonVariantConst params);
   void handleResult(Pending kind, JsonVariantConst result);
-  void handleError(Pending kind, const char *message);
+  void handleError(Pending kind, int code, const char *message);
 
   uint32_t call(const char *method, JsonVariantConst params, Pending kind);
   void sendIdentify();
@@ -97,6 +103,10 @@ class MoonrakerLink {
 
   String heater_;
   String lastError_;
+
+  policy::ReportScheduler scheduler_;
+  uint32_t lastRefusedLogMs_ = 0;
+  bool refusedLogged_ = false;
 };
 
 }  // namespace iheaterlink::standalone

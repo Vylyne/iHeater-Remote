@@ -520,6 +520,28 @@ void updateUartLinkLog() {
   Serial.printf("[UART] link=%s\n", uartLinkName(link));
 }
 
+// Sends the iHeater's readings to the Klipper plugin. Only while the Remote
+// follows Klipper over UART; MoonrakerLink decides when a report is due.
+void updateKlipperReport() {
+  if (s_outputKind != OutputKind::Uart || !klipperSource())
+    return;
+  const UartLinkView view = s_uart.view();
+  policy::ReportInputs in{};
+  in.link = view.link;
+  in.hasSnapshot = view.hasSnapshot;
+  in.state = view.snap.state;
+  in.airT10 = view.snap.airT10;
+  in.heaterT10 = view.snap.heaterT10;
+  in.pwmPermille = view.snap.pwmPermille;
+  in.fanOn = view.snap.fanOn;
+  in.fault = view.snap.activeFault;
+  const auto last = s_uart.getLastCommand();
+  in.targetT10 = last.mode == ControllerOutputMode::TargetTemperature
+                     ? static_cast<uint16_t>(lroundf(last.targetTempC * 10.0f))
+                     : 0;
+  s_moonraker.report(in);
+}
+
 void updateHeapLog() {
   const uint32_t now = millis();
   if (!policy::intervalElapsed(now, s_heapLogAtMs, kHeapLogMs))
@@ -710,13 +732,19 @@ const char *uartClearName(policy::ClearPhase phase) {
 void fillIheaterJson(JsonObject out) {
   const UartLinkView view = s_uart.view();
   out["link"] = policy::linkStatusName(view.link);
-  // Link diagnostics for bench checks; the dashboard does not show them.
+  // Link and report diagnostics for bench checks; the dashboard shows them
+  // behind the link details toggle.
   JsonObject diag = out.createNestedObject("diag");
   diag["uptimeMs"] = millis();
   diag["firstOkMs"] = view.firstOkMs;
   diag["timeouts"] = view.timeouts;
   diag["badReplies"] = view.badReplies;
   diag["stackFree"] = s_uart.stackHighWaterBytes();
+  const policy::ReportScheduler &reports = s_moonraker.reports();
+  diag["reportsSent"] = reports.sent();
+  diag["reportsRefused"] = reports.refused();
+  diag["reportsFailed"] = reports.failed();
+  diag["plugin"] = policy::pluginStateName(reports.plugin());
   if (view.hasSnapshot) {
     const policy::IheaterSnapshot &s = view.snap;
     out["state"] = policy::iheaterStateName(s.state);
@@ -1563,6 +1591,7 @@ void loop() {
   // call most likely to crash (TLS handshake, heap) while the printer is down.
   updateLinkSafety();
   s_moonraker.loop();
+  updateKlipperReport();
   updateUartLinkLog();
   updateHeapLog();
   pushStatusIfChanged();

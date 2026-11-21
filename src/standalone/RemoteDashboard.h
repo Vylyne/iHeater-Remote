@@ -47,7 +47,7 @@ function applyStatus(s){const uart=s.output==="uart",i=(uart&&s.iheater&&typeof 
 app.dataset.heating=!!s.heating;$("dot").classList.add("online");$("network").textContent=(s.wifiMode==="ap"?"Hotspot ":"")+s.ssid+" at "+s.ip;$("version").textContent="v"+s.firmwareVersion;
 $("state").textContent=s.heating?"Heating":"Stopped";
 const k=s.source==="klipper",mr=s.moonrakerState,up=mr==="ready";tone("source",!k?"idle":up?"ok":s.moonrakerError?"bad":"warn",!k?"Manual":up?"Klipper":mr==="connecting"?"Klipper connecting":mr==="klippy-not-ready"?"Klipper not ready":"Klipper offline");$("source").title=k&&s.heaterObject?s.heaterObject:"";
-lines("srcWarn",k&&!up&&s.moonrakerError?["Moonraker: "+s.moonrakerError]:[]);
+lines("srcWarn",k&&!up&&s.moonrakerError?["Moonraker: "+s.moonrakerError]:k&&up&&i.diag&&i.diag.plugin==="missing"?["Klipper plugin not installed: readings are not sent to Klipper"]:[]);
 const r=$("readout"),g=$("goal"),air=has&&num(i.airC),t=uart?i.targetC:s.targetTempC,on=num(t)&&t>0;
 r.classList.toggle("none",uart&&!air);if(uart){if(air)r.replaceChildren(String(r1(i.airC)),el("small","°C air"));else r.replaceChildren(has?"No air reading":"—");g.replaceChildren(!has?"Waiting for the iHeater":on?"target":"target off");if(has&&on)g.appendChild(el("b",deg(t)))}
 else{if(s.heating)r.replaceChildren(String(s.targetTempC),el("small","°C target"));else r.replaceChildren("Off");g.textContent=""}
@@ -65,7 +65,7 @@ put("ihOut",has&&num(i.pwmPct)?Math.round(i.pwmPct)+" %":"—",has?"fan "+(i.fan
 put("ihState",has?i.state:"—",has&&i.state==="hold"&&num(i.holdS)&&i.holdS>0?i.holdS+" s left":"");
 const f=has?faultInfo(i):["—",""];put("ihFault",f[0],f[1]);$("ihFault").classList.toggle("bad",has&&num(i.fault)&&i.fault>0);
 $("ihClears").textContent=has&&num(i.clearsLeft)?i.clearsLeft:"—";put("ihFw",has&&i.fw?i.fw:"—",has&&num(i.proto)?"protocol "+i.proto:"");
-const d=i.diag||{};$("ihDiag").replaceChildren(...[["Remote uptime",ms(d.uptimeMs)],["First reply",d.firstOkMs?ms(d.firstOkMs)+" after boot":"not yet"],["Timeouts",num(d.timeouts)?d.timeouts:"—"],["Bad replies",num(d.badReplies)?d.badReplies:"—"],["Poll stack free",num(d.stackFree)?d.stackFree+" B":"—"]].map(([a,b])=>{const e=document.createElement("div");e.append(el("dt",a),el("dd",String(b)));return e}));
+const d=i.diag||{};$("ihDiag").replaceChildren(...[["Remote uptime",ms(d.uptimeMs)],["First reply",d.firstOkMs?ms(d.firstOkMs)+" after boot":"not yet"],["Timeouts",num(d.timeouts)?d.timeouts:"—"],["Bad replies",num(d.badReplies)?d.badReplies:"—"],["Poll stack free",num(d.stackFree)?d.stackFree+" B":"—"],["Klipper plugin",d.plugin||"—"],["Reports sent / refused / failed",[d.reportsSent,d.reportsRefused,d.reportsFailed].map(x=>num(x)?x:"—").join(" / ")]].map(([a,b])=>{const e=document.createElement("div");e.append(el("dt",a),el("dd",String(b)));return e}));
 const w=[];if(i.link==="no-reply")w.push("No reply from the iHeater: check the cable and that it runs the UART build.");if(has&&i.protoOk===false)w.push("Unsupported iHeater protocol "+(num(i.proto)?i.proto:"?")+": display only.");if(i.rangeEmpty===true&&num(i.minC)&&num(i.maxC))w.push("Your Setup range is outside the iHeater's "+Number(i.minC.toFixed(1))+"–"+Number(i.maxC.toFixed(1))+" °C: heating is off.");
 lines("ihWarn",w)}
 $("ihLink").onclick=()=>{const shown=!$("ihDiag").classList.toggle("hidden");$("ihLink").setAttribute("aria-expanded",shown);$("ihLink").title=(shown?"Hide":"Show")+" link diagnostics"};
