@@ -156,6 +156,16 @@ void UartPollPolicy::updateClearPhase(const IheaterSnapshot &s, uint32_t nowMs,
   }
 }
 
+const char *linkStatusName(LinkStatus s) {
+  switch (s) {
+    case LinkStatus::Waiting: return "waiting";
+    case LinkStatus::Up: return "up";
+    case LinkStatus::Restarting: return "restarting";
+    case LinkStatus::NoReply: return "no-reply";
+  }
+  return "unknown";
+}
+
 LinkStatus UartPollPolicy::link(uint32_t nowMs) const {
   if (!haveOk_) return LinkStatus::Waiting;
   if (!intervalElapsed(nowMs, lastOkMs_, kNoReplyAfterMs)) return LinkStatus::Up;

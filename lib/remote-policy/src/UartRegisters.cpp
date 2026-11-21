@@ -45,6 +45,17 @@ bool decodeSettings(const uint16_t *regs, uint8_t count, IheaterLimits &out) {
   return true;
 }
 
+const char *iheaterStateName(IheaterState s) {
+  switch (s) {
+    case IheaterState::Booting: return "booting";
+    case IheaterState::Idle: return "idle";
+    case IheaterState::Heating: return "heating";
+    case IheaterState::Hold: return "hold";
+    case IheaterState::Fault: return "fault";
+  }
+  return "unknown";
+}
+
 const char *faultName(uint8_t code) {
   switch (code) {
     case 0x00: return "none";

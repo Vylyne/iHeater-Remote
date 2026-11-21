@@ -709,20 +709,7 @@ const char *uartClearName(policy::ClearPhase phase) {
 // snapshot exists and the range fields once the settings have been read.
 void fillIheaterJson(JsonObject out) {
   const UartLinkView view = s_uart.view();
-  switch (view.link) {
-    case policy::LinkStatus::Waiting:
-      out["link"] = "waiting";
-      break;
-    case policy::LinkStatus::Up:
-      out["link"] = "up";
-      break;
-    case policy::LinkStatus::Restarting:
-      out["link"] = "restarting";
-      break;
-    case policy::LinkStatus::NoReply:
-      out["link"] = "no-reply";
-      break;
-  }
+  out["link"] = policy::linkStatusName(view.link);
   // Link diagnostics for bench checks; the dashboard does not show them.
   JsonObject diag = out.createNestedObject("diag");
   diag["uptimeMs"] = millis();
@@ -732,9 +719,7 @@ void fillIheaterJson(JsonObject out) {
   diag["stackFree"] = s_uart.stackHighWaterBytes();
   if (view.hasSnapshot) {
     const policy::IheaterSnapshot &s = view.snap;
-    static const char *const kStates[] = {"booting", "idle", "heating", "hold", "fault"};
-    const uint8_t state = static_cast<uint8_t>(s.state);
-    out["state"] = state < 5 ? kStates[state] : "unknown";
+    out["state"] = policy::iheaterStateName(s.state);
     setTempC(out, "airC", s.airT10);
     setTempC(out, "heaterC", s.heaterT10);
     setTempC(out, "auxC", s.auxT10);
