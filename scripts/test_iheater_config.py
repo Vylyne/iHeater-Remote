@@ -114,5 +114,172 @@ class ChangesTests(unittest.TestCase):
         self.assertIn(version, changes)
 
 
+FIXTURE = (
+    "[heater_virtual chamber]\n"
+    "sensor: temperature_sensor chamber_hexa\n"
+    "#max_target: 80\n"
+    "# Copy from the Remote's Setup page.\n"
+    "#remote_token: XXXX-XXXX\n"
+    "\n"
+    "[gcode_macro M141]\n"
+)
+
+
+class TokenTests(unittest.TestCase):
+    def test_token_valid(self):
+        self.assertTrue(iheater_config.check_token("abcd-efgh"))
+        self.assertTrue(iheater_config.check_token("ABCDEFGH"))
+
+    def test_token_invalid(self):
+        for bad in ("ABCD-EFGI", "ABCDEFG", "", "ABCD EFGH"):
+            self.assertFalse(iheater_config.check_token(bad), bad)
+
+    def test_cli_check_token(self):
+        self.assertEqual(iheater_config.main(["check-token", "ABCD-EFGH"]), 0)
+        self.assertEqual(iheater_config.main(["check-token", "ABCD-EFGI"]), 1)
+
+
+class KeyTests(unittest.TestCase):
+    def lines(self, text):
+        return text.split("\n")
+
+    def test_set_key_replaces_active(self):
+        out = iheater_config.set_key(
+            FIXTURE, "sensor", "temperature_sensor x")
+        want = self.lines(FIXTURE)
+        want[1] = "sensor: temperature_sensor x"
+        self.assertEqual(self.lines(out), want)
+
+    def test_set_key_uncomments(self):
+        out = iheater_config.set_key(FIXTURE, "remote_token", "ABCD-EFGH")
+        want = self.lines(FIXTURE)
+        want[4] = "remote_token: ABCD-EFGH"
+        self.assertEqual(self.lines(out), want)
+
+    def test_set_key_inserts_after_header(self):
+        out = iheater_config.set_key(FIXTURE, "foo", "1")
+        want = self.lines(FIXTURE)
+        want.insert(1, "foo: 1")
+        self.assertEqual(self.lines(out), want)
+
+    def test_set_key_active_wins_over_comment(self):
+        text = "[heater_virtual chamber]\n#sensor: a\nsensor: b\n"
+        out = iheater_config.set_key(text, "sensor", "c")
+        self.assertEqual(out, "[heater_virtual chamber]\n#sensor: a\nsensor: c\n")
+
+    def test_set_key_ignores_other_sections(self):
+        text = (FIXTURE + "[heater_virtual other]\nsensor: keep\n")
+        out = iheater_config.set_key(text, "sensor", "new")
+        self.assertTrue(out.endswith("[heater_virtual other]\nsensor: keep\n"))
+
+    def test_set_key_no_section_raises(self):
+        with self.assertRaises(ValueError):
+            iheater_config.set_key("[gcode_macro M141]\n", "sensor", "x")
+
+    def test_set_key_keeps_crlf(self):
+        crlf = FIXTURE.replace("\n", "\r\n")
+        for key in ("sensor", "remote_token", "foo"):
+            out = iheater_config.set_key(crlf, key, "v")
+            self.assertEqual(out.replace("\r\n", ""), out.replace("\r", "")
+                             .replace("\n", ""))
+            self.assertNotIn("\n", out.replace("\r\n", ""))
+            self.assertNotIn("\r", out.replace("\r\n", ""))
+
+    def test_set_key_strips_value(self):
+        out = iheater_config.set_key(FIXTURE, "foo", "  1 \n")
+        self.assertIn("\nfoo: 1\n", out)
+
+    def test_indented_key_is_not_active(self):
+        text = "[heater_virtual chamber]\nsensor: a\n  sensor: x\n"
+        self.assertEqual(iheater_config.get_key(text, "sensor"), "a")
+        out = iheater_config.set_key(text, "sensor", "b")
+        self.assertEqual(out, "[heater_virtual chamber]\nsensor: b\n  sensor: x\n")
+        only = "[heater_virtual chamber]\n  sensor: x\n"
+        self.assertIsNone(iheater_config.get_key(only, "sensor"))
+
+    def test_get_key(self):
+        self.assertEqual(iheater_config.get_key(FIXTURE, "sensor"),
+                         "temperature_sensor chamber_hexa")
+        self.assertIsNone(iheater_config.get_key(FIXTURE, "remote_token"))
+
+    def test_get_key_no_section(self):
+        self.assertIsNone(iheater_config.get_key("[x]\nsensor: a\n", "sensor"))
+
+    def _run(self, argv):
+        out, err = io.StringIO(), io.StringIO()
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            rc = iheater_config.main(argv)
+        return rc, out.getvalue(), err.getvalue()
+
+    def test_cli_get_and_set_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "a.cfg")
+            iheater_config._write(path, FIXTURE)
+            rc, out, err = self._run(["get-key", path, "sensor"])
+            self.assertEqual((rc, out, err), (
+                0, "temperature_sensor chamber_hexa\n", ""))
+            rc, out, err = self._run(["get-key", path, "remote_token"])
+            self.assertEqual((rc, out, err), (1, "", ""))
+            self.assertEqual(self._run(
+                ["set-key", path, "remote_token", "ABCD-EFGH"])[0], 0)
+            rc, out, err = self._run(["get-key", path, "remote_token"])
+            self.assertEqual((rc, out), (0, "ABCD-EFGH\n"))
+            rc, out, err = self._run(["get-key", os.path.join(d, "no"), "x"])
+            self.assertEqual(rc, 1)
+            self.assertTrue(err)
+
+    def test_cli_get_key_no_section_is_error(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "a.cfg")
+            iheater_config._write(path, "[x]\n")
+            rc, out, err = self._run(["get-key", path, "sensor"])
+            self.assertEqual((rc, out), (1, ""))
+            self.assertTrue(err)
+
+
+OLD_FULL = (
+    "[heater_virtual chamber]\n"
+    "remote_token: abcd-efgh  # mine\n"
+    "sensor: temperature_sensor other\n"
+    "max_target: 70\n"
+)
+
+
+class CarryTests(unittest.TestCase):
+    def test_carry_values(self):
+        out, carried, renamed = iheater_config.carry(OLD_FULL, FIXTURE)
+        self.assertIn("remote_token: abcd-efgh  # mine\n", out)
+        self.assertIn("sensor: temperature_sensor other\n", out)
+        self.assertIn("max_target: 70\n", out)
+        self.assertEqual(carried, ["remote_token", "sensor", "max_target"])
+        self.assertIsNone(renamed)
+
+    def test_carry_skips_commented(self):
+        old = "[heater_virtual chamber]\n#max_target: 60\n"
+        out, carried, renamed = iheater_config.carry(old, FIXTURE)
+        self.assertIn("#max_target: 80\n", out)
+        self.assertNotIn("max_target", carried)
+
+    def test_carry_reports_rename(self):
+        old = OLD_FULL.replace("chamber", "hexa")
+        out, carried, renamed = iheater_config.carry(old, FIXTURE)
+        self.assertEqual(renamed, "hexa")
+        self.assertIn("[heater_virtual chamber]\n", out)
+
+    def test_carry_cli_output(self):
+        with tempfile.TemporaryDirectory() as d:
+            old = os.path.join(d, "old.cfg")
+            new = os.path.join(d, "new.cfg")
+            iheater_config._write(
+                old, "[heater_virtual hexa]\nremote_token: ABCD-EFGH\n")
+            iheater_config._write(new, FIXTURE)
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = iheater_config.main(["carry", old, new])
+            self.assertEqual(rc, 0)
+            self.assertEqual(out.getvalue(), "carried remote_token\nrenamed hexa\n")
+            self.assertIn("remote_token: ABCD-EFGH\n", iheater_config._read(new))
+
+
 if __name__ == "__main__":
     unittest.main()
