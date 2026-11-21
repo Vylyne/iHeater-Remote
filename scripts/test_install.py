@@ -396,6 +396,19 @@ class UninstallSmokeTests(ScriptTestBase):
         # Our own component link is still removed.
         self.assertFalse((self.fx.components / "iheater_remote.py").is_symlink())
 
+    def test_uninstall_unresolvable_link(self):
+        self.install()
+        link = self.fx.extras / "heater_virtual.py"
+        link.unlink()
+        os.symlink(str(self.fx.root / "gone" / "deeper" / "heater_virtual.py"),
+                   str(link))
+        result = self.uninstall()
+        self.assertTrue(link.is_symlink())
+        self.assertFalse((self.fx.components / "iheater_remote.py").is_symlink())
+        self.assertIn("left it", result.stdout)
+        self.assertTrue(self.fx.log_text().endswith(
+            "restart moonraker\nrestart klipper\n"))
+
     def test_uninstall_twice(self):
         self.install()
         self.uninstall()

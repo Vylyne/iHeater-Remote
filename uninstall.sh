@@ -29,14 +29,17 @@ function inside_install {
 function unlink_module {
     local dest="$1" target
     if [ -L "${dest}" ]; then
-        target="$(link_target "${dest}")"
-        if inside_install "${target}"; then
+        # readlink -f fails when a parent of the target is missing. That must
+        # not abort the run: use the raw target and treat it as not ours.
+        if target="$(link_target "${dest}" 2>/dev/null)" && [ -n "${target}" ] \
+            && inside_install "${target}"; then
             rm "${dest}"
             CHANGED_LINKS=1
             ok "removed ${dest}"
         else
-            skip "${dest} points to ${target}, not into ${INSTALL_PATH}"
-            note "Left alone; remove it yourself if you want it gone."
+            [ -n "${target}" ] || target="$(readlink "${dest}" || true)"
+            warn "${dest} points to ${target}, which isn't in ${INSTALL_PATH}; left it"
+            note "Remove it yourself if you want it gone."
         fi
     elif [ -e "${dest}" ]; then
         skip "${dest} is a regular file, not a link"
