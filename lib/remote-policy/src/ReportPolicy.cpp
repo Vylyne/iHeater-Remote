@@ -90,8 +90,6 @@ void ReportScheduler::onFailed() {
 
 void ReportScheduler::forceNext() {
   force_ = true;
-  inFlight_ = false;
-  if (plugin_ == PluginState::Missing) plugin_ = PluginState::Unknown;
 }
 
 void ReportScheduler::reset() {

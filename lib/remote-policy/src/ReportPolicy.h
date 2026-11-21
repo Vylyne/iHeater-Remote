@@ -45,8 +45,8 @@ class ReportScheduler {
   void onRefused();                                     // refused++, not in flight
   void onMethodNotFound();                              // plugin Missing, not in flight
   void onFailed();                                      // failed++, not in flight
-  // The next due() ignores change and heartbeat, but not the minimum gap, and
-  // clears in flight and Missing.
+  // The next due() ignores change and heartbeat, but not the minimum gap, in
+  // flight or Missing.
   void forceNext();
   // New connection: forget the last send, in flight and Missing; keep the counters.
   void reset();

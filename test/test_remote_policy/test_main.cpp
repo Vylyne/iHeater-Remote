@@ -522,6 +522,23 @@ void test_report_force_next_sends_without_change() {
   TEST_ASSERT_FALSE(s.due(in, 2000));
 }
 
+void test_report_force_next_keeps_in_flight_and_missing() {
+  ReportScheduler s;
+  const ReportInputs in = upIdle();
+  s.onSent(in, 0);
+  s.forceNext();
+  TEST_ASSERT_FALSE(s.due(in, 5000));
+  s.onAccepted();
+  TEST_ASSERT_TRUE(s.due(in, 5000));
+
+  ReportScheduler m;
+  m.onSent(in, 0);
+  m.onMethodNotFound();
+  m.forceNext();
+  TEST_ASSERT_FALSE(m.due(in, 60000));
+  TEST_ASSERT_EQUAL(PluginState::Missing, m.plugin());
+}
+
 void test_report_counters() {
   ReportScheduler s;
   const ReportInputs in = upIdle();
@@ -613,6 +630,7 @@ int main() {
   RUN_TEST(test_report_link_drop_sends_nulls);
   RUN_TEST(test_report_method_not_found_stops_until_reset);
   RUN_TEST(test_report_force_next_sends_without_change);
+  RUN_TEST(test_report_force_next_keeps_in_flight_and_missing);
   RUN_TEST(test_report_counters);
   RUN_TEST(test_report_wraparound);
   return UNITY_END();
