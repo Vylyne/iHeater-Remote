@@ -257,9 +257,11 @@ the first boot, saves them in its own namespace and erases the old ones. A
 Moonraker setup from 2.0 becomes source Klipper with the same host, port,
 TLS flag and key.
 
-On the Klipper side, add `remote_token` (shown on the Setup page) to your
-`[heater_iheater_remote]` section and remove the old `VIRTUAL_CHAMBER` macro. Until
-you do, the Remote shows "not paired". See [klipper/README.md](klipper/README.md).
+On the Klipper side, remove the old heater section and the `VIRTUAL_CHAMBER`
+macro, then install the Klipper module with `./install.sh` and set
+`remote_token` (shown on the Setup page) in its
+`[heater_iheater_remote chamber]` section. Until you do, the Remote shows "not
+paired". See [klipper/README.md](klipper/README.md).
 
 ## Notes
 

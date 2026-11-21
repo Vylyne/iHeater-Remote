@@ -138,9 +138,10 @@ is registered by `heater_iheater_remote.py`. A `heater` that does not exist, or 
 
 ## Updating from the macro version
 
-Delete `mirror_macro` from the `[heater_iheater_remote]` section and delete the
-`VIRTUAL_CHAMBER` macro, then add `remote_token`. Until you do, the Remote
-shows "not paired" and does not heat from Klipper.
+Remove the old heater section (with its `mirror_macro`) and the
+`VIRTUAL_CHAMBER` macro, then install this module as described above and add
+`remote_token`. Until you do, the Remote shows "not paired" and does not heat
+from Klipper.
 
 ## Commands
 

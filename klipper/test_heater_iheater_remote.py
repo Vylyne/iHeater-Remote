@@ -3,6 +3,7 @@
 Run: python -m unittest discover -s klipper -p "test_*.py" -v
 """
 import os
+import re
 import sys
 import unittest
 
@@ -505,6 +506,21 @@ def report(**over):
          'fault': 0, 'fault_name': 'none', 'next_within': 5}
     r.update(over)
     return r
+
+
+class ShippedCfgTest(unittest.TestCase):
+    def test_shipped_cfg_m191_sensor_matches_section(self):
+        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            'iheater_remote.cfg')
+        with open(path, encoding='utf-8') as f:
+            text = f.read()
+        m = re.search(r'^\[heater_iheater_remote\s+(\S+?)\s*\]', text,
+                      re.MULTILINE)
+        self.assertIsNotNone(m)
+        sensors = re.findall(r'SENSOR="([^"]+)"', text)
+        self.assertTrue(sensors)
+        for sensor in sensors:
+            self.assertEqual(sensor, 'heater_iheater_remote ' + m.group(1))
 
 
 if __name__ == '__main__':

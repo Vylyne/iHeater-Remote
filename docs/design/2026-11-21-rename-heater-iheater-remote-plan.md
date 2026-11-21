@@ -47,7 +47,7 @@ helper), bash (install scripts), C++ on Arduino-ESP32 2.0.17 with Unity tests
 3. **The shipped cfg and the module agree.** The cfg's section, its M191
    `SENSOR=` and the module's object name all use `heater_iheater_remote`
    (Task 1: the install smoke tests set a key in the shipped cfg).
-4. **The Remote sees the old name only.** `heater_virtual chamber` is not
+4. **The Remote sees the new name only.** `heater_virtual chamber` is not
    discovered (Task 2: negative assertion).
 
 ---
