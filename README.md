@@ -26,7 +26,7 @@ train.
 - Runs without any cloud, portal MQTT or Home Assistant.
 - Has one control source at a time, chosen on the Setup page:
   **Manual**, or **Klipper (Moonraker)**. The Remote runs its own Moonraker
-  WebSocket client and follows one `heater_virtual` heater that you pair by
+  WebSocket client and follows one `heater_iheater_remote` heater that you pair by
   token. Settings and the API key live in ESP32 NVS.
 - With Klipper, appears as a native chamber heater (`M141`/`M191`, Mainsail
   target box) via the bundled [Klipper module](klipper/README.md).
@@ -199,7 +199,7 @@ Web UI:
   rejected). The API key is write-only: a blank field keeps the stored key.
   Wi-Fi and source settings share the page without overwriting each other.
 - **Pairing:** the Pairing card shows this Remote's token (`XXXX-XXXX`).
-  Add it to your `[heater_virtual]` section as `remote_token`
+  Add it to your `[heater_iheater_remote]` section as `remote_token`
   ([klipper/README.md](klipper/README.md)); the Remote follows only the
   heater with that token. **Generate a new token on save** replaces it. To
   keep an old token after a wipe, enter it manually in the Pairing card.
@@ -258,7 +258,7 @@ Moonraker setup from 2.0 becomes source Klipper with the same host, port,
 TLS flag and key.
 
 On the Klipper side, add `remote_token` (shown on the Setup page) to your
-`[heater_virtual]` section and remove the old `VIRTUAL_CHAMBER` macro. Until
+`[heater_iheater_remote]` section and remove the old `VIRTUAL_CHAMBER` macro. Until
 you do, the Remote shows "not paired". See [klipper/README.md](klipper/README.md).
 
 ## Notes

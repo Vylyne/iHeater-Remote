@@ -3,7 +3,7 @@
 iHeater Remote is local-only ESP32-C3 firmware (PlatformIO, Arduino-ESP32
 2.0.17) that drives an iHeater controller over one GPIO pulse train, plus a
 Klipper Python module. The Remote has a small local web UI and one control
-source at a time: Manual, or one `heater_virtual` Klipper heater that it
+source at a time: Manual, or one `heater_iheater_remote` Klipper heater that it
 follows through its own Moonraker WebSocket client, paired by
 `remote_token`. There is no cloud or portal.
 
@@ -29,7 +29,7 @@ Policy tests run on the PC with MinGW from `~/scoop/apps/mingw`.
 - `lib/remote-policy/`: pure decision logic, with tests in
   `test/test_remote_policy/`.
 - `lib/modbus-rtu/`: copy of the iHeater's Modbus slave core; do not edit here.
-- `klipper/`: the `heater_virtual` module, its config and unit tests.
+- `klipper/`: the `heater_iheater_remote` module, its config and unit tests.
 - `moonraker/`: the iheater_remote Moonraker component and its unit tests.
 - `install.sh`, `uninstall.sh` (repo root): install and remove the Klipper and
   Moonraker parts on a printer host.
