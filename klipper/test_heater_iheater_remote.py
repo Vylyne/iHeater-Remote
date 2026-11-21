@@ -141,14 +141,13 @@ class FakeWebhooks:
 
 
 class FakeWebRequest:
+    # Mirrors klippy/webhooks.py WebRequest: the request's arguments are the
+    # params attribute (always a dict); there is no get_args() method.
     error = CommandError
 
     def __init__(self, args):
-        self.args = args
+        self.params = args
         self.sent = []
-
-    def get_args(self):
-        return self.args
 
     def send(self, data):
         self.sent.append(data)

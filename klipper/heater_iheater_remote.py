@@ -97,8 +97,9 @@ class _ReportRouter:
 
     def _handle_report(self, web_request):
         # Only web_request.error may escape: any other exception shuts
-        # Klipper down.
-        args = web_request.get_args()
+        # Klipper down. Klipper's WebRequest has no get_args(); its arguments
+        # are the params attribute.
+        args = web_request.params
         token = args.get('remote_token') if isinstance(args, dict) else None
         if not isinstance(token, str):
             raise web_request.error("remote_token must be a string")
