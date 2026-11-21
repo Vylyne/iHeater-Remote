@@ -402,6 +402,42 @@ void test_report_values_null_on_no_reading() {
   TEST_ASSERT_TRUE(v.hasElement);
 }
 
+void test_report_values_range_air_and_element() {
+  for (int which = 0; which < 2; which++) {
+    ReportInputs in = upIdle();
+    int16_t &field = which == 0 ? in.airT10 : in.heaterT10;
+    field = 10001;
+    ReportValues v = reportValues(in);
+    TEST_ASSERT_FALSE(which == 0 ? v.hasAir : v.hasElement);
+    TEST_ASSERT_TRUE(which == 0 ? v.hasElement : v.hasAir);
+    TEST_ASSERT_TRUE(v.hasPower);
+    field = -1001;
+    v = reportValues(in);
+    TEST_ASSERT_FALSE(which == 0 ? v.hasAir : v.hasElement);
+    field = 10000;
+    v = reportValues(in);
+    TEST_ASSERT_TRUE(which == 0 ? v.hasAir : v.hasElement);
+    TEST_ASSERT_EQUAL_INT16(10000, which == 0 ? v.airT10 : v.elementT10);
+    field = -1000;
+    v = reportValues(in);
+    TEST_ASSERT_TRUE(which == 0 ? v.hasAir : v.hasElement);
+    TEST_ASSERT_EQUAL_INT16(-1000, which == 0 ? v.airT10 : v.elementT10);
+  }
+}
+
+void test_report_values_range_power() {
+  ReportInputs in = upIdle();
+  in.pwmPermille = 1001;
+  ReportValues v = reportValues(in);
+  TEST_ASSERT_FALSE(v.hasPower);
+  TEST_ASSERT_TRUE(v.hasAir);
+  TEST_ASSERT_TRUE(v.hasElement);
+  in.pwmPermille = 1000;
+  v = reportValues(in);
+  TEST_ASSERT_TRUE(v.hasPower);
+  TEST_ASSERT_EQUAL_UINT16(1000, v.powerPermille);
+}
+
 void test_report_values_null_without_snapshot() {
   ReportInputs in = upIdle();
   in.hasSnapshot = false;
@@ -618,6 +654,8 @@ int main() {
   RUN_TEST(test_link_and_state_names);
   RUN_TEST(test_report_values_null_when_link_not_up);
   RUN_TEST(test_report_values_null_on_no_reading);
+  RUN_TEST(test_report_values_range_air_and_element);
+  RUN_TEST(test_report_values_range_power);
   RUN_TEST(test_report_values_null_without_snapshot);
   RUN_TEST(test_report_interval_idle_and_active);
   RUN_TEST(test_report_first_send_due);

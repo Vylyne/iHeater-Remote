@@ -20,12 +20,16 @@ uint32_t reportIntervalMs(const ReportInputs &in) {
   return isActive(in) ? kReportActiveMs : kReportIdleMs;
 }
 
+static bool inT10Range(int16_t t10) {
+  return t10 >= kReportMinT10 && t10 <= kReportMaxT10;
+}
+
 ReportValues reportValues(const ReportInputs &in) {
   ReportValues v{};
   const bool live = in.link == LinkStatus::Up && in.hasSnapshot;
-  v.hasAir = live && in.airT10 != kNoReading;
-  v.hasElement = live && in.heaterT10 != kNoReading;
-  v.hasPower = live;
+  v.hasAir = live && in.airT10 != kNoReading && inT10Range(in.airT10);
+  v.hasElement = live && in.heaterT10 != kNoReading && inT10Range(in.heaterT10);
+  v.hasPower = live && in.pwmPermille <= kReportMaxPermille;
   v.airT10 = v.hasAir ? in.airT10 : 0;
   v.elementT10 = v.hasElement ? in.heaterT10 : 0;
   v.powerPermille = v.hasPower ? in.pwmPermille : 0;
