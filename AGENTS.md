@@ -9,7 +9,7 @@ follows through its own Moonraker WebSocket client, paired by
 
 ## Gate commands
 
-Run all four before committing. Redirect long `pio` output to a file and
+Run all five before committing. Redirect long `pio` output to a file and
 read its tail.
 
 ```bash
@@ -17,6 +17,7 @@ pio run -e esp32c3-super-mini-remote
 export PATH="$HOME/scoop/apps/mingw/current/bin:$PATH"; pio test -e native
 python -m unittest discover -s klipper -p "test_*.py"
 python -m unittest discover -s moonraker -p "test_*.py"
+python -m unittest discover -s scripts -p "test_*.py"
 ```
 
 Policy tests run on the PC with MinGW from `~/scoop/apps/mingw`.
@@ -30,6 +31,9 @@ Policy tests run on the PC with MinGW from `~/scoop/apps/mingw`.
 - `lib/modbus-rtu/`: copy of the iHeater's Modbus slave core; do not edit here.
 - `klipper/`: the `heater_virtual` module, its config and unit tests.
 - `moonraker/`: the iheater_remote Moonraker component and its unit tests.
+- `install.sh`, `uninstall.sh` (repo root): install and remove the Klipper and
+  Moonraker parts on a printer host.
+- `scripts/`: the installer's Python config helper and its tests.
 - `tools/fake_moonraker/`: fake Moonraker server for bench testing.
 - `docs/design/`: design and plan documents.
 
