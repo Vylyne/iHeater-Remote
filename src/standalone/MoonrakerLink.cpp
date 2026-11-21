@@ -162,11 +162,20 @@ void MoonrakerLink::loop() {
   if (!socketUp_) return;
 
   const uint32_t now = millis();
-  for (const Slot &slot : slots_) {
+  for (Slot &slot : slots_) {
     if (slot.kind != Pending::None &&
         policy::intervalElapsed(now, slot.sentMs, policy::kRequestTimeoutMs)) {
+      if (slot.kind == Pending::Report) {
+        // A report is best effort: free its slot and let the next one go out.
+        // The link and target following carry on. A late reply for this id
+        // matches no slot and is ignored.
+        scheduler_.onFailed();
+        slot.kind = Pending::None;
+        Serial.printf("[MOON] report %u unanswered, dropped\n",
+                      static_cast<unsigned>(slot.id));
+        continue;
+      }
       lastError_ = "no reply from Moonraker";
-      if (slot.kind == Pending::Report) scheduler_.onFailed();
       Serial.printf("[MOON] request %u timed out, reconnecting\n",
                     static_cast<unsigned>(slot.id));
       ws_.disconnect();
