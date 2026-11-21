@@ -23,6 +23,8 @@ Errors:
 
 ## Install
 
+`./install.sh` in the repo does this. By hand:
+
 ```bash
 ln -s ~/iHeater-Remote/moonraker/iheater_remote.py ~/moonraker/moonraker/components/
 ```

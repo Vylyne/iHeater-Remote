@@ -26,26 +26,66 @@ On the printer host:
 ```bash
 cd ~
 git clone https://github.com/Vylyne/iHeater-Remote.git
+cd ~/iHeater-Remote && ./install.sh
+```
+
+The script links `heater_virtual.py` into Klipper and the Moonraker component
+into Moonraker. It copies `iheater_remote.cfg` to
+`~/printer_data/config/addons/`, adds `[include addons/iheater_remote.cfg]` to
+`printer.cfg`, and adds the `[iheater_remote]` and
+`[update_manager iheater-remote]` sections to `moonraker.conf`. It asks for the
+pairing token shown on the Remote's Setup page and for your chamber sensor
+(both can stay blank), and asks before replacing a link, upgrading an older
+config file, adding the include or restarting Klipper. It warns about any other
+`M141` or `M191` macro it finds. It backs up every file it edits as
+`<file>.bak-<date>-<time>`, and it never restarts Klipper during a print.
+Running it again is safe: steps that are already done say `skip`.
+
+These environment variables change where it looks:
+
+| Variable         | Default             |
+| ---------------- | ------------------- |
+| `KLIPPER_PATH`   | `~/klipper`         |
+| `MOONRAKER_PATH` | `~/moonraker`       |
+| `PRINTER_DATA`   | `~/printer_data`    |
+| `MOONRAKER_PORT` | `7125`              |
+| `PYTHON_BIN`     | `python3` on `PATH` |
+
+To remove it, run `./uninstall.sh`. It takes out the `moonraker.conf`
+sections, the include and the two links, and asks before deleting
+`addons/iheater_remote.cfg` (a backup is kept).
+
+To update, run `git pull` (or use the update manager in Mainsail), then re-run
+`./install.sh` when [`CONFIG_CHANGES.md`](CONFIG_CHANGES.md) lists a new
+version.
+
+In the Remote's Setup page, choose **Klipper (Moonraker)** as the control
+source.
+
+### Manual install
+
+```bash
 ln -s ~/iHeater-Remote/klipper/heater_virtual.py ~/klipper/klippy/extras/
-cp ~/iHeater-Remote/klipper/iheater_remote.cfg ~/printer_data/config/
+mkdir -p ~/printer_data/config/addons
+cp ~/iHeater-Remote/klipper/iheater_remote.cfg ~/printer_data/config/addons/
 ```
 
 In `printer.cfg`:
 
 ```ini
-[include iheater_remote.cfg]
+[include addons/iheater_remote.cfg]
 ```
 
-Delete any existing `M141` and `M191` macros: `iheater_remote.cfg` defines its own.
+Delete or rename any existing `M141` and `M191` macros: `iheater_remote.cfg`
+defines its own. Klipper merges duplicate sections, so both definitions would
+combine and the one loaded last would silently replace the other.
 Edit `sensor:` in `iheater_remote.cfg` if your chamber sensor is not
 `temperature_sensor chamber_hexa`, set `remote_token` to the value shown on
 the Remote's Setup page, then restart Klipper.
 
 Install the Moonraker component that carries the Remote's reports to Klipper;
-see [`moonraker/README.md`](../moonraker/README.md).
-
-In the Remote's Setup page, choose **Klipper (Moonraker)** as the control
-source.
+see [`moonraker/README.md`](../moonraker/README.md), then choose
+**Klipper (Moonraker)** as the control source as above.
 
 ## Options
 

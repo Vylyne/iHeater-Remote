@@ -638,8 +638,9 @@ The smoke test (`scripts/test_install.py`, class `InstallSmokeTests`):
     - Keep the manual steps under a "Manual install" subheading, with the
       copy going to `~/printer_data/config/addons/` and the include
       `[include addons/iheater_remote.cfg]`. Replace "Delete any existing
-      `M141` and `M191` macros" with the fact that Klipper refuses
-      duplicate sections, so the old ones must go.
+      `M141` and `M191` macros" with the fact that Klipper merges
+      duplicate sections and the last one loaded silently wins, so the old
+      ones must go.
   - `moonraker/README.md` Install: "`./install.sh` in the repo does this.
     By hand:", followed by the current steps.
 - [ ] **Step 5: Run the gates.**

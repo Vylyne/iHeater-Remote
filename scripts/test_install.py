@@ -323,5 +323,89 @@ class InstallSmokeTests(ScriptTestBase):
         self.assertEqual(read_text(backups[0]), "# somebody's copy\n")
 
 
+class UninstallSmokeTests(ScriptTestBase):
+    def install(self, answers="", state=STATE_STANDBY):
+        return self.run_ok("install.sh", answers, state)
+
+    def uninstall(self, answers="", state=STATE_STANDBY):
+        return self.run_ok("uninstall.sh", answers, state)
+
+    def write_bytes(self, path, text):
+        with open(str(path), "wb") as handle:
+            handle.write(text.encode("utf-8"))
+
+    def check_restores(self, newline):
+        fx = self.fx
+        self.write_bytes(
+            fx.printer_cfg,
+            "[printer]\n#*# <---- SAVE_CONFIG ---->\n"
+            "#*# DO NOT EDIT THIS BLOCK OR BELOW.\n".replace("\n", newline))
+        self.write_bytes(
+            fx.moonraker_conf,
+            "[server]\nhost: 0.0.0.0\n".replace("\n", newline))
+        printer_before = fx.printer_cfg.read_bytes()
+        conf_before = fx.moonraker_conf.read_bytes()
+
+        self.install()
+        self.assertNotEqual(fx.printer_cfg.read_bytes(), printer_before)
+        self.assertNotEqual(fx.moonraker_conf.read_bytes(), conf_before)
+        self.uninstall()
+
+        self.assertEqual(fx.printer_cfg.read_bytes(), printer_before)
+        self.assertEqual(fx.moonraker_conf.read_bytes(), conf_before)
+        self.assertFalse((fx.extras / "heater_virtual.py").exists())
+        self.assertFalse((fx.extras / "heater_virtual.py").is_symlink())
+        self.assertFalse((fx.components / "iheater_remote.py").is_symlink())
+        self.assertTrue(fx.addon_cfg.is_file())
+        self.assertTrue(fx.log_text().endswith(
+            "restart moonraker\nrestart klipper\n"))
+
+    def test_uninstall_restores_files(self):
+        self.check_restores("\n")
+
+    def test_uninstall_restores_crlf_files(self):
+        self.check_restores("\r\n")
+
+    def test_uninstall_deletes_cfg_on_yes(self):
+        self.install()
+        self.uninstall("\ny\n\n")
+        self.assertFalse(self.fx.addon_cfg.exists())
+        self.assertEqual(
+            len(glob.glob(str(self.fx.addon_cfg) + ".bak-*")), 1)
+
+    def test_uninstall_leaves_glob_include(self):
+        write_lf(self.fx.printer_cfg,
+                 "[include addons/*.cfg]\n[printer]\n")
+        self.install()
+        result = self.uninstall()
+        self.assertIn("[include addons/*.cfg]\n",
+                      read_text(self.fx.printer_cfg))
+        self.assertIn("a glob include covers it", result.stdout)
+
+    def test_uninstall_leaves_foreign_link(self):
+        outside = self.fx.root / "elsewhere"
+        outside.mkdir()
+        write_lf(outside / "mine.py", "# not ours\n")
+        link = self.fx.extras / "heater_virtual.py"
+        os.symlink(str(outside / "mine.py"), str(link))
+        self.install("n\n")
+        self.uninstall()
+        self.assertTrue(link.is_symlink())
+        self.assertEqual(os.path.realpath(str(link)),
+                         os.path.realpath(str(outside / "mine.py")))
+        # Our own component link is still removed.
+        self.assertFalse((self.fx.components / "iheater_remote.py").is_symlink())
+
+    def test_uninstall_twice(self):
+        self.install()
+        self.uninstall()
+        before = self.fx.snapshot()
+        log = self.fx.log_text()
+        result = self.uninstall()
+        self.assertEqual(self.fx.snapshot(), before)
+        self.assertEqual(self.fx.log_text(), log)
+        self.assertIn("no restart needed", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

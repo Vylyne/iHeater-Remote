@@ -139,8 +139,8 @@ Derived: `CONFIG_DIR=$PRINTER_DATA/config`,
 3. **Macro check, before the include.** Search `$CONFIG_DIR` recursively
    (`*.cfg`) for `[gcode_macro M141]` and `[gcode_macro M191]`,
    case-insensitive, outside our own file. Our file defines both, and Klipper
-   refuses duplicate sections, so including it next to another definition
-   stops Klipper at the next restart. For each one found, `warn` with the
+   merges duplicate sections, so including it next to another definition
+   lets whichever loads last silently replace the other. For each one found, `warn` with the
    file and line. If any were found, the include in step 4 is offered with
    default **no**, and the note says to delete or rename those macros and
    re-run. The installer never edits them (builder's call, see "Calls made
