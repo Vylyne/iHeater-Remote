@@ -1,6 +1,6 @@
 # Klipper chamber heater for iHeater Remote
 
-`heater_virtual` makes the iHeater show up in Klipper as a normal chamber
+`heater_iheater_remote` makes the iHeater show up in Klipper as a normal chamber
 heater:
 
 - Slicer `M141` / `M191` work.
@@ -29,7 +29,7 @@ git clone https://github.com/Vylyne/iHeater-Remote.git
 cd ~/iHeater-Remote && ./install.sh
 ```
 
-The script links `heater_virtual.py` into Klipper and the Moonraker component
+The script links `heater_iheater_remote.py` into Klipper and the Moonraker component
 into Moonraker. It copies `iheater_remote.cfg` to
 `~/printer_data/config/addons/`, adds `[include addons/iheater_remote.cfg]` to
 `printer.cfg`, and adds the `[iheater_remote]` and
@@ -75,7 +75,7 @@ source.
 ### Manual install
 
 ```bash
-ln -s ~/iHeater-Remote/klipper/heater_virtual.py ~/klipper/klippy/extras/
+ln -s ~/iHeater-Remote/klipper/heater_iheater_remote.py ~/klipper/klippy/extras/
 mkdir -p ~/printer_data/config/addons
 cp ~/iHeater-Remote/klipper/iheater_remote.cfg ~/printer_data/config/addons/
 ```
@@ -100,7 +100,7 @@ see [`moonraker/README.md`](../moonraker/README.md), then choose
 ## Options
 
 ```ini
-[heater_virtual chamber]
+[heater_iheater_remote chamber]
 sensor: temperature_sensor chamber_hexa
 #max_target: 80
 #remote_token: XXXX-XXXX
@@ -110,7 +110,7 @@ sensor: temperature_sensor chamber_hexa
 | --- | --- | --- |
 | `sensor` | optional | Existing sensor object whose reading is the chamber temperature whenever there is no fresh air reading from the Remote (used by Mainsail and `M191`). Without it, the temperature stays at the last air reading received (0 before the first). Keep it in pulse mode, where the Remote sends no readings. If set, the object must exist at connect. |
 | `max_target` | `80` | Highest chamber target Klipper accepts (45–90). Higher requests are a gcode error. Also published as `max_temp` so Mainsail/Fluidd limit their target box to it; do not set `max_temp` yourself. |
-| `remote_token` | empty | Pairing token from the Remote's Setup page: 8 characters from `0123456789ABCDEFGHJKMNPQRSTVWXYZ`, written `XXXX-XXXX`; case and hyphens are ignored. Two `heater_virtual` sections cannot share a token. |
+| `remote_token` | empty | Pairing token from the Remote's Setup page: 8 characters from `0123456789ABCDEFGHJKMNPQRSTVWXYZ`, written `XXXX-XXXX`; case and hyphens are ignored. Two `heater_iheater_remote` sections cannot share a token. |
 
 The section name must start with `heater_`: Mainsail only offers a target
 box for `extruder*` and `heater_*` objects.
@@ -123,7 +123,7 @@ report as an ordinary temperature sensor:
 ```ini
 [temperature_sensor chamber_element]
 sensor_type: iheater_remote
-heater: chamber          # the heater_virtual's short name
+heater: chamber          # the heater_iheater_remote's short name
 reading: element         # element (default) or air
 ```
 
@@ -131,14 +131,14 @@ The `iheater_remote` sensor type is for `[temperature_sensor]` sections only,
 not for heaters or temperature fans. It reports on the host clock.
 
 With no fresh reading it reports the last value received (0 before the
-first). The `[heater_virtual]` section must come before this
+first). The `[heater_iheater_remote]` section must come before this
 `[temperature_sensor]` section in your configuration, because the sensor type
-is registered by `heater_virtual.py`. A `heater` that does not exist, or a
+is registered by `heater_iheater_remote.py`. A `heater` that does not exist, or a
 `reading` other than `element` or `air`, is a configuration error.
 
 ## Updating from the macro version
 
-Delete `mirror_macro` from the `[heater_virtual]` section and delete the
+Delete `mirror_macro` from the `[heater_iheater_remote]` section and delete the
 `VIRTUAL_CHAMBER` macro, then add `remote_token`. Until you do, the Remote
 shows "not paired" and does not heat from Klipper.
 
@@ -175,7 +175,7 @@ answers. To stop a print that would otherwise wait for a heater nobody is
 driving, add this to your own `START_PRINT`:
 
 ```jinja
-{% if not printer["heater_virtual chamber"].linked %}
+{% if not printer["heater_iheater_remote chamber"].linked %}
   {action_raise_error("Chamber heater not linked: check the iHeater Remote")}
 {% endif %}
 ```

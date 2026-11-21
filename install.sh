@@ -48,8 +48,8 @@ function link_module {
 
 function step_link_modules {
     section "Modules"
-    link_module "${INSTALL_PATH}/klipper/heater_virtual.py" \
-        "${KLIPPER_PATH}/klippy/extras/heater_virtual.py"
+    link_module "${INSTALL_PATH}/klipper/heater_iheater_remote.py" \
+        "${KLIPPER_PATH}/klippy/extras/heater_iheater_remote.py"
     link_module "${INSTALL_PATH}/moonraker/iheater_remote.py" \
         "${MOONRAKER_PATH}/moonraker/components/iheater_remote.py"
 }
@@ -325,7 +325,7 @@ function step_next {
     else
         ok "pairing token set"
     fi
-    note "Check the link in the Klipper console: printer[\"heater_virtual chamber\"].linked"
+    note "Check the link in the Klipper console: printer[\"heater_iheater_remote chamber\"].linked"
     note "and on the Remote's link diagnostics."
     note "After an update, read klipper/CONFIG_CHANGES.md and re-run ./install.sh if it lists changes."
 }

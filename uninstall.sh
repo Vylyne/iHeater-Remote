@@ -131,7 +131,7 @@ function step_still_loaded {
 
 function step_links {
     section "Modules"
-    unlink_module "${KLIPPER_PATH}/klippy/extras/heater_virtual.py"
+    unlink_module "${KLIPPER_PATH}/klippy/extras/heater_iheater_remote.py"
     unlink_module "${MOONRAKER_PATH}/moonraker/components/iheater_remote.py"
 }
 

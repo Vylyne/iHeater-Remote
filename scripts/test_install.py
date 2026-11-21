@@ -162,7 +162,7 @@ class Fixture:
         for path in sorted(self.printer_data.rglob("*")):
             if path.is_file():
                 snap[path.relative_to(self.root).as_posix()] = path.read_bytes()
-        for link in (self.extras / "heater_virtual.py",
+        for link in (self.extras / "heater_iheater_remote.py",
                      self.components / "iheater_remote.py"):
             snap[link.name] = os.readlink(str(link)) if link.is_symlink() else None
         return snap
@@ -202,10 +202,10 @@ class InstallSmokeTests(ScriptTestBase):
     def test_fresh_install(self):
         self.install()
         fx = self.fx
-        link = fx.extras / "heater_virtual.py"
+        link = fx.extras / "heater_iheater_remote.py"
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path(os.path.realpath(str(link))),
-                         (REPO / "klipper" / "heater_virtual.py").resolve())
+                         (REPO / "klipper" / "heater_iheater_remote.py").resolve())
         link = fx.components / "iheater_remote.py"
         self.assertTrue(link.is_symlink())
         self.assertEqual(Path(os.path.realpath(str(link))),
@@ -378,7 +378,7 @@ class InstallSmokeTests(ScriptTestBase):
         self.assertNotIn("[update_manager iheater-remote]", conf)
 
     def test_regular_file_in_extras_is_moved_aside(self):
-        regular = self.fx.extras / "heater_virtual.py"
+        regular = self.fx.extras / "heater_iheater_remote.py"
         write_lf(regular, "# somebody's copy\n")
         self.install()
         self.assertTrue(regular.is_symlink())
@@ -416,8 +416,8 @@ class UninstallSmokeTests(ScriptTestBase):
 
         self.assertEqual(fx.printer_cfg.read_bytes(), printer_before)
         self.assertEqual(fx.moonraker_conf.read_bytes(), conf_before)
-        self.assertFalse((fx.extras / "heater_virtual.py").exists())
-        self.assertFalse((fx.extras / "heater_virtual.py").is_symlink())
+        self.assertFalse((fx.extras / "heater_iheater_remote.py").exists())
+        self.assertFalse((fx.extras / "heater_iheater_remote.py").is_symlink())
         self.assertFalse((fx.components / "iheater_remote.py").is_symlink())
         self.assertTrue(fx.addon_cfg.is_file())
         self.assertTrue(fx.log_text().endswith(
@@ -476,7 +476,7 @@ class UninstallSmokeTests(ScriptTestBase):
         outside = self.fx.root / "elsewhere"
         outside.mkdir()
         write_lf(outside / "mine.py", "# not ours\n")
-        link = self.fx.extras / "heater_virtual.py"
+        link = self.fx.extras / "heater_iheater_remote.py"
         os.symlink(str(outside / "mine.py"), str(link))
         self.install("n\n")
         self.uninstall()
@@ -488,9 +488,9 @@ class UninstallSmokeTests(ScriptTestBase):
 
     def test_uninstall_unresolvable_link(self):
         self.install()
-        link = self.fx.extras / "heater_virtual.py"
+        link = self.fx.extras / "heater_iheater_remote.py"
         link.unlink()
-        os.symlink(str(self.fx.root / "gone" / "deeper" / "heater_virtual.py"),
+        os.symlink(str(self.fx.root / "gone" / "deeper" / "heater_iheater_remote.py"),
                    str(link))
         result = self.uninstall()
         self.assertTrue(link.is_symlink())

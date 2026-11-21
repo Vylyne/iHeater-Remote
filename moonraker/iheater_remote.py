@@ -2,9 +2,9 @@
 #
 # The Remote calls the JSON-RPC method server.iheater_remote.report over its
 # Moonraker WebSocket. This component checks each report and forwards it to
-# the Klippy webhooks endpoint heater_virtual/report, which finds the
-# heater_virtual section by remote_token. The rules mirror _validate_report
-# in klipper/heater_virtual.py, plus the remote_token format. The two files
+# the Klippy webhooks endpoint heater_iheater_remote/report, which finds the
+# heater_iheater_remote section by remote_token. The rules mirror _validate_report
+# in klipper/heater_iheater_remote.py, plus the remote_token format. The two files
 # install into different programs and cannot import each other, so the
 # small validator is duplicated.
 #
@@ -17,7 +17,7 @@ from ..common import RequestType, WebRequest
 
 _TOKEN_RE = re.compile(r'^[0-9A-HJKMNP-TV-Z]{8}$')
 _LINKS = ('up', 'waiting', 'restarting', 'no-reply')
-_KLIPPY_ENDPOINT = 'heater_virtual/report'
+_KLIPPY_ENDPOINT = 'heater_iheater_remote/report'
 
 
 def _is_number(value):

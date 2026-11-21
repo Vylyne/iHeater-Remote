@@ -14,7 +14,7 @@ from typing import Dict, List, Optional, Tuple
 _VERSION_RE = re.compile(r"^#\s*CONFIG_VERSION:\s*(\d+)\s*$", re.MULTILINE)
 _HEADING_RE = re.compile(r"^## (\d+)\s*$")
 _TOKEN_RE = re.compile(r"^[0-9A-HJKMNP-TV-Z]{8}$")
-_SECTION_RE = re.compile(r"^\[heater_virtual\s+([^\]\s]+)\s*\]")
+_SECTION_RE = re.compile(r"^\[heater_iheater_remote\s+([^\]\s]+)\s*\]")
 _INCLUDE_RE = re.compile(
     r"^\[include\s+(.+?)\s*\](\s*[#;].*)?$", re.IGNORECASE)
 _CARRIED_KEYS = ("remote_token", "sensor", "max_target")
@@ -85,7 +85,7 @@ def check_token(token):
 
 def _find_section(lines):
     # type: (List[str]) -> Optional[Tuple[int, int, str]]
-    """Locate the first [heater_virtual ...] section.
+    """Locate the first [heater_iheater_remote ...] section.
 
     Returns (header index, end index, name); the section runs to the next
     line starting with "[".
@@ -115,7 +115,7 @@ def _key_res(key):
 
 def get_key(text, key):
     # type: (str, str) -> Optional[str]
-    """Return the active value of key in the first heater_virtual section."""
+    """Return the active value of key in the first heater_iheater_remote section."""
     lines = text.splitlines(True)
     sec = _find_section(lines)
     if sec is None:
@@ -129,7 +129,7 @@ def get_key(text, key):
 
 def set_key(text, key, value):
     # type: (str, str, str) -> str
-    """Set key in the first heater_virtual section.
+    """Set key in the first heater_iheater_remote section.
 
     An active line is replaced, else a commented one is uncommented, else
     the line is inserted after the section header.
@@ -137,7 +137,7 @@ def set_key(text, key, value):
     lines = text.splitlines(True)
     sec = _find_section(lines)
     if sec is None:
-        raise ValueError("no [heater_virtual ...] section found")
+        raise ValueError("no [heater_iheater_remote ...] section found")
     start, end, _ = sec
     eol = _eol(text)
     new_line = "%s: %s" % (key, value.strip())
@@ -333,7 +333,7 @@ def _cmd_check_token(args):
 def _cmd_get_key(args):
     text = _read(args.file)
     if _find_section(text.splitlines(True)) is None:
-        raise ValueError("no [heater_virtual ...] section in %s" % args.file)
+        raise ValueError("no [heater_iheater_remote ...] section in %s" % args.file)
     value = get_key(text, args.key)
     if value is None:
         return 1

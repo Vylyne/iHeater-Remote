@@ -118,7 +118,7 @@ class IheaterRemoteTest(unittest.TestCase):
         self.assertEqual(self.call(comp, args), {'ok': True})
         self.assertEqual(len(self.conn.requests), 1)
         req = self.conn.requests[0]
-        self.assertEqual(req.endpoint, 'heater_virtual/report')
+        self.assertEqual(req.endpoint, 'heater_iheater_remote/report')
         self.assertEqual(req.args, args)
 
     def test_unknown_field_forwarded(self):
@@ -177,7 +177,7 @@ class IheaterRemoteTest(unittest.TestCase):
         self.assertEqual(self.conn.requests, [])
 
     def test_klippy_error_passes_through(self):
-        err = ServerError("no heater_virtual has remote_token 7K3P-9QXM", 400)
+        err = ServerError("no heater_iheater_remote has remote_token 7K3P-9QXM", 400)
         comp = self.make(error=err)
         with self.assertRaises(ServerError) as cm:
             self.call(comp, good())

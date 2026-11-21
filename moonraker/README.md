@@ -2,16 +2,16 @@
 
 The iHeater Remote reports its readings (air and element temperature, power,
 fan, state, fault) to Klipper through Moonraker. This component receives each
-report and forwards it to the `heater_virtual` module.
+report and forwards it to the `heater_iheater_remote` module.
 
 ## What it does
 
 The Remote calls the JSON-RPC method `server.iheater_remote.report` on its
 existing Moonraker WebSocket. The component checks the report with the same
-rules as `klipper/heater_virtual.py`, and checks that `remote_token` is eight
+rules as `klipper/heater_iheater_remote.py`, and checks that `remote_token` is eight
 characters from `0-9A-HJKMNP-TV-Z`. It then forwards the report, unknown
-fields included, to the Klippy webhooks endpoint `heater_virtual/report`.
-Klipper picks the `heater_virtual` section by `remote_token`.
+fields included, to the Klippy webhooks endpoint `heater_iheater_remote/report`.
+Klipper picks the `heater_iheater_remote` section by `remote_token`.
 
 Errors:
 

@@ -1,4 +1,4 @@
-"""Unit tests for heater_virtual.py using minimal Klipper fakes.
+"""Unit tests for heater_iheater_remote.py using minimal Klipper fakes.
 
 Run: python -m unittest discover -s klipper -p "test_*.py" -v
 """
@@ -8,7 +8,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-import heater_virtual  # noqa: E402
+import heater_iheater_remote  # noqa: E402
 
 _MISSING = object()
 
@@ -169,7 +169,7 @@ class FakeSensor:
         return self.temp, 0.
 
 
-class HeaterVirtualTest(unittest.TestCase):
+class HeaterIheaterRemoteTest(unittest.TestCase):
     def setUp(self):
         self.printer = FakePrinter()
         self.heaters = FakeHeaters()
@@ -187,10 +187,10 @@ class HeaterVirtualTest(unittest.TestCase):
         self.sensor.temp = sensor_temp
         opts = {'sensor': 'temperature_sensor chamber_hexa'}
         opts.update(options)
-        self.config = FakeConfig(self.printer, 'heater_virtual chamber', opts)
-        hv = heater_virtual.load_config_prefix(self.config)
+        self.config = FakeConfig(self.printer, 'heater_iheater_remote chamber', opts)
+        hv = heater_iheater_remote.load_config_prefix(self.config)
         # Klipper adds the object returned by load_config_prefix.
-        self.printer.objects['heater_virtual chamber'] = hv
+        self.printer.objects['heater_iheater_remote chamber'] = hv
         return hv
 
     def make_connected(self, sensor_temp=21.5, **options):
@@ -201,8 +201,8 @@ class HeaterVirtualTest(unittest.TestCase):
     def test_registers_as_heater(self):
         hv = self.make()
         self.assertIs(self.heaters.heaters['chamber'], hv)
-        self.assertIn('heater_virtual chamber', self.heaters.available_heaters)
-        self.assertIn('heater_virtual chamber', self.heaters.registered_sensors)
+        self.assertIn('heater_iheater_remote chamber', self.heaters.available_heaters)
+        self.assertIn('heater_iheater_remote chamber', self.heaters.registered_sensors)
         self.assertIn(('SET_HEATER_TEMPERATURE', 'HEATER', 'chamber'),
                       self.gcode.mux)
 
@@ -299,15 +299,15 @@ class HeaterVirtualTest(unittest.TestCase):
                 self.heaters.heaters.clear()
                 with self.assertRaises(ConfigError) as ctx:
                     self.make(remote_token=bad)
-                self.assertIn('heater_virtual chamber', str(ctx.exception))
+                self.assertIn('heater_iheater_remote chamber', str(ctx.exception))
 
     def test_duplicate_remote_token_is_config_error(self):
         self.make(remote_token='7K3P-9QXM')
-        config = FakeConfig(self.printer, 'heater_virtual chamber2',
+        config = FakeConfig(self.printer, 'heater_iheater_remote chamber2',
                             {'sensor': 'temperature_sensor chamber_hexa',
                              'remote_token': '7k3p9qxm'})
         with self.assertRaises(ConfigError):
-            heater_virtual.load_config_prefix(config)
+            heater_iheater_remote.load_config_prefix(config)
 
     def test_mirror_macro_not_read(self):
         self.make(mirror_macro='VIRTUAL_CHAMBER')
@@ -321,14 +321,14 @@ class HeaterVirtualTest(unittest.TestCase):
 
     def post(self, **over):
         req = FakeWebRequest(report(**over))
-        self.webhooks.endpoints['heater_virtual/report'](req)
+        self.webhooks.endpoints['heater_iheater_remote/report'](req)
         return req
 
     def make_second(self, token='ABCDEFGH'):
-        config = FakeConfig(self.printer, 'heater_virtual tent',
+        config = FakeConfig(self.printer, 'heater_iheater_remote tent',
                             {'sensor': 'temperature_sensor chamber_hexa',
                              'remote_token': token})
-        hv = heater_virtual.load_config_prefix(config)
+        hv = heater_iheater_remote.load_config_prefix(config)
         self.printer.fire('klippy:connect')
         return hv
 
@@ -336,7 +336,7 @@ class HeaterVirtualTest(unittest.TestCase):
         self.make(remote_token='7K3P9QXM')
         self.make_second()
         self.assertEqual(self.webhooks.registrations,
-                         ['heater_virtual/report'])
+                         ['heater_iheater_remote/report'])
 
     def test_report_routes_by_token(self):
         first = self.make_connected(remote_token='ABCDEFGH')
@@ -394,9 +394,9 @@ class HeaterVirtualTest(unittest.TestCase):
         self.assertEqual(hv.get_status(100.)['power'], 1.)
 
     def test_no_sensor_keeps_last_air(self):
-        config = FakeConfig(self.printer, 'heater_virtual chamber',
+        config = FakeConfig(self.printer, 'heater_iheater_remote chamber',
                             {'remote_token': '7K3P9QXM'})
-        hv = heater_virtual.load_config_prefix(config)
+        hv = heater_iheater_remote.load_config_prefix(config)
         self.printer.fire('klippy:connect')
         self.assertEqual(hv.get_status(0.)['temperature'], 0.)
         self.printer.reactor.now = 100.
@@ -439,7 +439,7 @@ class HeaterVirtualTest(unittest.TestCase):
                      report(remote_token=12), report(remote_token='')):
             with self.subTest(args=args):
                 with self.assertRaises(CommandError):
-                    self.webhooks.endpoints['heater_virtual/report'](
+                    self.webhooks.endpoints['heater_iheater_remote/report'](
                         FakeWebRequest(args))
                 self.assertEqual(hv.get_status(111.), before)
 

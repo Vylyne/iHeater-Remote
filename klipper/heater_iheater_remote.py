@@ -6,7 +6,7 @@
 #
 # The link is two-way. The Remote sends readings (air and element
 # temperature, power, fan, state, fault) through the Moonraker component
-# iheater_remote to the webhooks endpoint heater_virtual/report. A report is
+# iheater_remote to the webhooks endpoint heater_iheater_remote/report. A report is
 # fresh until arrival + 2 * next_within + 2 s; while it is fresh and the
 # iHeater link is up, the chamber temperature is the report's air reading
 # and "linked" is true. Otherwise the temperature comes from the optional
@@ -22,8 +22,8 @@ import re
 
 _TOKEN_RE = re.compile(r'^[0-9A-HJKMNP-TV-Z]{8}$')
 _LINKS = ('up', 'waiting', 'restarting', 'no-reply')
-_REPORT_PATH = 'heater_virtual/report'
-_ROUTER_NAME = 'heater_virtual_router'
+_REPORT_PATH = 'heater_iheater_remote/report'
+_ROUTER_NAME = 'heater_iheater_remote_router'
 _SENSOR_TYPE = 'iheater_remote'
 
 
@@ -111,7 +111,7 @@ class _ReportRouter:
                     break
         if heater is None:
             raise web_request.error(
-                "no heater_virtual has remote_token %s-%s"
+                "no heater_iheater_remote has remote_token %s-%s"
                 % (token[:4], token[4:]))
         now = self.printer.get_reactor().monotonic()
         try:
@@ -121,7 +121,7 @@ class _ReportRouter:
         web_request.send({'ok': True})
 
 
-class HeaterVirtual:
+class HeaterIheaterRemote:
     def __init__(self, config):
         self.printer = config.get_printer()
         self.full_name = config.get_name()
@@ -159,11 +159,11 @@ class HeaterVirtual:
                                % (self.short_name,))
         if token:
             for other in self.pheaters.heaters.values():
-                if (isinstance(other, HeaterVirtual)
+                if (isinstance(other, HeaterIheaterRemote)
                         and other.remote_token == token):
                     raise config.error(
                         "[%s] remote_token %s-%s is already used by "
-                        "heater_virtual %s"
+                        "heater_iheater_remote %s"
                         % (self.full_name, token[:4], token[4:],
                            other.short_name))
         self.pheaters.heaters[self.short_name] = self
@@ -297,10 +297,10 @@ class IheaterRemoteSensor:
 
     def _handle_connect(self):
         heater = self.printer.lookup_object(
-            'heater_virtual ' + self.heater_name, None)
-        if not isinstance(heater, HeaterVirtual):
+            'heater_iheater_remote ' + self.heater_name, None)
+        if not isinstance(heater, HeaterIheaterRemote):
             raise self.printer.config_error(
-                "[%s] heater '%s' is not a heater_virtual"
+                "[%s] heater '%s' is not a heater_iheater_remote"
                 % (self.name, self.heater_name))
         self.heater = heater
         reactor = self.printer.get_reactor()
@@ -314,4 +314,4 @@ class IheaterRemoteSensor:
 
 
 def load_config_prefix(config):
-    return HeaterVirtual(config)
+    return HeaterIheaterRemote(config)
