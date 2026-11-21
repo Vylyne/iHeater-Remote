@@ -41,6 +41,16 @@ config file, adding the include or restarting Klipper. It warns about any other
 `<file>.bak-<date>-<time>`, and it never restarts Klipper during a print.
 Running it again is safe: steps that are already done say `skip`.
 
+### Upgrading from a manual install
+
+If you copied `iheater_remote.cfg` next to `printer.cfg` and added
+`[include iheater_remote.cfg]` yourself, `install.sh` finds it and offers to
+move the file to `addons/iheater_remote.cfg` and update the include. Your
+token, sensor and `max_target` stay with the file, and both the file and
+`printer.cfg` are backed up first. After the install, it also warns if the
+sensor you chose has no section in your config, because Klipper would not
+start.
+
 These environment variables change where it looks:
 
 | Variable         | Default             |

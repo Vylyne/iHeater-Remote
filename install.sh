@@ -81,6 +81,81 @@ function prompt_sensor {
     fi
 }
 
+# The manual install the README described before install.sh: the config beside
+# printer.cfg, loaded by [include iheater_remote.cfg].
+OLD_CFG="${CONFIG_DIR}/iheater_remote.cfg"
+OLD_INCLUDE="iheater_remote.cfg"
+# Set to 1 when the user keeps that older copy, which Klipper still loads.
+OLD_KEPT=0
+
+function step_old_layout {
+    if [ ! -e "${OLD_CFG}" ] || [ -e "${ADDON_CFG}" ]; then
+        return 0
+    fi
+    section "Older install"
+    warn "found an older install: ${OLD_CFG}"
+    if ask "Move it to ${ADDON_REL} and update the include?" y; then
+        mkdir -p "$(dirname "${ADDON_CFG}")"
+        backup "${OLD_CFG}"
+        mv "${OLD_CFG}" "${ADDON_CFG}"
+        ok "moved ${OLD_CFG} to ${ADDON_CFG}"
+        CHANGED_KLIPPER=1
+        if [ -f "${PRINTER_CFG}" ] \
+            && [ "$(helper has-include "${PRINTER_CFG}" "${CONFIG_DIR}" "${OLD_INCLUDE}" || true)" = "exact" ]; then
+            backup "${PRINTER_CFG}"
+            helper remove-include "${PRINTER_CFG}" "${OLD_INCLUDE}"
+            if ! helper has-include "${PRINTER_CFG}" "${CONFIG_DIR}" "${ADDON_REL}" >/dev/null; then
+                helper add-include "${PRINTER_CFG}" "${ADDON_REL}"
+            fi
+            ok "printer.cfg now includes ${ADDON_REL} instead of ${OLD_INCLUDE}"
+        fi
+    else
+        OLD_KEPT=1
+        warn "left ${OLD_CFG} alone."
+    fi
+}
+
+# Whether the file at PATH is one that should never count as the user's config:
+# our own file, a backup of ours, or a SAVE_CONFIG copy of printer.cfg.
+function ignored_cfg {
+    case "$1" in
+        "${ADDON_CFG}") return 0 ;;
+        *.bak-*) return 0 ;;
+    esac
+    [[ "$1" =~ /printer-[0-9]+_[0-9]+\.cfg$ ]]
+}
+
+# regex_escape TEXT: escape TEXT for use inside a grep -E pattern.
+function regex_escape {
+    printf '%s' "$1" | sed 's/[][\.*^$+?(){}|\\/]/\\&/g'
+}
+
+# Sets KLIPPER_RESTART_DEFAULT=n when the chosen sensor has no section.
+function step_sensor_check {
+    local sensor word pattern="" file found=0 files
+    sensor="$(helper get-key "${ADDON_CFG}" sensor 2>/dev/null || true)"
+    [ -n "${sensor}" ] || return 0
+    for word in ${sensor}; do
+        [ -z "${pattern}" ] || pattern="${pattern}[[:space:]]+"
+        pattern="${pattern}$(regex_escape "${word}")"
+    done
+    pattern="^\\[[[:space:]]*${pattern}[[:space:]]*\\]"
+    files="$(grep -RlE --include='*.cfg' -e "${pattern}" "${CONFIG_DIR}" 2>/dev/null || true)"
+    while IFS= read -r file; do
+        [ -n "${file}" ] || continue
+        if ! ignored_cfg "${file}"; then
+            found=1
+            break
+        fi
+    done <<< "${files}"
+    if [ "${found}" = 1 ]; then
+        ok "found [${sensor}] in your config"
+    else
+        warn "No [${sensor}] section found in your config. Klipper will stop with a config error until it exists; set sensor: in ${ADDON_REL}."
+        KLIPPER_RESTART_DEFAULT=n
+    fi
+}
+
 function step_config_file {
     section "Config file"
     mkdir -p "$(dirname "${ADDON_CFG}")"
@@ -136,20 +211,27 @@ function step_config_file {
 MACROS_FOUND=0
 function step_macro_check {
     section "Macros"
-    local hits line file num
+    local hits line file num text
+    if [ "${OLD_KEPT}" = 1 ]; then
+        warn "${OLD_CFG} is an older copy of this config that Klipper still loads."
+        note "Its macros are not counted below. Two copies would clash, so move or delete one."
+    fi
     hits="$(grep -RniE --include='*.cfg' '^\[gcode_macro (M141|M191)\]' \
         "${CONFIG_DIR}" 2>/dev/null || true)"
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
-        case "${line}" in
-            "${ADDON_CFG}":*) continue ;;
-            *.bak-*) continue ;;
-        esac
         # path:line:text, where the path may itself hold a colon.
         if [[ "${line}" =~ ^(.*):([0-9]+):(.*)$ ]]; then
             file="${BASH_REMATCH[1]}"
             num="${BASH_REMATCH[2]}"
-            warn "${file}:${num} defines ${BASH_REMATCH[3]}"
+            text="${BASH_REMATCH[3]}"
+            if ignored_cfg "${file}"; then
+                continue
+            fi
+            if [ "${OLD_KEPT}" = 1 ] && [ "${file}" = "${OLD_CFG}" ]; then
+                continue
+            fi
+            warn "${file}:${num} defines ${text}"
         else
             warn "${line}"
         fi
@@ -176,6 +258,10 @@ function step_printer_cfg {
     if [ "${MACROS_FOUND}" != 0 ]; then
         default=n
         note "Delete or rename your macros above, then re-run install.sh."
+    fi
+    if [ "${OLD_KEPT}" = 1 ]; then
+        default=n
+        note "Including ${ADDON_REL} as well would load the config twice."
     fi
     if ask "Add ${INCLUDE_LINE} to printer.cfg?" "${default}"; then
         backup "${PRINTER_CFG}"
@@ -248,7 +334,9 @@ section "iHeater Remote"
 note "Installing from ${INSTALL_PATH}"
 preflight
 step_link_modules
+step_old_layout
 step_config_file
+step_sensor_check
 step_macro_check
 step_printer_cfg
 step_moonraker_conf

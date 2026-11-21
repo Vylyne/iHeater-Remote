@@ -80,8 +80,7 @@ function step_printer_cfg {
         return 0
     fi
     if [ "${how}" != "exact" ]; then
-        skip "printer.cfg left alone: a glob include covers it"
-        note "Edit the glob include yourself if you want the config unloaded."
+        warn "printer.cfg loads it through another include line; left it"
         return 0
     fi
     if ask "Remove the include from printer.cfg?" y; then
@@ -90,7 +89,7 @@ function step_printer_cfg {
         CHANGED_KLIPPER=1
         ok "removed ${INCLUDE_LINE}"
     else
-        warn "printer.cfg not changed; Klipper will fail to find the heater module."
+        warn "printer.cfg not changed."
     fi
 }
 
@@ -110,6 +109,26 @@ function step_config_file {
     fi
 }
 
+# Warns, and stops Klipper restarting by default, when printer.cfg still loads
+# a config file that needs the module this run unlinks.
+function step_still_loaded {
+    [ -f "${PRINTER_CFG}" ] || return 0
+    local name=""
+    if [ -e "${ADDON_CFG}" ] \
+        && helper has-include "${PRINTER_CFG}" "${CONFIG_DIR}" "${ADDON_REL}" >/dev/null; then
+        name="${ADDON_CFG}"
+    elif [ -e "${CONFIG_DIR}/iheater_remote.cfg" ] \
+        && helper has-include "${PRINTER_CFG}" "${CONFIG_DIR}" "iheater_remote.cfg" >/dev/null; then
+        name="${CONFIG_DIR}/iheater_remote.cfg"
+    fi
+    if [ -n "${name}" ]; then
+        warn "printer.cfg still loads ${name}."
+        note "Klipper will stop with a config error until you remove that include line"
+        note "from printer.cfg (or delete the file). Edit printer.cfg, then restart Klipper."
+        KLIPPER_RESTART_DEFAULT=n
+    fi
+}
+
 function step_links {
     section "Modules"
     unlink_module "${KLIPPER_PATH}/klippy/extras/heater_virtual.py"
@@ -122,5 +141,6 @@ preflight
 step_moonraker_conf
 step_printer_cfg
 step_config_file
+step_still_loaded
 step_links
 restart_services

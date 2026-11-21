@@ -30,6 +30,11 @@ CHANGED_LINKS=0
 CHANGED_MOONRAKER=0
 CHANGED_KLIPPER=0
 
+# What "Restart Klipper now?" offers when the printer is idle. A script sets
+# this to n, after printing the reason, when a restart would leave Klipper
+# with a config error. An active print still wins: Klipper is not restarted.
+KLIPPER_RESTART_DEFAULT=y
+
 # Whether each service unit exists; set by preflight.
 HAVE_KLIPPER_SVC=0
 HAVE_MOONRAKER_SVC=0
@@ -261,7 +266,7 @@ function restart_services {
                 if ask "Restart Klipper now?" n; then go=1; fi
                 ;;
             *)
-                if ask "Restart Klipper now?" y; then go=1; fi
+                if ask "Restart Klipper now?" "${KLIPPER_RESTART_DEFAULT}"; then go=1; fi
                 ;;
         esac
         if [ "${go}" = 0 ]; then

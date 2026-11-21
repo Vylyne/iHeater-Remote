@@ -20,6 +20,12 @@ REPO = Path(__file__).resolve().parent.parent
 STATE_STANDBY = '{"result":{"status":{"print_stats":{"state":"standby"}}}}'
 STATE_PRINTING = '{"result":{"status":{"print_stats":{"state":"printing"}}}}'
 
+SENSOR_SECTION = ("[temperature_sensor chamber_hexa]\n"
+                  "sensor_type: temperature_host\n")
+PRINTER_CFG_TEXT = (
+    "[printer]\n" + SENSOR_SECTION + "#*# <---- SAVE_CONFIG ---->\n"
+    "#*# DO NOT EDIT THIS BLOCK OR BELOW.\n")
+
 STUBS = {
     "systemctl": (
         "#!/bin/sh\n"
@@ -73,6 +79,17 @@ def bash_is_usable():
     return True
 
 
+def write_old_layout(fx):
+    """The manual layout from before install.sh: cfg beside printer.cfg."""
+    text = read_text(REPO / "klipper" / "iheater_remote.cfg")
+    text = text.replace("\r\n", "\n").replace("# CONFIG_VERSION: 1\n", "")
+    text = text.replace("#remote_token: XXXX-XXXX", "remote_token: 7K3M9QX2")
+    write_lf(fx.config_dir / "iheater_remote.cfg", text)
+    with open(str(fx.printer_cfg), "a", encoding="utf-8", newline="\n") as f:
+        f.write("[include iheater_remote.cfg]\n")
+    return text
+
+
 class Fixture:
     """A fake printer tree plus the stub bin directory."""
 
@@ -94,9 +111,7 @@ class Fixture:
         self.components.mkdir(parents=True)
         self.config_dir.mkdir(parents=True)
         self.bin.mkdir()
-        write_lf(self.printer_cfg,
-                 "[printer]\n#*# <---- SAVE_CONFIG ---->\n"
-                 "#*# DO NOT EDIT THIS BLOCK OR BELOW.\n")
+        write_lf(self.printer_cfg, PRINTER_CFG_TEXT)
         write_lf(self.moonraker_conf, "[server]\nhost: 0.0.0.0\n")
         write_lf(self.log, "")
         for name, body in STUBS.items():
@@ -276,6 +291,55 @@ class InstallSmokeTests(ScriptTestBase):
                          read_text(self.fx.printer_cfg))
         self.assertRegex(result.stdout, r"macros\.cfg:\d+")
 
+    def test_save_config_backup_not_flagged(self):
+        write_lf(self.fx.config_dir / "printer-20260101_120000.cfg",
+                 "[gcode_macro M141]\ngcode:\n")
+        result = self.install()
+        self.assertNotIn("defines [gcode_macro", result.stdout)
+        self.assertIn("[include addons/iheater_remote.cfg]",
+                      read_text(self.fx.printer_cfg))
+
+    def test_missing_sensor_warns_and_skips_restart(self):
+        write_lf(self.fx.printer_cfg, "[printer]\n")
+        result = self.install()
+        self.assertIn("No [temperature_sensor chamber_hexa] section found",
+                      result.stdout)
+        self.assertIn("sensor:", result.stdout)
+        self.assertEqual(self.fx.log_text(), "restart moonraker\n")
+
+    def test_chosen_sensor_is_checked(self):
+        result = self.install("\nsensor.x+y\n")
+        self.assertIn("No [sensor.x+y] section found", result.stdout)
+        self.assertNotIn("restart klipper", self.fx.log_text())
+
+    def test_install_migrates_old_layout(self):
+        old = write_old_layout(self.fx)
+        # Move: yes. Upgrade to version 1: yes.
+        result = self.install("y\ny\n")
+        fx = self.fx
+        self.assertIn("\nremote_token: 7K3M9QX2\n", self.installed_cfg())
+        self.assertFalse((fx.config_dir / "iheater_remote.cfg").exists())
+        backups = glob.glob(str(fx.config_dir / "iheater_remote.cfg.bak-*"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(read_text(backups[0]), old)
+        printer = read_text(fx.printer_cfg)
+        self.assertIn("[include addons/iheater_remote.cfg]\n", printer)
+        self.assertNotIn("[include iheater_remote.cfg]", printer)
+        self.assertEqual(len(glob.glob(str(fx.printer_cfg) + ".bak-*")), 1)
+        self.assertNotIn("no pairing token yet", result.stdout)
+        self.assertNotIn("defines [gcode_macro", result.stdout)
+
+    def test_install_old_layout_declined(self):
+        old = write_old_layout(self.fx)
+        before = read_text(self.fx.printer_cfg)
+        # Move: no. Then blank token, blank sensor, default at the include.
+        result = self.install("n\n\n\n\n")
+        fx = self.fx
+        self.assertEqual(read_text(fx.config_dir / "iheater_remote.cfg"), old)
+        self.assertEqual(read_text(fx.printer_cfg), before)
+        self.assertIn("older copy", result.stdout)
+        self.assertNotIn("defines [gcode_macro", result.stdout)
+
     def edit_installed_to_old(self):
         text = self.installed_cfg()
         text = text.replace("# CONFIG_VERSION: 1\n", "")
@@ -338,8 +402,7 @@ class UninstallSmokeTests(ScriptTestBase):
         fx = self.fx
         self.write_bytes(
             fx.printer_cfg,
-            "[printer]\n#*# <---- SAVE_CONFIG ---->\n"
-            "#*# DO NOT EDIT THIS BLOCK OR BELOW.\n".replace("\n", newline))
+            PRINTER_CFG_TEXT.replace("\n", newline))
         self.write_bytes(
             fx.moonraker_conf,
             "[server]\nhost: 0.0.0.0\n".replace("\n", newline))
@@ -375,12 +438,39 @@ class UninstallSmokeTests(ScriptTestBase):
 
     def test_uninstall_leaves_glob_include(self):
         write_lf(self.fx.printer_cfg,
-                 "[include addons/*.cfg]\n[printer]\n")
+                 "[include addons/*.cfg]\n" + PRINTER_CFG_TEXT)
         self.install()
+        log_before = self.fx.log_text()
         result = self.uninstall()
         self.assertIn("[include addons/*.cfg]\n",
                       read_text(self.fx.printer_cfg))
-        self.assertIn("a glob include covers it", result.stdout)
+        self.assertIn("config error", result.stdout)
+        self.assertIn("addons/iheater_remote.cfg", result.stdout)
+        added = self.fx.log_text()[len(log_before):]
+        self.assertNotIn("restart klipper", added)
+        self.assertIn("restart moonraker", added)
+
+    def test_uninstall_declined_include_does_not_restart_klipper(self):
+        self.install()
+        log_before = self.fx.log_text()
+        result = self.uninstall("n\n")
+        self.assertIn("[include addons/iheater_remote.cfg]\n",
+                      read_text(self.fx.printer_cfg))
+        self.assertIn("config error", result.stdout)
+        added = self.fx.log_text()[len(log_before):]
+        self.assertNotIn("restart klipper", added)
+        self.assertIn("restart moonraker", added)
+
+    def test_uninstall_old_layout_left_in_place(self):
+        write_old_layout(self.fx)
+        self.install("n\n\n\n\n")
+        log_before = self.fx.log_text()
+        result = self.uninstall()
+        self.assertIn("config error", result.stdout)
+        self.assertIn("iheater_remote.cfg", result.stdout)
+        added = self.fx.log_text()[len(log_before):]
+        self.assertNotIn("restart klipper", added)
+        self.assertIn("restart moonraker", added)
 
     def test_uninstall_leaves_foreign_link(self):
         outside = self.fx.root / "elsewhere"
