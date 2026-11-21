@@ -3,14 +3,13 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Rename the Klipper heater `heater_virtual` to `heater_iheater_remote`
-everywhere, with a one-run upgrade for existing installs.
+everywhere. This is a clean rename with no upgrade path from the old name.
 
-**Architecture:** The install helper learns both section headers first, so it
-can read a version 1 file. Then the Klipper module, its cfg (version 2), the
-Moonraker endpoint and the installer's link names move together. Next the
-installer cleans up the old link, then the firmware switches its discovery
-prefix. A final sweep fixes the remaining docs and checks that the old name
-survives only where it must.
+**Architecture:** The Klipper module, its cfg, the Moonraker endpoint, the
+install helper's section matcher and the installer's link names move together
+in one task. Then the firmware switches its discovery prefix. A final sweep
+fixes the remaining docs and checks that the old name survives only where it
+must.
 
 **Tech Stack:** Python 3.7+ (Klipper module, Moonraker component, install
 helper), bash (install scripts), C++ on Arduino-ESP32 2.0.17 with Unity tests
@@ -23,14 +22,13 @@ helper), bash (install scripts), C++ on Arduino-ESP32 2.0.17 with Unity tests
 - New names: module file `klipper/heater_iheater_remote.py`, section
   `[heater_iheater_remote <name>]`, object `heater_iheater_remote <name>`,
   webhooks endpoint `heater_iheater_remote/report`.
-- The firmware matches only the new name. There is no backward compatibility
-  in the firmware.
-- The install helper reads both `[heater_virtual <name>]` and
-  `[heater_iheater_remote <name>]`.
-- `iheater_remote.cfg` is `CONFIG_VERSION` 2.
-- Dated documents in `docs/design/` are not edited.
-- Never remove an `extras/heater_virtual.py` that is not a link into
-  `INSTALL_PATH`.
+- No backward compatibility anywhere: the firmware, the install helper and
+  the install scripts know only the new name. There is no old-link cleanup
+  and no old-section warning.
+- `iheater_remote.cfg` stays `CONFIG_VERSION` 1, and `CONFIG_CHANGES.md` gets
+  no new entry.
+- Dated documents in `docs/design/` are not edited, except this plan and its
+  design.
 - Write Canadian English in comments, messages and docs.
 - Policy files in `lib/remote-policy/` use CRLF line endings. Keep each file's
   existing line endings.
@@ -40,82 +38,32 @@ helper), bash (install scripts), C++ on Arduino-ESP32 2.0.17 with Unity tests
 
 ## Review Focus
 
-1. **The user declines the version 2 upgrade.** Their cfg keeps
-   `[heater_virtual chamber]`, which Klipper can no longer load. Expect a
-   plain warning and a Klipper restart that defaults to no (Task 2:
-   `test_upgrade_declined_warns_old_section`).
-2. **The user renamed their heater** (`[heater_virtual hood]`). The carry keeps
-   their token and sensor and reports the rename (Task 1:
-   `test_carry_from_old_header_reports_rename`).
-3. **The repo was pulled but `./install.sh` wasn't re-run,** so
-   `extras/heater_virtual.py` dangles. Install removes it, and uninstall does
-   too (Task 3).
-4. **`extras/heater_virtual.py` belongs to someone else.** It is left alone
-   with a warning (Task 3: `test_install_leaves_foreign_old_link`).
-5. **An old manual install** (`config/iheater_remote.cfg` with
-   `[heater_virtual chamber]`) is moved, upgraded to version 2 with its token
-   carried, and ends up with the new header (Task 2: update
-   `test_install_migrates_old_layout`).
+1. **An old `[heater_virtual chamber]` file reaches the helper.** `set-key`
+   and `get-key` fail with a plain `no [heater_iheater_remote ...] section`
+   message rather than a traceback (Task 1: `test_set_key_old_header_rejected`).
+2. **A user renamed their heater** (`[heater_iheater_remote hood]`). The carry
+   still keeps their token and sensor and reports the rename (the existing
+   carry tests, now with the new header).
+3. **The shipped cfg and the module agree.** The cfg's section, its M191
+   `SENSOR=` and the module's object name all use `heater_iheater_remote`
+   (Task 1: the install smoke tests set a key in the shipped cfg).
+4. **The Remote sees the old name only.** `heater_virtual chamber` is not
+   discovered (Task 2: negative assertion).
 
 ---
 
-### Task 1: The install helper reads both section headers
-
-**Files:**
-- Modify: `scripts/iheater_config.py` (`_SECTION_RE`, docstrings, the
-  "no [heater_virtual ...] section" messages)
-- Test: `scripts/test_iheater_config.py`
-
-**Interfaces:**
-- Produces: `get_key`, `set_key` and `carry` find the first section headed
-  `[heater_iheater_remote <name>]` or `[heater_virtual <name>]`. The error
-  text becomes `no [heater_iheater_remote ...] section found`.
-
-- [ ] **Step 1: Write the failing tests.**
-  - `test_get_key_new_header`: `get_key("[heater_iheater_remote chamber]\nsensor: a\n", "sensor") == "a"`.
-  - `test_set_key_new_header`: setting `remote_token` to `7K3M-9QX2` in
-    `"[heater_iheater_remote chamber]\n"` gives
-    `"[heater_iheater_remote chamber]\nremote_token: 7K3M-9QX2\n"`.
-  - `test_carry_old_header_into_new`: old
-    `"[heater_virtual chamber]\nsensor: s1\nremote_token: 7K3M-9QX2\n"`, new
-    is the shipped-style `"[heater_iheater_remote chamber]\nsensor: x\n#remote_token: XXXX-XXXX\n"`.
-    The output contains `[heater_iheater_remote chamber]`, `sensor: s1` and
-    `remote_token: 7K3M-9QX2`, and does not contain `heater_virtual`.
-    `carried == ["sensor", "remote_token"]` (in `_CARRIED_KEYS` order) and
-    `renamed is None`.
-  - `test_carry_from_old_header_reports_rename`: old
-    `"[heater_virtual hood]\nremote_token: 7K3M-9QX2\n"` gives `renamed == "hood"`.
-  - `test_carry_old_header_crlf`: the same carry with `\r\n` line endings in
-    both inputs keeps `\r\n` throughout the output.
-  - `test_set_key_no_section_message`: `set_key("[other]\n", "sensor", "x")`
-    raises `ValueError` with `heater_iheater_remote` in its message.
-  - Existing tests that use `[heater_virtual ...]` fixtures stay unchanged.
-    They now prove the legacy header still works.
-- [ ] **Step 2: Run them and watch the new ones fail.**
-  Run: `python -m unittest discover -s scripts -p "test_iheater_config.py" -v`
-  Expected: the new-header tests and the message test fail; the rest pass.
-- [ ] **Step 3: Change `_SECTION_RE` to**
-  `r"^\[(?:heater_iheater_remote|heater_virtual)\s+([^\]\s]+)\s*\]"`. Update
-  the docstrings and error messages to the new name, and add a comment saying
-  the old header is accepted so a version 1 install can be upgraded.
-- [ ] **Step 4: Run the test file.** Expected: all pass.
-- [ ] **Step 5: Commit** `feat(install): read heater_iheater_remote sections`.
-
----
-
-### Task 2: Rename the Klipper module, cfg v2, Moonraker endpoint and installer paths
+### Task 1: Rename the Klipper module, cfg, Moonraker endpoint, helper and installer paths
 
 **Files:**
 - Rename (`git mv`): `klipper/heater_virtual.py` → `klipper/heater_iheater_remote.py`,
   `klipper/test_heater_virtual.py` → `klipper/test_heater_iheater_remote.py`
 - Modify: `klipper/heater_iheater_remote.py`, `klipper/test_heater_iheater_remote.py`,
-  `klipper/iheater_remote.cfg`, `klipper/CONFIG_CHANGES.md`,
-  `moonraker/iheater_remote.py`, `moonraker/test_iheater_remote.py`,
-  `install.sh`, `uninstall.sh`, `scripts/test_install.py`,
-  `klipper/README.md`, `moonraker/README.md`
+  `klipper/iheater_remote.cfg`, `moonraker/iheater_remote.py`,
+  `moonraker/test_iheater_remote.py`, `scripts/iheater_config.py`,
+  `scripts/test_iheater_config.py`, `install.sh`, `uninstall.sh`,
+  `scripts/test_install.py`, `klipper/README.md`, `moonraker/README.md`
 
 **Interfaces:**
-- Consumes: Task 1's helper.
 - Produces:
   - `_REPORT_PATH = 'heater_iheater_remote/report'` and
     `_ROUTER_NAME = 'heater_iheater_remote_router'` in the module.
@@ -124,6 +72,10 @@ helper), bash (install scripts), C++ on Arduino-ESP32 2.0.17 with Unity tests
   - The heater class is renamed `HeaterIheaterRemote`.
     `IheaterRemoteSensor` and the sensor type `iheater_remote` are unchanged.
   - The sensor's lookup is `printer.lookup_object('heater_iheater_remote ' + name, None)`.
+  - The helper's `_SECTION_RE` is
+    `r"^\[heater_iheater_remote\s+([^\]\s]+)\s*\]"`. Its error text is
+    `no [heater_iheater_remote ...] section found` (and `... section in <file>`
+    from the CLI).
   - Install links `${INSTALL_PATH}/klipper/heater_iheater_remote.py` at
     `${KLIPPER_PATH}/klippy/extras/heater_iheater_remote.py`.
   - Uninstall unlinks that path.
@@ -138,123 +90,53 @@ helper), bash (install scripts), C++ on Arduino-ESP32 2.0.17 with Unity tests
     - `self.assertEqual(req.endpoint, 'heater_iheater_remote/report')`;
     - the pass-through error string becomes
       `"no heater_iheater_remote has remote_token 7K3P-9QXM"`.
+  - In `scripts/test_iheater_config.py`:
+    - change every `[heater_virtual <name>]` fixture to
+      `[heater_iheater_remote <name>]`;
+    - add `test_set_key_old_header_rejected`:
+      `set_key("[heater_virtual chamber]\n", "sensor", "x")` raises
+      `ValueError` whose message contains `heater_iheater_remote`;
+    - add `test_get_key_old_header_ignored`:
+      `get_key("[heater_virtual chamber]\nsensor: a\n", "sensor")` is `None`.
   - In `scripts/test_install.py`:
     - every `extras / "heater_virtual.py"` becomes
       `extras / "heater_iheater_remote.py"`;
     - the link source becomes `REPO / "klipper" / "heater_iheater_remote.py"`;
-    - `test_install_migrates_old_layout` asserts that the moved cfg contains
-      `[heater_iheater_remote chamber]` and no `[heater_virtual`. Its
-      old-layout fixture is headed `[heater_virtual chamber]` with no
-      `CONFIG_VERSION`.
-  - Add `test_upgrade_declined_warns_old_section` to `InstallSmokeTests`:
-    - the installed `addons/iheater_remote.cfg` is `# CONFIG_VERSION: 1`
-      followed by `[heater_virtual chamber]` with a token;
-    - answer `n` at the upgrade prompt and defaults elsewhere;
-    - the file is unchanged;
-    - stdout contains `Klipper will stop with a config error`;
-    - the log has `restart moonraker` and no `restart klipper`.
-  - Add `test_upgrade_to_v2_carries_token`:
-    - the same v1 file, answered with defaults;
-    - the file now has `# CONFIG_VERSION: 2`, `[heater_iheater_remote chamber]`
-      and the token, and no `heater_virtual`.
+    - the dangling-link fixture's target becomes
+      `"gone" / "deeper" / "heater_iheater_remote.py"`.
 - [ ] **Step 2: Run them and watch them fail.**
   Run: `python -m unittest discover -s klipper -p "test_*.py"`, the same for
   `moonraker` and `scripts`.
   Expected: an import error for the Klipper tests, an endpoint mismatch for
-  Moonraker, and failures in the new and changed smoke tests.
+  Moonraker, section-not-found failures in the helper tests, and link-path
+  failures in the smoke tests.
 - [ ] **Step 3: Rename and edit.**
   - Run the two `git mv` commands.
   - In the module, change the constants, the class, the lookup, the error
     strings and the comments to the new name.
   - In the Moonraker component, change the endpoint constant and the header
     comment.
-  - In `iheater_remote.cfg`:
-    - `# CONFIG_VERSION: 2`;
+  - In the helper, change `_SECTION_RE`, the docstrings and both error
+    messages.
+  - In `iheater_remote.cfg` (keep `# CONFIG_VERSION: 1` and the working copy's
+    line endings):
     - `# Requires klipper/heater_iheater_remote.py in ~/klipper/klippy/extras/.`;
     - `[heater_iheater_remote chamber]`;
     - `TEMPERATURE_WAIT SENSOR="heater_iheater_remote chamber"`.
-    Keep the working copy's line endings.
-  - Append to `CONFIG_CHANGES.md`:
-    ```
-    ## 2
-    - The heater section is now `[heater_iheater_remote chamber]` (was
-      `[heater_virtual chamber]`), and M191 waits on
-      `heater_iheater_remote chamber`. Re-run `./install.sh` after pulling:
-      it carries your token and sensor into the new file.
-    - If you named your heater something other than `chamber`, rename the
-      new section and the M191 sensor to match.
-    ```
-  - In `install.sh`:
-    - update `step_link_modules` and the `printer["heater_iheater_remote chamber"].linked`
-      next-steps note.
-    - After the config-file step, if the installed cfg still has a line
-      matching `^\[heater_virtual[[:space:]]` (the user declined the
-      upgrade), warn
-      `"${ADDON_CFG} still uses [heater_virtual ...]. Klipper will stop with a config error until you accept the update (re-run ./install.sh)."`
-      and set `KLIPPER_RESTART_DEFAULT=n`.
+  - In `install.sh`, update `step_link_modules` and the
+    `printer["heater_iheater_remote chamber"].linked` next-steps note.
   - In `uninstall.sh`, update `step_links` to the new path.
-  - Change the module name, section and object in `klipper/README.md` and
-    `moonraker/README.md`. In the Klipper README's update paragraph, say that
-    version 2 renamed the section and `./install.sh` carries the settings.
-- [ ] **Step 4: Run the three Python gates.** Expected: all pass.
-- [ ] **Step 5: Commit** `feat!: rename heater_virtual to heater_iheater_remote`.
-  The body says the firmware must be updated at the same time.
-
----
-
-### Task 3: Install and uninstall clean up the old `heater_virtual.py` link
-
-**Files:**
-- Modify: `scripts/common.sh`, `install.sh`, `uninstall.sh`,
-  `scripts/test_install.py`
-
-**Interfaces:**
-- Consumes: `link_target` (common.sh), plus `inside_install` and
-  `unlink_module` (currently in uninstall.sh).
-- Produces:
-  - `inside_install PATH` and `unlink_module DEST` move to `scripts/common.sh`
-    unchanged.
-  - install.sh gains `step_old_link`, which calls
-    `unlink_module "${KLIPPER_PATH}/klippy/extras/heater_virtual.py"` after
-    `step_link_modules`.
-  - uninstall.sh's `step_links` unlinks both
-    `heater_iheater_remote.py` and `heater_virtual.py`.
-  - When nothing is at the old path, the install output prints nothing extra.
-    This needs a quiet mode or a pre-check, so a fresh install doesn't print
-    `heater_virtual.py not present`.
-
-- [ ] **Step 1: Write the failing smoke tests.**
-  - `test_install_removes_dangling_old_link`:
-    - before install, `extras/heater_virtual.py` is a link to
-      `REPO / "klipper" / "heater_virtual.py"`, which no longer exists;
-    - after install with defaults the old link is gone, the new link resolves
-      to `REPO / "klipper" / "heater_iheater_remote.py"`, and stdout names
-      `heater_virtual.py`.
-  - `test_install_leaves_foreign_old_link`: `extras/heater_virtual.py` is a
-    link to a file outside the repo. After install it is still that link, and
-    stdout contains `left it`.
-  - `test_fresh_install_no_old_link_noise`: on a fresh fixture, stdout doesn't
-    contain `heater_virtual`.
-  - `test_uninstall_removes_old_link`:
-    - after install, recreate the dangling old link;
-    - uninstall with defaults removes both links.
-- [ ] **Step 2: Run them and watch them fail.**
-  Run: `python -m unittest discover -s scripts -p "test_install.py" -v`
-  Expected: the four new tests fail; the rest pass.
-- [ ] **Step 3: Implement.**
-  - Move the two functions into `common.sh`.
-  - Add `step_old_link` to install.sh, run only when the old path is a link
-    or exists.
-  - Add the second `unlink_module` call to uninstall.sh.
-  - A removed old link sets `CHANGED_LINKS=1`, so Klipper's restart is
-    offered.
-- [ ] **Step 4: Run the scripts gate and `bash -n install.sh uninstall.sh scripts/common.sh`.**
+  - Change the module name, section and object in `klipper/README.md`
+    (including the manual `ln -s` line) and `moonraker/README.md`.
+- [ ] **Step 4: Run the three Python gates and `bash -n install.sh uninstall.sh scripts/common.sh`.**
   Expected: all pass.
-- [ ] **Step 5: Commit** `feat(install): remove the old heater_virtual.py link`.
+- [ ] **Step 5: Commit** `feat!: rename heater_virtual to heater_iheater_remote`.
+  The body says the firmware must be updated at the same time and that an
+  existing install must be uninstalled first.
 
 ---
 
-### Task 4: The firmware discovers `heater_iheater_remote` objects
+### Task 2: The firmware discovers `heater_iheater_remote` objects
 
 **Files:**
 - Modify: `lib/remote-policy/src/RemotePolicy.h`,
@@ -310,31 +192,20 @@ helper), bash (install scripts), C++ on Arduino-ESP32 2.0.17 with Unity tests
 
 ---
 
-### Task 5: Docs sweep and leftover check
+### Task 3: Docs sweep and leftover check
 
 **Files:**
 - Modify: `README.md`, `AGENTS.md`, and any file the check below finds
   outside the allowed list.
 
 - [ ] **Step 1: Rename in docs.**
-  - `README.md`:
-    - lines 29, 202 and 261 use the new section and object name;
-    - add a sentence to the Klipper part: "Older installs used
-      `[heater_virtual]`; update the Remote's firmware and re-run
-      `./install.sh` together."
+  - `README.md`: lines 29, 202 and 261 use the new section and object name.
   - `AGENTS.md` lines 6 and 32: change `heater_virtual` to
     `heater_iheater_remote`.
 - [ ] **Step 2: Run the leftover check.**
   Run: `git grep -n "heater_virtual" -- . ':!docs/design/2026-11-1*' ':!docs/design/2026-11-20*' ':!docs/design/2026-11-21-install-scripts-*'`
   Expected: hits only in:
-  - `scripts/iheater_config.py`: the legacy matcher and its comment;
-  - `scripts/test_iheater_config.py`: the legacy-header tests;
-  - `install.sh`: the old-link path and the declined-upgrade warning;
-  - `uninstall.sh`: the old-link path;
-  - `scripts/test_install.py`: the old-link and old-layout tests;
-  - `klipper/CONFIG_CHANGES.md`: the version 2 entry;
-  - `README.md`: the upgrade sentence;
-  - `klipper/README.md`: the upgrade note;
+  - `scripts/test_iheater_config.py`: the two old-header rejection tests;
   - `test/test_remote_policy/test_main.cpp`: the negative test;
   - this plan and its design.
   Fix any other hit.
@@ -346,9 +217,10 @@ helper), bash (install scripts), C++ on Arduino-ESP32 2.0.17 with Unity tests
 
 ## Bench check (the user, on hestia)
 
+The old install was already removed from hestia.
+
 1. Flash the new firmware to the Remote (the user does this).
-2. `git pull`, then `./install.sh`. Accept the version 2 update. The old
-   `heater_virtual.py` link is removed and Klipper restarts.
+2. `git pull`, then `./install.sh`, and set the token.
 3. Mainsail shows `heater_iheater_remote chamber` with a target box, and the
    Remote pairs.
 4. Run `./install.sh` again: every step says `skip`.
