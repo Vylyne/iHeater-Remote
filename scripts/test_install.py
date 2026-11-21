@@ -233,7 +233,7 @@ class InstallSmokeTests(ScriptTestBase):
         result = self.install("bad\n\n\n")
         self.assertIn("#remote_token:", self.installed_cfg())
         self.assertNotIn("\nremote_token:", self.installed_cfg())
-        self.assertIn("warn", result.stdout)
+        self.assertIn("not a pairing token", result.stdout)
 
     def test_install_while_printing(self):
         result = self.install(state=STATE_PRINTING)
@@ -252,6 +252,29 @@ class InstallSmokeTests(ScriptTestBase):
         self.assertNotIn("[include addons/iheater_remote.cfg]",
                          read_text(self.fx.printer_cfg))
         self.assertRegex(result.stdout, r"printer\.cfg:\d+")
+
+    def test_no_answer_declines_include(self):
+        # Token and sensor prompts take blanks, then "No" at the include.
+        self.install("\n\nNo\n")
+        self.assertNotIn("[include addons/iheater_remote.cfg]",
+                         read_text(self.fx.printer_cfg))
+
+    def test_unclear_answer_asks_again(self):
+        result = self.install("\n\nmaybe\nn\n")
+        self.assertNotIn("[include addons/iheater_remote.cfg]",
+                         read_text(self.fx.printer_cfg))
+        self.assertEqual(result.stderr.count("to printer.cfg?"), 2)
+
+    def test_symlinked_macro_file_blocks_include(self):
+        outside = self.fx.root / "elsewhere"
+        outside.mkdir()
+        write_lf(outside / "real_macros.cfg", "[gcode_macro M191]\ngcode:\n")
+        os.symlink(str(outside / "real_macros.cfg"),
+                   str(self.fx.config_dir / "macros.cfg"))
+        result = self.install()
+        self.assertNotIn("[include addons/iheater_remote.cfg]",
+                         read_text(self.fx.printer_cfg))
+        self.assertRegex(result.stdout, r"macros\.cfg:\d+")
 
     def edit_installed_to_old(self):
         text = self.installed_cfg()
@@ -280,7 +303,7 @@ class InstallSmokeTests(ScriptTestBase):
         edited = self.edit_installed_to_old()
         result = self.install("\n")
         self.assertEqual(self.installed_cfg(), edited)
-        self.assertIn("CONFIG_CHANGES.md", result.stdout)
+        self.assertIn("kept your older config", result.stdout)
         self.assertEqual(glob.glob(str(self.fx.addon_cfg) + ".bak-*"), [])
 
     def test_install_without_origin(self):

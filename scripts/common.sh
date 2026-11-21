@@ -96,21 +96,24 @@ function ask {
     if [ "${default}" = "n" ]; then
         hint="[y/N]"
     fi
-    printf '  ?     %s %s: ' "${prompt}" "${hint}" >&2
-    read -r answer || answer=""
-    if [ -z "${answer}" ]; then
-        printf '\n' >&2
-    fi
-    if [ "${default}" = "n" ]; then
+    while :; do
+        printf '  ?     %s %s: ' "${prompt}" "${hint}" >&2
+        if ! read -r answer; then
+            # End of input (no terminal): take the default.
+            printf '
+' >&2
+            answer=""
+        fi
         case "${answer}" in
-            y | Y | yes | YES) return 0 ;;
-            *) return 1 ;;
+            "")
+                [ "${default}" = "y" ] && return 0
+                return 1
+                ;;
+            [yY] | [yY][eE][sS]) return 0 ;;
+            [nN] | [nN][oO]) return 1 ;;
         esac
-    fi
-    case "${answer}" in
-        n | N | no | NO) return 1 ;;
-        *) return 0 ;;
-    esac
+        warn "please answer y or n."
+    done
 }
 
 # ask_value PROMPT: prints the line read, or nothing at end of input.

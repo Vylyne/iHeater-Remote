@@ -137,7 +137,7 @@ MACROS_FOUND=0
 function step_macro_check {
     section "Macros"
     local hits line file num
-    hits="$(grep -rniE --include='*.cfg' '^\[gcode_macro (M141|M191)\]' \
+    hits="$(grep -RniE --include='*.cfg' '^\[gcode_macro (M141|M191)\]' \
         "${CONFIG_DIR}" 2>/dev/null || true)"
     while IFS= read -r line; do
         [ -n "${line}" ] || continue
@@ -158,7 +158,7 @@ function step_macro_check {
     if [ "${MACROS_FOUND}" = 0 ]; then
         ok "no other M141 or M191 macros"
     else
-        note "Klipper refuses duplicate sections, and iheater_remote.cfg defines both."
+        note "iheater_remote.cfg defines both. Klipper merges duplicate sections, so whichever loads last silently replaces the other."
     fi
 }
 
@@ -175,7 +175,7 @@ function step_printer_cfg {
     fi
     if [ "${MACROS_FOUND}" != 0 ]; then
         default=n
-        note "Delete or rename the macros above, then re-run install.sh."
+        note "Delete or rename your macros above, then re-run install.sh."
     fi
     if ask "Add ${INCLUDE_LINE} to printer.cfg?" "${default}"; then
         backup "${PRINTER_CFG}"
