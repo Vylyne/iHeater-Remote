@@ -97,8 +97,8 @@ void formatPairToken(const char *normalized, char out[kPairTokenLen + 2]) {
   out[kPairTokenLen + 1] = '\0';
 }
 
-bool isHeaterVirtualObject(const char *name) {
-  static const char prefix[] = "heater_virtual ";
+bool isRemoteHeaterObject(const char *name) {
+  static const char prefix[] = "heater_iheater_remote ";
   if (name == nullptr) return false;
   size_t i = 0;
   for (; prefix[i] != '\0'; ++i) {

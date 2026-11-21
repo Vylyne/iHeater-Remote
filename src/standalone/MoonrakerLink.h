@@ -16,7 +16,7 @@ struct MoonrakerSettings {
 };
 
 // The Remote's own Moonraker client: one WebSocket (ws:// or certificate-
-// checked wss://), JSON-RPC identify, then discovery of the heater_virtual
+// checked wss://), JSON-RPC identify, then discovery of the heater_iheater_remote
 // whose remote_token matches this Remote's pairing token, then a target-only
 // subscription. Reconnects with backoff; a 30 s query re-syncs the target and
 // doubles as a liveness check.

@@ -136,11 +136,13 @@ void test_token_format() {
 }
 
 void test_heater_object_name() {
-  TEST_ASSERT_TRUE(isHeaterVirtualObject("heater_virtual chamber"));
-  TEST_ASSERT_FALSE(isHeaterVirtualObject("heater_virtual"));
-  TEST_ASSERT_FALSE(isHeaterVirtualObject("heater_virtual "));
-  TEST_ASSERT_FALSE(isHeaterVirtualObject("heater_generic chamber"));
-  TEST_ASSERT_FALSE(isHeaterVirtualObject("heater_virtualx a"));
+  TEST_ASSERT_TRUE(isRemoteHeaterObject("heater_iheater_remote chamber"));
+  TEST_ASSERT_FALSE(isRemoteHeaterObject("heater_iheater_remote"));
+  TEST_ASSERT_FALSE(isRemoteHeaterObject("heater_iheater_remote "));
+  TEST_ASSERT_FALSE(isRemoteHeaterObject("heater_virtual chamber"));
+  TEST_ASSERT_FALSE(isRemoteHeaterObject("heater_generic chamber"));
+  TEST_ASSERT_FALSE(isRemoteHeaterObject("heater_iheater_remotex a"));
+  TEST_ASSERT_FALSE(isRemoteHeaterObject(nullptr));
 }
 
 void test_match_paired_heater() {

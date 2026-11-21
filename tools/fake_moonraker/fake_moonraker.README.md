@@ -18,7 +18,7 @@ unpaired Remote, noisy traffic and a large object list.
   next=5` (null values print as `-`). It replies `{"ok": true}`, or an
   error: -32601 after `plugin off`, 503 during the `restart` window, and
   400 if the report's `remote_token` matches no heater.
-- Simulates `heater_virtual chamber`, which carries the `--token` value as
+- Simulates `heater_iheater_remote chamber`, which carries the `--token` value as
   its `remote_token`. With `--heaters N`, extra heaters get other tokens.
 - Sends `notify_proc_stat_update` every second as noise, like a real
   Moonraker.
@@ -35,7 +35,7 @@ python tools/fake_moonraker/fake_moonraker.py --token ABCD-2345
 | --- | --- | --- |
 | `--port` | `7125` | Listening port |
 | `--token XXXX-XXXX` | none | `remote_token` of the paired heater. No token means the unpaired case. |
-| `--heaters N` | `1` | Number of `heater_virtual` objects; extras get other tokens |
+| `--heaters N` | `1` | Number of `heater_iheater_remote` objects; extras get other tokens |
 | `--objects N` | `150` | Padding objects in the object list |
 
 Type these commands on stdin, then Enter:

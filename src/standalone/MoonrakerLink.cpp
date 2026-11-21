@@ -379,14 +379,14 @@ void MoonrakerLink::handleResult(Pending kind, JsonVariantConst result) {
       size_t n = 0;
       for (JsonPairConst kv : result["status"].as<JsonObjectConst>()) {
         if (n >= kMaxHeaters) break;
-        if (!policy::isHeaterVirtualObject(kv.key().c_str())) continue;
+        if (!policy::isRemoteHeaterObject(kv.key().c_str())) continue;
         names[n] = kv.key().c_str();
         tokens[n] = kv.value()["remote_token"].as<const char *>();
         ++n;
       }
       subscribed_ = false;
       if (n == 0) {
-        goUnpaired("no heater_virtual in Klipper");
+        goUnpaired("no heater_iheater_remote in Klipper");
         break;
       }
       const int idx = policy::matchPairedHeater(tokens, n, token_);
@@ -397,10 +397,10 @@ void MoonrakerLink::handleResult(Pending kind, JsonVariantConst result) {
           policy::formatPairToken(token_, formatted);
           shown = formatted;
         }
-        Serial.printf("[MOON] no heater_virtual has remote_token %s\n",
+        Serial.printf("[MOON] no heater_iheater_remote has remote_token %s\n",
                       shown.c_str());
         goUnpaired(("not paired: add remote_token: " + shown +
-                    " to your [heater_virtual] section").c_str());
+                    " to your [heater_iheater_remote] section").c_str());
         break;
       }
       if (idx == policy::kHeaterDuplicate) {
@@ -545,7 +545,7 @@ void MoonrakerLink::sendTokenQuery(JsonArrayConst objects) {
   size_t found = 0;
   for (JsonVariantConst v : objects) {
     const char *name = v.as<const char *>();
-    if (!policy::isHeaterVirtualObject(name)) continue;
+    if (!policy::isRemoteHeaterObject(name)) continue;
     ++found;
     if (found > kMaxHeaters) continue;
     query.createNestedArray(name).add("remote_token");
@@ -553,11 +553,11 @@ void MoonrakerLink::sendTokenQuery(JsonArrayConst objects) {
 
   if (found == 0) {
     subscribed_ = false;
-    goUnpaired("no heater_virtual in Klipper");
+    goUnpaired("no heater_iheater_remote in Klipper");
     return;
   }
   if (found > kMaxHeaters) {
-    Serial.printf("[MOON] %u heater_virtual objects, checking the first %u\n",
+    Serial.printf("[MOON] %u heater_iheater_remote objects, checking the first %u\n",
                   static_cast<unsigned>(found),
                   static_cast<unsigned>(kMaxHeaters));
   }

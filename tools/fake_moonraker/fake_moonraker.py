@@ -6,7 +6,7 @@ Listens on ws://0.0.0.0:<port>/websocket and answers the JSON-RPC calls the
 Remote makes: server.connection.identify, printer.objects.list,
 printer.objects.query, printer.objects.subscribe and
 server.iheater_remote.report. It simulates one or
-more `heater_virtual` objects, each carrying a `remote_token`, and sends
+more `heater_iheater_remote` objects, each carrying a `remote_token`, and sends
 `notify_proc_stat_update` noise every second like a real Moonraker.
 
 Commands on stdin (type then Enter):
@@ -47,7 +47,7 @@ clients = set()
 frozen = False
 klippy_state = "ready"  # "ready", "startup" (restart) or "shutdown" (sticky until restart)
 heaters = {}  # object name -> {"token": str, "target": float}
-PAIRED = "heater_virtual chamber"  # the heater that gets --token
+PAIRED = "heater_iheater_remote chamber"  # the heater that gets --token
 plugin_on = True  # False: server.iheater_remote.report answers "Method not found"
 
 
@@ -61,7 +61,7 @@ def build_heaters(token: str, count: int):
     heaters[PAIRED] = {"token": normalize_token(token) if token else "", "target": 0.0}
     for i in range(1, count):
         other = "".join(TOKEN_ALPHABET[(i * 7 + j * 3) % 32] for j in range(8))
-        heaters[f"heater_virtual extra{i}"] = {"token": other, "target": 0.0}
+        heaters[f"heater_iheater_remote extra{i}"] = {"token": other, "target": 0.0}
 
 
 def status_for(requested: dict) -> dict:
@@ -140,7 +140,7 @@ def report_reply(params, reply: dict):
     token = normalize_token(str(params.get("remote_token") or ""))
     if not any(h["token"] and h["token"] == token for h in heaters.values()):
         reply["error"] = {"code": 400,
-                          "message": f"no heater_virtual has remote_token {token}"}
+                          "message": f"no heater_iheater_remote has remote_token {token}"}
         return
     log.info(f"report link={params.get('link')} air={fmt_num(params.get('air'))} "
              f"element={fmt_num(params.get('element'))} power={fmt_num(params.get('power'))} "
@@ -289,7 +289,7 @@ if __name__ == "__main__":
                         help="remote_token of the paired heater, XXXX-XXXX "
                              "(default: none, the unpaired case)")
     parser.add_argument("--heaters", type=int, default=1,
-                        help="number of heater_virtual objects; extras get other tokens")
+                        help="number of heater_iheater_remote objects; extras get other tokens")
     parser.add_argument("--objects", type=int, default=150,
                         help="padding objects in printer.objects.list")
     ARGS = parser.parse_args()

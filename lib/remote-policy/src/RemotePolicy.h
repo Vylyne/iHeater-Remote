@@ -60,8 +60,8 @@ void pairTokenFromBits(uint64_t bits, char out[kPairTokenLen + 1]);
 // "7K3P9QXM" -> "7K3P-9QXM"
 void formatPairToken(const char *normalized, char out[kPairTokenLen + 2]);
 
-// "heater_virtual <name>" with a non-empty name.
-bool isHeaterVirtualObject(const char *name);
+// "heater_iheater_remote <name>" with a non-empty name.
+bool isRemoteHeaterObject(const char *name);
 
 constexpr int kHeaterNone = -1;
 constexpr int kHeaterDuplicate = -2;

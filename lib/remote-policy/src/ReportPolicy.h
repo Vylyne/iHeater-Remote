@@ -15,7 +15,7 @@ constexpr uint32_t kReportIdleMs = 15000;
 
 // Readings outside these bounds go out as null, so one wild value (a shorted
 // element can read over 1000 C) does not make the receiver refuse the whole
-// report. They match the Klipper (heater_virtual) and Moonraker
+// report. They match the Klipper (heater_iheater_remote) and Moonraker
 // (iheater_remote) validators: -100..1000 C and 0..1 power.
 constexpr int16_t kReportMinT10 = -1000;
 constexpr int16_t kReportMaxT10 = 10000;
