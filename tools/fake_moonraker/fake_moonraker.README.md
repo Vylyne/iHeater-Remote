@@ -11,13 +11,13 @@ unpaired Remote, noisy traffic and a large object list.
 - Answers `server.connection.identify`, `printer.objects.list`,
   `printer.objects.query` and `printer.objects.subscribe`. List, query and
   subscribe return a JSON-RPC error only during the start-up window after
-  `restart`.
+  `restart`. After `shutdown` they still answer, with `webhooks.state`
+  `shutdown`, as real Moonraker does.
 - Accepts `server.iheater_remote.report` and logs one line per report, for
   example `report link=up air=41.5 element=88.0 power=0.42 state=heating
   next=5` (null values print as `-`). It replies `{"ok": true}`, or an
   error: -32601 after `plugin off`, 503 during the `restart` window, and
-  400 if the report's `remote_token` matches no heater. After `shutdown` they still answer, with `webhooks.state`
-  `shutdown`, as real Moonraker does.
+  400 if the report's `remote_token` matches no heater.
 - Simulates `heater_virtual chamber`, which carries the `--token` value as
   its `remote_token`. With `--heaters N`, extra heaters get other tokens.
 - Sends `notify_proc_stat_update` every second as noise, like a real
