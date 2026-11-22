@@ -121,15 +121,21 @@ void UartLink::taskEntry(void *arg) {
   static_cast<UartLink *>(arg)->taskLoop();
 }
 
-// The Arduino-ESP32 2.0.17 build sets CONFIG_ESP_TASK_WDT=y, so ESP-IDF starts
-// the task watchdog before app_main and esp_task_wdt_add() normally succeeds.
+// The Arduino-ESP32 3.x build sets CONFIG_ESP_TASK_WDT_INIT=y, so ESP-IDF
+// starts the task watchdog before app_main and esp_task_wdt_add() normally
+// succeeds.
 // If it ever reports that the watchdog is not running, start it with the
 // build's own settings and subscribe again. If that also fails the link keeps
 // polling without a watchdog, and says so once.
 void UartLink::registerWatchdog() {
   esp_err_t err = esp_task_wdt_add(nullptr);
   if (err == ESP_ERR_INVALID_STATE) {
-    if (esp_task_wdt_init(kFallbackWdtSeconds, true) == ESP_OK)
+    const esp_task_wdt_config_t cfg = {
+        .timeout_ms = kFallbackWdtSeconds * 1000,
+        .idle_core_mask = 0,  // watch only the tasks that subscribe
+        .trigger_panic = true,
+    };
+    if (esp_task_wdt_init(&cfg) == ESP_OK)
       err = esp_task_wdt_add(nullptr);
   }
   watchdogOn_ = err == ESP_OK;

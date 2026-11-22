@@ -1,11 +1,12 @@
 # AGENTS.md
 
 iHeater Remote is local-only ESP32-C3 firmware (PlatformIO, Arduino-ESP32
-2.0.17) that drives an iHeater controller over one GPIO pulse train, plus a
-Klipper Python module. The Remote has a small local web UI and one control
-source at a time: Manual, or one `heater_iheater_remote` Klipper heater that it
-follows through its own Moonraker WebSocket client, paired by
-`remote_token`. There is no cloud or portal.
+3.3.12 via pioarduino 55.03.312-1) that drives an iHeater controller over one
+GPIO pulse train, plus a Klipper Python module. The Remote has a small local
+web UI and one control source at a time: Manual, or one
+`heater_iheater_remote` Klipper heater that it follows through its own
+Moonraker WebSocket client, paired by `remote_token`. There is no cloud or
+portal.
 
 ## Gate commands
 
@@ -21,6 +22,12 @@ python -m unittest discover -s scripts -p "test_*.py"
 ```
 
 Policy tests run on the PC with MinGW from `~/scoop/apps/mingw`.
+
+The pioarduino platform needs Python 3.10 to 3.14 in `~/.platformio/penv`.
+If PlatformIO runs from a different Python, pioarduino deletes and rebuilds
+that penv. ESP-IDF's tools refuse to run when `MSYSTEM` is set, as it is in
+Git Bash, so run `pio run` from PowerShell or `cmd`, or from a shell without
+`MSYSTEM`. The first build downloads the toolchain and framework.
 
 ## Layout
 

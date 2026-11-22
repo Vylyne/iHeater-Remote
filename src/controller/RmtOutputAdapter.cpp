@@ -4,7 +4,8 @@
 
 namespace iheaterlink {
 
-// Запускает RMT-драйвер и FreeRTOS-таск периодической отправки фреймов на STM32.
+// Starts the RMT TX channel and the FreeRTOS task that sends a frame to
+// the STM32 every framePeriodMs.
 void RmtOutputAdapter::begin() {
   lastPulseCode_ = encode(lastCommand_);
 
@@ -12,36 +13,41 @@ void RmtOutputAdapter::begin() {
     return;
   }
 
-  rmt_config_t cfg = {};
-  cfg.rmt_mode = RMT_MODE_TX;
-  cfg.channel = config_.channel;
-  cfg.gpio_num = static_cast<gpio_num_t>(config_.outputPin);
-  cfg.clk_div = 80; // 80 МГц / 80 = 1 МГц, 1 тик = 1 мкс
-  cfg.mem_block_num = config_.memBlockNum;
-  cfg.tx_config.loop_en = false;
-  cfg.tx_config.carrier_en = false;
-  cfg.tx_config.idle_output_en = true;
-  cfg.tx_config.idle_level = RMT_IDLE_LEVEL_LOW;
+  rmt_tx_channel_config_t chan = {};
+  chan.gpio_num = static_cast<gpio_num_t>(config_.outputPin);
+  chan.clk_src = RMT_CLK_SRC_DEFAULT;
+  chan.resolution_hz = 1000000;  // 1 tick = 1 µs
+  chan.mem_block_symbols = config_.memBlockSymbols;
+  chan.trans_queue_depth = 1;
+  chan.flags.init_level = 0;  // idle low until the first frame
 
-  if (rmt_config(&cfg) != ESP_OK) {
+  esp_err_t err = rmt_new_tx_channel(&chan, &channel_);
+  if (err != ESP_OK) {
+    Serial.printf("[RMT] rmt_new_tx_channel failed (err=%d)\n", (int)err);
     return;
   }
-  if (rmt_driver_install(config_.channel, 0, 0) != ESP_OK) {
+  const rmt_copy_encoder_config_t copy = {};
+  err = rmt_new_copy_encoder(&copy, &encoder_);
+  if (err != ESP_OK) {
+    Serial.printf("[RMT] rmt_new_copy_encoder failed (err=%d)\n", (int)err);
     return;
   }
-
-  rmt_set_tx_thr_intr_en(config_.channel, false, 0);
+  err = rmt_enable(channel_);
+  if (err != ESP_OK) {
+    Serial.printf("[RMT] rmt_enable failed (err=%d)\n", (int)err);
+    return;
+  }
 
   initialized_ = true;
   rebuildFrame(lastPulseCode_);
 
-  // Выделенный FreeRTOS-таск: период RMT не зависит от блокировок main loop
-  // (WiFi/MQTT/HA могут подвешивать loopTask на секунды — это убивало тайминг).
+  // A dedicated task keeps the frame period independent of the main loop,
+  // which Wi-Fi and the web server can stall for seconds.
   xTaskCreate(&RmtOutputAdapter::rmtTaskEntry, "rmt_tx", 3072, this,
               tskIDLE_PRIORITY + 2, &rmtTask_);
 }
 
-// Сохраняет команду и пересчитывает пульс-код для следующего фрейма.
+// Stores the command and its pulse code for the next frame.
 void RmtOutputAdapter::apply(const ControllerOutputCommand &command) {
   lastCommand_ = command;
   lastPulseCode_ = encode(command);
@@ -51,7 +57,8 @@ ControllerOutputCommand RmtOutputAdapter::getLastCommand() const {
   return lastCommand_;
 }
 
-// Кодирует команду в число импульсов: offCode для Off, иначе температура квантуется в min–max.
+// Encodes the command as a pulse count: offCode for Off, otherwise the
+// target quantized into minTempC..maxTempC.
 uint8_t RmtOutputAdapter::encode(const ControllerOutputCommand &command) const {
   if (command.mode == ControllerOutputMode::Off) {
     return config_.offCode;
@@ -71,41 +78,36 @@ uint8_t RmtOutputAdapter::encode(const ControllerOutputCommand &command) const {
   return static_cast<uint8_t>(quantized);
 }
 
-// Builds the frame with policy::buildPulseFrame, then appends the end
-// marker the legacy driver needs: an item with val = 0 (both durations 0).
-// A frame that does not fit leaves itemCount_ at 0, and nothing is sent.
+// Builds the frame's symbols with policy::buildPulseFrame. The new driver
+// is given the symbol count, so it needs no end marker. A frame that does
+// not fit leaves itemCount_ at 0, and nothing is sent.
 void RmtOutputAdapter::rebuildFrame(uint8_t pulseCode) {
   const policy::PulseTiming timing{config_.syncLowUs, config_.pulseHighUs,
                                    config_.pulseLowUs};
-  const size_t n =
-      policy::buildPulseFrame(pulseCode, timing, frame_, MAX_ITEMS - 1);
+  const size_t n = policy::buildPulseFrame(pulseCode, timing, frame_, MAX_ITEMS);
   for (size_t i = 0; i < n; ++i) {
-    items_[i].level0 = frame_[i].level0;
-    items_[i].duration0 = frame_[i].duration0;
-    items_[i].level1 = frame_[i].level1;
-    items_[i].duration1 = frame_[i].duration1;
+    symbols_[i].level0 = frame_[i].level0;
+    symbols_[i].duration0 = frame_[i].duration0;
+    symbols_[i].level1 = frame_[i].level1;
+    symbols_[i].duration1 = frame_[i].duration1;
   }
-  if (n > 0) {
-    items_[n].val = 0;
-  }
-  itemCount_ = n > 0 ? n + 1 : 0;
+  itemCount_ = n;
   builtForCode_ = pulseCode;
 }
 
-// Будит FreeRTOS-таск и отправляет фрейм немедленно, не дожидаясь таймера.
+// Wakes the task to send a frame now rather than at the next period.
 void RmtOutputAdapter::forceFrame() {
   if (!isEnabled() || !rmtTask_)
     return;
   xTaskNotifyGive(rmtTask_);
 }
 
-// Точка входа FreeRTOS-таска (static) — делегирует в rmtTaskLoop.
+// FreeRTOS task entry point; runs rmtTaskLoop.
 void RmtOutputAdapter::rmtTaskEntry(void *arg) {
   static_cast<RmtOutputAdapter *>(arg)->rmtTaskLoop();
 }
 
-// Основной цикл таска: отправлять фрейм каждые framePeriodMs или по
-// уведомлению.
+// Sends a frame every framePeriodMs, or sooner when notified.
 void RmtOutputAdapter::rmtTaskLoop() {
   const TickType_t period = pdMS_TO_TICKS(config_.framePeriodMs);
   for (;;) {
@@ -114,25 +116,27 @@ void RmtOutputAdapter::rmtTaskLoop() {
   }
 }
 
-// Перестроить фрейм если код изменился, затем отправить через RMT.
+// Waits for the previous frame to finish, rebuilds the frame if the code
+// changed, then queues it. Waiting first means the copy encoder never reads
+// a buffer being rewritten, and a forced frame never cuts into the one
+// going out.
 void RmtOutputAdapter::sendFrame() {
+  const esp_err_t done = rmt_tx_wait_all_done(channel_, 1000);
+  if (done != ESP_OK) {
+    Serial.printf("[RMT] previous frame still sending (err=%d)\n", (int)done);
+    return;
+  }
+
   if (builtForCode_ != lastPulseCode_) {
     rebuildFrame(lastPulseCode_);
   }
-
-  const uint32_t now = millis();
-  const uint32_t dt = lastSentMs_ ? (now - lastSentMs_) : 0;
-  lastSentMs_ = now;
-  ++seqNum_;
-  // Serial.printf("[RMT] #%lu t=%lu dt=%lu ms code=%u items=%u\n",
-  //               (unsigned long)seqNum_,
-  //               (unsigned long)now, (unsigned long)dt,
-  //               (unsigned)lastPulseCode_, (unsigned)itemCount_);
-
   if (itemCount_ == 0) {
     return;
   }
-  rmt_write_items(config_.channel, items_, static_cast<int>(itemCount_), false);
+
+  const rmt_transmit_config_t tx = {};  // loop_count 0, eot_level 0 (low)
+  rmt_transmit(channel_, encoder_, symbols_,
+               itemCount_ * sizeof(rmt_symbol_word_t), &tx);
 }
 
 } // namespace iheaterlink

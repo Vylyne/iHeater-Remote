@@ -1,7 +1,8 @@
 #pragma once
 
 #include <Arduino.h>
-#include <driver/rmt.h>
+#include <driver/rmt_encoder.h>
+#include <driver/rmt_tx.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -19,8 +20,9 @@ namespace iheaterlink
     struct RmtOutputConfig
     {
         uint8_t outputPin = IHEATER_TRIGGER_OUTPUT_PIN;
-        rmt_channel_t channel = RMT_CHANNEL_0;
-        uint8_t memBlockNum = 2;
+        // Two of the C3's 48-symbol RMT memory blocks; the driver refills
+        // them while a longer frame goes out.
+        size_t memBlockSymbols = 96;
         uint8_t offCode = 10;
         uint8_t minTempC = 45;
         uint8_t maxTempC = 80;
@@ -62,13 +64,13 @@ namespace iheaterlink
         uint8_t builtForCode_ = 0xFF;
         bool initialized_ = false;
 
-        policy::PulseSymbol frame_[MAX_ITEMS - 1]{};
-        rmt_item32_t items_[MAX_ITEMS]{};
+        policy::PulseSymbol frame_[MAX_ITEMS]{};
+        rmt_symbol_word_t symbols_[MAX_ITEMS]{};
         size_t itemCount_ = 0;
 
-        uint32_t lastSentMs_ = 0;
-        uint32_t seqNum_ = 0;
 
+        rmt_channel_handle_t channel_ = nullptr;
+        rmt_encoder_handle_t encoder_ = nullptr;
         TaskHandle_t rmtTask_ = nullptr;
     };
 
