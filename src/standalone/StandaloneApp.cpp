@@ -1528,6 +1528,11 @@ void bootDecision() {
 void setup() {
   s_resumeLocked = true;  // see bootDecision()
   Serial.begin(115200);
+  // Arduino-ESP32 3.x waits up to 20 x the TX timeout (2 s at the default
+  // 100 ms) for each write when a PC has the USB port open but isn't reading
+  // it. That stalls the loop and the web UI. With 0, a full buffer drops the
+  // log text instead.
+  Serial.setTxTimeoutMs(0);
   delay(100);
   Serial.println();
   Serial.println("[REMOTE] iHeater Remote firmware starting");
