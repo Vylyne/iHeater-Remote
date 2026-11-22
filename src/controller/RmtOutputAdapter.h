@@ -7,6 +7,7 @@
 
 #include "ControllerOutputCommand.h"
 #include "OutputPort.h"
+#include "PulseFrame.h"
 
 namespace iheaterlink
 {
@@ -61,6 +62,7 @@ namespace iheaterlink
         uint8_t builtForCode_ = 0xFF;
         bool initialized_ = false;
 
+        policy::PulseSymbol frame_[MAX_ITEMS - 1]{};
         rmt_item32_t items_[MAX_ITEMS]{};
         size_t itemCount_ = 0;
 

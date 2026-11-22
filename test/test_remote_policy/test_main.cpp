@@ -2,6 +2,7 @@
 
 #include "RemotePolicy.h"
 #include "ReportPolicy.h"
+#include "PulseFrame.h"
 
 extern "C" {
 #include "modbus_rtu.h"
@@ -604,6 +605,58 @@ void test_report_wraparound() {
   TEST_ASSERT_TRUE(s.due(in, 0xFFFFFF00u + 15000u));
 }
 
+static const PulseTiming kTiming{120000, 2000, 2000};
+
+static void assertSymbol(const PulseSymbol &s, uint16_t d0, uint8_t l0, uint16_t d1, uint8_t l1) {
+  TEST_ASSERT_EQUAL_UINT16(d0, s.duration0);
+  TEST_ASSERT_EQUAL_UINT8(l0, s.level0);
+  TEST_ASSERT_EQUAL_UINT16(d1, s.duration1);
+  TEST_ASSERT_EQUAL_UINT8(l1, s.level1);
+}
+
+void test_pulse_frame_sync_split() {
+  PulseSymbol out[128];
+  TEST_ASSERT_EQUAL_UINT32(12, buildPulseFrame(10, kTiming, out, 128));
+  assertSymbol(out[0], 32767, 0, 32767, 0);
+  assertSymbol(out[1], 32767, 0, 21699, 0);
+}
+
+void test_pulse_frame_counts() {
+  PulseSymbol out[128];
+  TEST_ASSERT_EQUAL_UINT32(12, buildPulseFrame(10, kTiming, out, 128));
+  for (int i = 2; i < 12; ++i)
+    assertSymbol(out[i], 2000, 1, 2000, 0);
+  TEST_ASSERT_EQUAL_UINT32(62, buildPulseFrame(60, kTiming, out, 128));
+  TEST_ASSERT_EQUAL_UINT32(82, buildPulseFrame(80, kTiming, out, 128));
+}
+
+void test_pulse_frame_no_zero_duration() {
+  // The RMT hardware reads a zero duration as the end of the frame.
+  const uint8_t codes[] = {10, 45, 80};
+  for (uint8_t code : codes) {
+    PulseSymbol out[128];
+    const size_t n = buildPulseFrame(code, kTiming, out, 128);
+    TEST_ASSERT_TRUE(n > 0);
+    for (size_t i = 0; i < n; ++i) {
+      TEST_ASSERT_NOT_EQUAL(0, out[i].duration0);
+      TEST_ASSERT_NOT_EQUAL(0, out[i].duration1);
+    }
+  }
+}
+
+void test_pulse_frame_refuses_when_too_small() {
+  // A truncated frame would carry a different, valid temperature.
+  PulseSymbol out[128];
+  TEST_ASSERT_EQUAL_UINT32(0, buildPulseFrame(80, kTiming, out, 81));
+  TEST_ASSERT_EQUAL_UINT32(82, buildPulseFrame(80, kTiming, out, 82));
+}
+
+void test_pulse_frame_refuses_bad_width() {
+  PulseSymbol out[128];
+  TEST_ASSERT_EQUAL_UINT32(0, buildPulseFrame(10, PulseTiming{120000, 0, 2000}, out, 128));
+  TEST_ASSERT_EQUAL_UINT32(0, buildPulseFrame(10, PulseTiming{120000, 32768, 2000}, out, 128));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_token_normalize);
@@ -673,5 +726,10 @@ int main() {
   RUN_TEST(test_report_force_next_keeps_in_flight_and_missing);
   RUN_TEST(test_report_counters);
   RUN_TEST(test_report_wraparound);
+  RUN_TEST(test_pulse_frame_sync_split);
+  RUN_TEST(test_pulse_frame_counts);
+  RUN_TEST(test_pulse_frame_no_zero_duration);
+  RUN_TEST(test_pulse_frame_refuses_when_too_small);
+  RUN_TEST(test_pulse_frame_refuses_bad_width);
   return UNITY_END();
 }

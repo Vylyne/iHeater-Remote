@@ -4,19 +4,6 @@
 
 namespace iheaterlink {
 
-namespace {
-// Аппаратный формат rmt_item32_t (32-битное слово) в ESP32:
-//   duration0 : 15  | level0 : 1  | duration1 : 15  | level1 : 1   = 32 бита
-// На каждое полуслово отводится РОВНО 15 бит счётчика длительности —
-// это диктует чип, изменить нельзя.
-//
-// Откуда 32767: максимум беззнакового 15-битного числа = 2^15 − 1 = 32767.
-// При clk_div=80 один тик RMT = 1 мкс, значит потолок длительности
-// одного полуслова ≈ 32.767 мс. Всё, что длиннее (например, SYNC LOW 120 мс),
-// режется на несколько items.
-constexpr uint32_t RMT_FIELD_MAX_US = 32767;
-} // namespace // namespace
-
 // Запускает RMT-драйвер и FreeRTOS-таск периодической отправки фреймов на STM32.
 void RmtOutputAdapter::begin() {
   lastPulseCode_ = encode(lastCommand_);
@@ -84,55 +71,24 @@ uint8_t RmtOutputAdapter::encode(const ControllerOutputCommand &command) const {
   return static_cast<uint8_t>(quantized);
 }
 
-// Собирает RMT-фрейм: SYNC LOW + N импульсов (pulseCode) + маркер конца.
-//
-// Один rmt_item32_t — это два полуслова подряд:
-//   { level0, duration0,   level1, duration1 }
-// Каждое поле длительности — 15 бит (≤ 32767 мкс при тике 1 мкс).
-//
-// Структура кадра, передаваемого STM32:
-//   [SYNC LOW ~120 мс] → [HIGH 2 мс | LOW 2 мс] × pulseCode → [end marker]
+// Builds the frame with policy::buildPulseFrame, then appends the end
+// marker the legacy driver needs: an item with val = 0 (both durations 0).
+// A frame that does not fit leaves itemCount_ at 0, and nothing is sent.
 void RmtOutputAdapter::rebuildFrame(uint8_t pulseCode) {
-  size_t idx = 0;
-
-  // 1. SYNC LOW.
-  // syncLowUs (по умолчанию 120 000 мкс) не помещается в одно 15-битное поле,
-  // поэтому набираем несколько items, в каждом ОБА полуслова с level=0.
-  // На каждой итерации забираем максимум 2×RMT_FIELD_MAX_US из остатка.
-  uint32_t remaining = config_.syncLowUs;
-  while (remaining > 0 && idx < MAX_ITEMS - 1) {
-    const uint32_t d0 =
-        remaining > RMT_FIELD_MAX_US ? RMT_FIELD_MAX_US : remaining;
-    remaining -= d0;
-    const uint32_t d1 =
-        remaining > RMT_FIELD_MAX_US ? RMT_FIELD_MAX_US : remaining;
-    remaining -= d1;
-
-    items_[idx].level0 = 0;
-    items_[idx].duration0 = d0;
-    items_[idx].level1 = 0;
-    items_[idx].duration1 = d1;
-    ++idx;
+  const policy::PulseTiming timing{config_.syncLowUs, config_.pulseHighUs,
+                                   config_.pulseLowUs};
+  const size_t n =
+      policy::buildPulseFrame(pulseCode, timing, frame_, MAX_ITEMS - 1);
+  for (size_t i = 0; i < n; ++i) {
+    items_[i].level0 = frame_[i].level0;
+    items_[i].duration0 = frame_[i].duration0;
+    items_[i].level1 = frame_[i].level1;
+    items_[i].duration1 = frame_[i].duration1;
   }
-
-  // 2. Счётные импульсы: один импульс = один item.
-  // Полуслово 0 — HIGH длительностью pulseHighUs,
-  // полуслово 1 — LOW  длительностью pulseLowUs.
-  // STM32 считает нарастающие фронты после SYNC; их количество = pulseCode.
-  for (uint8_t i = 0; i < pulseCode && idx < MAX_ITEMS - 1; ++i) {
-    items_[idx].level0 = 1;
-    items_[idx].duration0 = config_.pulseHighUs;
-    items_[idx].level1 = 0;
-    items_[idx].duration1 = config_.pulseLowUs;
-    ++idx;
+  if (n > 0) {
+    items_[n].val = 0;
   }
-
-  // 3. End marker — item с val=0 (обе длительности = 0).
-  // Сигнал драйверу RMT «передача завершена»; линия уходит в idle (LOW).
-  items_[idx].val = 0;
-  ++idx;
-
-  itemCount_ = idx;
+  itemCount_ = n > 0 ? n + 1 : 0;
   builtForCode_ = pulseCode;
 }
 
@@ -173,6 +129,9 @@ void RmtOutputAdapter::sendFrame() {
   //               (unsigned long)now, (unsigned long)dt,
   //               (unsigned)lastPulseCode_, (unsigned)itemCount_);
 
+  if (itemCount_ == 0) {
+    return;
+  }
   rmt_write_items(config_.channel, items_, static_cast<int>(itemCount_), false);
 }
 
