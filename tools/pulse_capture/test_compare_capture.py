@@ -152,6 +152,17 @@ class CliTest(unittest.TestCase):
             self.assertEqual(tr[0], (0.0, 0))
             self.assertEqual(tr[1][1], 1)
 
+    def test_load_capture_skips_end_marker(self):
+        # Logic 2 can end an export with rows whose level is X.
+        with tempfile.TemporaryDirectory() as d:
+            clean = os.path.join(d, 'clean.csv')
+            marked = os.path.join(d, 'marked.csv')
+            write_csv(clean, make_capture([10] * 4))
+            write_csv(marked, make_capture([10] * 4))
+            with open(marked, 'a', newline='') as f:
+                f.write('6.756683000,X\n6.756683000,X\n')
+            self.assertEqual(cc.load_capture(marked), cc.load_capture(clean))
+
 
 if __name__ == '__main__':
     unittest.main()

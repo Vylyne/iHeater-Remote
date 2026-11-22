@@ -55,7 +55,8 @@ def load_capture(path):
         rows = list(csv.reader(f))
     out = []
     for row in rows[1:]:
-        if len(row) < 2:
+        # Logic 2 can end an export with rows whose level is X.
+        if len(row) < 2 or row[1].strip() not in ('0', '1'):
             continue
         out.append((float(row[0]), int(float(row[1]))))
     return out
