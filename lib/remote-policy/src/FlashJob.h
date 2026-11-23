@@ -61,8 +61,9 @@ class FlashLink {
 // path leaves the link at 8N1 and publishes that final status.
 FlashStatus runFlashJob(FlashLink &link, const uint8_t *image, size_t len, FlashStart start);
 
-// One 0x7F at 8E1: any ACK or NACK means the ROM bootloader answered. Leaves
-// the link at 8N1.
+// A 0x7F at 8E1, and a second one if the first gets no reply (a synced ROM
+// only answers the pair): any ACK or NACK means the ROM bootloader answered.
+// Leaves the link at 8N1.
 bool probeRom(FlashLink &link);
 
 // True when the iHeater has not answered Modbus for kRomProbeAfterMs and the

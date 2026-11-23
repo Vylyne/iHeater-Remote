@@ -355,11 +355,17 @@ FlashStatus runFlashJob(FlashLink &link, const uint8_t *image, size_t len, Flash
 
 bool probeRom(FlashLink &link) {
   link.setParity(LinkParity::Even);
-  link.flushInput();
   const uint8_t sync = kRomSync;
-  link.send(&sync, 1);
-  uint8_t b = 0;
-  const bool answered = link.receive(&b, 1, kRomProbeReplyMs) == 1 && (b == kRomAck || b == kRomNack);
+  // An unsynced ROM ACKs the first 0x7F. A synced one takes a lone 0x7F as a
+  // command byte and waits for its complement, so it stays silent until the
+  // second 0x7F completes the pair and is NACKed. An application drops both.
+  bool answered = false;
+  for (int i = 0; i < 2 && !answered; i++) {
+    link.flushInput();
+    link.send(&sync, 1);
+    uint8_t b = 0;
+    answered = link.receive(&b, 1, kRomProbeReplyMs) == 1 && (b == kRomAck || b == kRomNack);
+  }
   link.setParity(LinkParity::None);
   return answered;
 }

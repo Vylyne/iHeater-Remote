@@ -68,8 +68,7 @@ class FakeIheater : public FlashLink {
   // FlashLink
   void setParity(LinkParity p) override {
     parity = p;
-    out_.clear();
-    rx_.clear();
+    out_.clear();  // the Remote's own receive buffer; the ROM's half-received frame (rx_) stays
   }
   void send(const uint8_t *data, size_t len) override {
     sentBytes += len;
@@ -205,10 +204,9 @@ class FakeIheater : public FlashLink {
       ack();
       return;
     }
-    if (state_ == State::Idle && rx_.empty() && b == kRomSync) {
-      reply(kRomNack);  // a lone 0x7F once synced
-      return;
-    }
+    // Once synced, a lone 0x7F is a command byte: the ROM waits for its
+    // complement and stays silent. The next byte completes the pair, and
+    // 0x7F/0x7F (or any non-complement) gets a NACK from handle().
     rx_.push_back(b);
     if (rx_.size() < needed()) return;
     handle();

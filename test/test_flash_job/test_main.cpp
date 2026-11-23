@@ -320,21 +320,36 @@ void test_oversize_image_rejected() {
 
 void test_probe_rom() {
   {
-    FakeIheater f;  // fresh ROM: ACK
+    FakeIheater f;  // fresh ROM: ACK to the first 0x7F, so only one is sent
     TEST_ASSERT_TRUE(probeRom(f));
     TEST_ASSERT_TRUE(f.parity == LinkParity::None);
+    TEST_ASSERT_EQUAL(1, f.sentBytes);
   }
   {
-    FakeIheater f;  // synced ROM: NACK
+    // Synced ROM: a lone 0x7F is a command byte awaiting its complement, so it
+    // stays silent; the second 0x7F completes the pair and is NACKed.
+    FakeIheater f;
     f.alreadySynced = true;
     TEST_ASSERT_TRUE(probeRom(f));
     TEST_ASSERT_TRUE(f.parity == LinkParity::None);
+    TEST_ASSERT_EQUAL(2, f.sentBytes);
+    TEST_ASSERT_EQUAL(2, f.syncTimes.size());
+    // The pair is consumed: probing again gives the same answer.
+    TEST_ASSERT_TRUE(probeRom(f));
+    TEST_ASSERT_EQUAL(4, f.sentBytes);
   }
   {
-    FakeIheater f;
+    FakeIheater f;  // nothing answers: two 0x7F, then give up
     f.romSilent = true;
     TEST_ASSERT_FALSE(probeRom(f));
     TEST_ASSERT_TRUE(f.parity == LinkParity::None);
+    TEST_ASSERT_EQUAL(2, f.sentBytes);
+  }
+  {
+    FakeIheater f;  // an application at 8E1 drops both bytes
+    f.mode = Mode::App;
+    TEST_ASSERT_FALSE(probeRom(f));
+    TEST_ASSERT_EQUAL(2, f.sentBytes);
   }
 }
 

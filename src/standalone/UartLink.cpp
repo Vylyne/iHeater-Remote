@@ -376,7 +376,10 @@ void UartLink::taskLoop() {
     // 3b. With no Ok reply for a while, look for the iHeater's ROM bootloader,
     // but never while a job is queued (it would be taken next cycle anyway).
     if (!gotOk && !flashBusy() && policy::romProbeDue(millis(), lastOkMs_, lastProbeMs_)) {
-      romDetected_ = policy::probeRom(port);
+      // Sticky: only a Modbus Ok (or a finished update) clears it, so one
+      // unlucky probe can't flip the Recovery start off and on.
+      if (policy::probeRom(port))
+        romDetected_ = true;
       lastProbeMs_ = millis();
       feedWatchdog();
     }
