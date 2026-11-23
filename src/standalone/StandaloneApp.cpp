@@ -507,19 +507,39 @@ const char *uartLinkName(policy::LinkStatus status) {
   return "unknown";
 }
 
-// Logs each change of the UART link status. Runs on loopTask against the
-// task's published view, so the poll task itself never logs for this.
+// Logs each phase change of a flash job, and its outcome. Idle is not logged:
+// the task resets the status to it when it takes a new job.
+void logUartFlash(const policy::FlashStatus &flash) {
+  static policy::FlashPhase s_lastPhase = policy::FlashPhase::Idle;
+  static policy::FlashOutcome s_lastOutcome = policy::FlashOutcome::None;
+  if (flash.phase != s_lastPhase) {
+    s_lastPhase = flash.phase;
+    if (flash.phase != policy::FlashPhase::Idle)
+      Serial.printf("[UART] flash phase=%s\n", policy::flashPhaseName(flash.phase));
+  }
+  if (flash.outcome != s_lastOutcome) {
+    s_lastOutcome = flash.outcome;
+    if (flash.outcome != policy::FlashOutcome::None)
+      Serial.printf("[UART] flash outcome=%s%s%s\n", policy::flashOutcomeName(flash.outcome),
+                    flash.detail[0] ? " " : "", flash.detail);
+  }
+}
+
+// Logs each change of the UART link status and of a flash job. Runs on
+// loopTask against the task's published view, so the poll task itself never
+// logs for this.
 void updateUartLinkLog() {
   if (s_outputKind != OutputKind::Uart || !s_uart.isEnabled())
     return;
   static bool s_logged = false;
   static policy::LinkStatus s_lastLink = policy::LinkStatus::Waiting;
-  const policy::LinkStatus link = s_uart.view().link;
-  if (s_logged && link == s_lastLink)
+  const UartLinkView view = s_uart.view();
+  logUartFlash(view.flash);
+  if (s_logged && view.link == s_lastLink)
     return;
   s_logged = true;
-  s_lastLink = link;
-  Serial.printf("[UART] link=%s\n", uartLinkName(link));
+  s_lastLink = view.link;
+  Serial.printf("[UART] link=%s\n", uartLinkName(view.link));
 }
 
 // Sends the iHeater's readings to the Klipper plugin. Only while the Remote

@@ -13,12 +13,16 @@ namespace {
 constexpr uart_port_t kPort = UART_NUM_1;
 constexpr int kBaud = 115200;
 constexpr int kRxBufferBytes = 256;  // must exceed the 128-byte hardware FIFO
-constexpr uint32_t kTaskStackBytes = 4096;
+// The flash job holds a 258 B write body and a 256 B read buffer on the stack.
+constexpr uint32_t kTaskStackBytes = 6144;
 constexpr UBaseType_t kTaskPriority = 5;
 // The longest reply is 5 + 2 * kMaxReadRegs bytes; leave a little headroom.
 constexpr size_t kReplyBufBytes = 96;
 // Used only if the task watchdog was not already running (see registerWatchdog).
 constexpr uint32_t kFallbackWdtSeconds = 5;
+// The flash job's waits are cut into slices of at most this, with the watchdog
+// fed after each, so a 10 s erase or a 30-minute cool-down never starves it.
+constexpr uint32_t kWaitSliceMs = 500;
 
 // Builds the wire frame for a policy request. 0 when the request has no frame.
 size_t buildFrame(const policy::PollRequest &req, uint8_t out[policy::kRequestLen]) {
@@ -110,6 +114,35 @@ UartLinkView UartLink::view() const {
   const UartLinkView copy = view_;
   portEXIT_CRITICAL(&mux_);
   return copy;
+}
+
+bool UartLink::startFlash(const uint8_t *image, size_t len, policy::FlashStart start) {
+  if (!initialized_)
+    return false;
+  portENTER_CRITICAL(&mux_);
+  const bool busy = flashQueued_ || flashRunning_;
+  if (!busy) {
+    flashQueued_ = true;
+    flashImage_ = image;
+    flashLen_ = len;
+    flashStart_ = start;
+    flashCancel_ = false;  // a stale cancel must not stop this job
+  }
+  portEXIT_CRITICAL(&mux_);
+  return !busy;
+}
+
+void UartLink::cancelFlash() {
+  portENTER_CRITICAL(&mux_);
+  flashCancel_ = true;
+  portEXIT_CRITICAL(&mux_);
+}
+
+bool UartLink::flashBusy() const {
+  portENTER_CRITICAL(&mux_);
+  const bool busy = flashQueued_ || flashRunning_;
+  portEXIT_CRITICAL(&mux_);
+  return busy;
 }
 
 uint32_t UartLink::stackHighWaterBytes() const {
@@ -210,8 +243,12 @@ void UartLink::runRequest(const policy::PollRequest &req, bool &gotOk) {
   if (got) {
     policy_.onReply(req, reply, now);
     gotOk = reply.kind == policy::ReplyKind::Ok;
-    if (gotOk && firstOkMs_ == 0)
-      firstOkMs_ = now ? now : 1;
+    if (gotOk) {
+      if (firstOkMs_ == 0)
+        firstOkMs_ = now ? now : 1;
+      lastOkMs_ = now;
+      romDetected_ = false;  // the application is answering
+    }
     if (reply.kind == policy::ReplyKind::Invalid)
       ++badReplies_;
   } else {
@@ -239,10 +276,54 @@ void UartLink::publishView() {
   v.firstOkMs = firstOkMs_;
   v.timeouts = timeouts_;
   v.badReplies = badReplies_;
+  v.romDetected = romDetected_;
 
   portENTER_CRITICAL(&mux_);
+  v.flash = flashStatus_;
+  v.flashRunning = flashRunning_;
+  if (flashRunning_)
+    v.link = policy::LinkStatus::Updating;
   view_ = v;
   portEXIT_CRITICAL(&mux_);
+}
+
+void UartLink::runQueuedFlash(FlashPort &port) {
+  bool queued = false;
+  const uint8_t *image = nullptr;
+  size_t len = 0;
+  policy::FlashStart start = policy::FlashStart::Normal;
+  portENTER_CRITICAL(&mux_);
+  if (flashQueued_) {
+    queued = true;
+    image = flashImage_;
+    len = flashLen_;
+    start = flashStart_;
+    flashQueued_ = false;
+    flashRunning_ = true;
+    // Drop the last job's status now, so nobody reads its outcome as this one's.
+    flashStatus_ = policy::FlashStatus{};
+    view_.flash = flashStatus_;
+    view_.flashRunning = true;
+    view_.link = policy::LinkStatus::Updating;
+  }
+  portEXIT_CRITICAL(&mux_);
+  if (!queued)
+    return;
+
+  // Every return path of the job leaves UART1 at 8N1 with its input flushed
+  // (FlashPort::setParity). apply() calls meanwhile stay pending.
+  const policy::FlashStatus result = policy::runFlashJob(port, image, len, start);
+  feedWatchdog();
+  if (result.outcome == policy::FlashOutcome::Updated)
+    romDetected_ = false;  // the new application answered
+
+  portENTER_CRITICAL(&mux_);
+  flashStatus_ = result;
+  flashRunning_ = false;
+  flashImage_ = nullptr;
+  flashLen_ = 0;
+  portEXIT_CRITICAL(&mux_);
+  publishView();
 }
 
 // One cycle every kPollPeriodMs, forever: the read of the input block, then at
@@ -251,11 +332,15 @@ void UartLink::publishView() {
 // cycle.
 void UartLink::taskLoop() {
   registerWatchdog();
+  FlashPort port(*this);
   const TickType_t period = pdMS_TO_TICKS(policy::kPollPeriodMs);
   TickType_t lastWake = xTaskGetTickCount();
 
   for (;;) {
     feedWatchdog();
+
+    // 0. A queued flash job runs to its end in place of polling.
+    runQueuedFlash(port);
 
     // 1. Take the pending desired target and range (short copy under the lock).
     bool haveDesired = false;
@@ -285,6 +370,14 @@ void UartLink::taskLoop() {
       }
     }
 
+    // 3b. With no Ok reply for a while, look for the iHeater's ROM bootloader,
+    // but never while a job is queued (it would be taken next cycle anyway).
+    if (!gotOk && !flashBusy() && policy::romProbeDue(millis(), lastOkMs_, lastProbeMs_)) {
+      romDetected_ = policy::probeRom(port);
+      lastProbeMs_ = millis();
+      feedWatchdog();
+    }
+
     // 4. Publish the results for the main loop.
     publishView();
 
@@ -299,6 +392,83 @@ void UartLink::taskLoop() {
       vTaskDelayUntil(&lastWake, period);
     }
   }
+}
+
+void UartLink::FlashPort::setParity(policy::LinkParity parity) {
+  uart_wait_tx_done(kPort, pdMS_TO_TICKS(20));
+  uart_set_parity(kPort, parity == policy::LinkParity::Even ? UART_PARITY_EVEN
+                                                             : UART_PARITY_DISABLE);
+  uart_flush_input(kPort);
+}
+
+void UartLink::FlashPort::send(const uint8_t *data, size_t len) {
+  uart_write_bytes(kPort, reinterpret_cast<const char *>(data), len);
+  uart_wait_tx_done(kPort, pdMS_TO_TICKS(100));
+}
+
+size_t UartLink::FlashPort::receive(uint8_t *buf, size_t len, uint32_t timeoutMs) {
+  size_t got = 0;
+  const uint32_t startMs = millis();
+  while (got < len) {
+    const uint32_t elapsed = millis() - startMs;
+    if (elapsed >= timeoutMs)
+      break;
+    uint32_t slice = timeoutMs - elapsed;
+    if (slice > kWaitSliceMs)
+      slice = kWaitSliceMs;
+    const int n = uart_read_bytes(kPort, buf + got, len - got, pdMS_TO_TICKS(slice));
+    if (n > 0)
+      got += static_cast<size_t>(n);
+    link_.feedWatchdog();
+  }
+  return got;
+}
+
+void UartLink::FlashPort::flushInput() {
+  uart_flush_input(kPort);
+}
+
+bool UartLink::FlashPort::modbus(const policy::PollRequest &req, policy::Reply &reply) {
+  const bool got = link_.exchange(req, reply);
+  link_.feedWatchdog();
+  return got;
+}
+
+void UartLink::FlashPort::sleepMs(uint32_t ms) {
+  while (ms > 0) {
+    const uint32_t slice = ms < kWaitSliceMs ? ms : kWaitSliceMs;
+    vTaskDelay(pdMS_TO_TICKS(slice));
+    ms -= slice;
+    link_.feedWatchdog();
+  }
+}
+
+uint32_t UartLink::FlashPort::nowMs() {
+  return millis();
+}
+
+bool UartLink::FlashPort::heatWanted() {
+  portENTER_CRITICAL(&link_.mux_);
+  const ControllerOutputCommand command = link_.lastCommand_;
+  portEXIT_CRITICAL(&link_.mux_);
+  return policy::heatWanted(command.mode == ControllerOutputMode::TargetTemperature,
+                            command.targetTempC);
+}
+
+bool UartLink::FlashPort::cancelRequested() {
+  portENTER_CRITICAL(&link_.mux_);
+  const bool cancel = link_.flashCancel_;
+  portEXIT_CRITICAL(&link_.mux_);
+  return cancel;
+}
+
+void UartLink::FlashPort::publish(const policy::FlashStatus &status) {
+  portENTER_CRITICAL(&link_.mux_);
+  link_.flashStatus_ = status;
+  link_.view_.flash = status;
+  link_.view_.flashRunning = true;
+  link_.view_.link = policy::LinkStatus::Updating;
+  portEXIT_CRITICAL(&link_.mux_);
 }
 
 }  // namespace iheaterlink::standalone
