@@ -1168,7 +1168,10 @@ bool applySetupForm(String &error) {
   const bool stopHeat = policy::setupSaveStopsHeat(
       s_outputKind == OutputKind::Uart, wasKlipper, klipperSource(),
       bindingChanged, nextOutput != s_outputKind);
-  s_override.reset();
+  // An override survives a save that changes neither the source nor the
+  // binding; otherwise Klipper's target must not be held against the new one.
+  if (stopHeat || bindingChanged || wasKlipper != klipperSource())
+    s_override.reset();
   if (klipperSource()) {
     // Heat from before the change (manual, or another printer or pairing)
     // must not be held: Klipper's own target replaces it once subscribed.
@@ -1189,10 +1192,8 @@ bool applySetupForm(String &error) {
     char shown[policy::kPairTokenLen + 2];
     policy::formatPairToken(s_settings.pairToken.c_str(), shown);
     Serial.printf("[REMOTE] pairing token set to %s\n", shown);
-    if (klipperSource()) {  // follow the link with the newly saved token
-      s_override.reset();
+    if (klipperSource())  // follow the link with the newly saved token
       s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
-    }
   }
   if ((minC != s_range.minC || maxC != s_range.maxC) && !saveRange(minC, maxC)) {
     error = "Could not save the target range.";
