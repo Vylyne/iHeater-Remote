@@ -316,6 +316,114 @@ function step_moonraker_conf {
     fi
 }
 
+# nginx_value_ok TEXT: true when TEXT is safe to place in an nginx directive.
+# Whitespace, ; { } " ' $ # and backslash could end or inject a directive.
+function nginx_value_ok {
+    [ -n "$1" ] || return 1
+    case "$1" in
+        *[[:space:]\;\{\}\"\'\$\#\\]*) return 1 ;;
+    esac
+    return 0
+}
+
+# ask_nginx_value PROMPT VAR: ask until the answer is safe. A blank answer or
+# end of input returns 1.
+function ask_nginx_value {
+    local answer
+    while :; do
+        answer="$(ask_value "$1")"
+        if [ -z "${answer}" ]; then
+            return 1
+        fi
+        if nginx_value_ok "${answer}"; then
+            printf -v "$2" '%s' "${answer}"
+            return 0
+        fi
+        warn "that has a space or one of ; { } \" ' \$ # \\ in it; try again."
+    done
+}
+
+# Offers an HTTPS nginx site for the Remote. Only the iheater-remote site and
+# its link are written or removed; other sites and nginx.conf are never touched.
+function step_nginx_site {
+    command -v nginx >/dev/null 2>&1 || return 0
+    local base="${NGINX_DIR:-/etc/nginx}"
+    local avail="${base}/sites-available/iheater-remote"
+    local enabled="${base}/sites-enabled/iheater-remote"
+    section "nginx"
+    if [ ! -d "${base}/sites-available" ] || [ ! -d "${base}/sites-enabled" ]; then
+        skip "no sites-available and sites-enabled in ${base}"
+        return 0
+    fi
+    if ! ask "Set up an HTTPS nginx site for the Remote?" n; then
+        skip "nginx site not set up"
+        return 0
+    fi
+    local server_name cert key remote
+    if ! ask_nginx_value "Server name (for example heater.example.com)" server_name \
+        || ! ask_nginx_value "TLS certificate path" cert \
+        || ! ask_nginx_value "TLS key path" key \
+        || ! ask_nginx_value "Remote's IP address or name" remote; then
+        warn "nginx site not set up: a value was left blank."
+        return 0
+    fi
+
+    local tmp had_site=0 had_link=0 bak="${avail}.bak-${STAMP}"
+    tmp="$(mktemp)"
+    # The values go in on stdin, as literal text: no shell or sed escaping, and
+    # nothing for Git Bash's path conversion to rewrite.
+    local fill
+    fill='import re, sys
+src, dest = sys.argv[1:3]
+names = ("SERVER_NAME", "CERT", "KEY", "REMOTE")
+values = dict(zip(names, sys.stdin.read().split("\n")))
+with open(src, encoding="utf-8", newline="") as f:
+    text = f.read()
+text = re.sub(r"@([A-Z_]+)@", lambda m: values.get(m.group(1), m.group(0)), text)
+with open(dest, "w", encoding="utf-8", newline="\n") as f:
+    f.write(text)'
+    if ! printf '%s\n' "${server_name}" "${cert}" "${key}" "${remote}" \
+        | "${PYTHON_BIN}" -c "${fill}" "${INSTALL_PATH}/scripts/nginx-site.conf" "${tmp}"
+    then
+        rm -f "${tmp}"
+        warn "could not fill in the nginx template."
+        return 0
+    fi
+
+    if [ -e "${avail}" ]; then
+        had_site=1
+        sudo cp -p "${avail}" "${bak}"
+        note "backup: ${bak}"
+    fi
+    if [ -e "${enabled}" ] || [ -L "${enabled}" ]; then
+        had_link=1
+    fi
+    sudo cp "${tmp}" "${avail}"
+    rm -f "${tmp}"
+    if [ "${had_link}" = 0 ]; then
+        sudo ln -s "${avail}" "${enabled}"
+    fi
+
+    if sudo nginx -t; then
+        ok "wrote ${avail}"
+        if sudo systemctl reload nginx; then
+            ok "nginx reloaded"
+        else
+            warn "could not reload nginx; run: sudo systemctl reload nginx"
+        fi
+    else
+        if [ "${had_site}" = 1 ]; then
+            sudo cp -p "${bak}" "${avail}"
+        else
+            sudo rm -f "${avail}"
+        fi
+        if [ "${had_link}" = 0 ]; then
+            sudo rm -f "${enabled}"
+        fi
+        warn "nginx -t failed; the nginx site was rolled back and nginx was not reloaded."
+    fi
+}
+
 function step_next {
     section "Next steps"
     note "Config: ${ADDON_CFG}"
@@ -341,4 +449,5 @@ step_macro_check
 step_printer_cfg
 step_moonraker_conf
 restart_services
+step_nginx_site
 step_next
