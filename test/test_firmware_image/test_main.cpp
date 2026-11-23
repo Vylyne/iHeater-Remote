@@ -113,7 +113,7 @@ void test_reset_vector_range() {
     put32(b, 4, rv);
     TEST_ASSERT_EQUAL((int)ImageCheck::BadResetVector, check(b));
   }
-  std::vector<uint8_t> b = fallbackImage(1024);
+  std::vector<uint8_t> b = fallbackImage(30720);
   put32(b, 4, 0x080077FF);
   TEST_ASSERT_EQUAL((int)ImageCheck::Ok, check(b));
 }
@@ -160,11 +160,33 @@ void test_fallback_refuses_non_uart_vectors() {
   TEST_ASSERT_EQUAL((int)ImageCheck::NotUartVectors, check(fallbackImage(1024, false)));
 }
 
-void test_magic_ignored_below_0xE0() {
-  std::vector<uint8_t> b = makeImage(0xDF);
-  ImageInfo info = checkImage(b.data(), b.size());
-  TEST_ASSERT_EQUAL((int)ImageCheck::Ok, (int)info.result);
-  TEST_ASSERT_FALSE(info.hasMarker);
+void test_marker_image_truncated_is_refused() {
+  // A marker image cut inside or just after the record must not pass as a
+  // fallback image: its reset vector points into pages that were not sent.
+  std::vector<uint8_t> full = goodImage();
+  const size_t cuts[] = {200, 0xC4, 0xDF};
+  for (size_t cut : cuts) {
+    std::vector<uint8_t> b(full.begin(), full.begin() + cut);
+    TEST_ASSERT_EQUAL((int)ImageCheck::LengthMismatch, check(b));
+  }
+  // The magic can't be read below 0xC4, so the fallback checks refuse it.
+  std::vector<uint8_t> b(full.begin(), full.begin() + 0xC3);
+  TEST_ASSERT_EQUAL((int)ImageCheck::BadResetVector, check(b));
+  // A full-length record still passes.
+  b.assign(full.begin(), full.begin() + 1024);
+  TEST_ASSERT_EQUAL((int)ImageCheck::Ok, check(b));
+}
+
+void test_fallback_refuses_reset_vector_past_image() {
+  std::vector<uint8_t> b = fallbackImage(1024);
+  put32(b, 4, 0x08000401);  // 0x400 == length: first byte past the image
+  TEST_ASSERT_EQUAL((int)ImageCheck::BadResetVector, check(b));
+  put32(b, 4, 0x08000801);
+  TEST_ASSERT_EQUAL((int)ImageCheck::BadResetVector, check(b));
+  put32(b, 4, 0x080003FF);  // Thumb bit cleared: 0x3FE, inside the image
+  TEST_ASSERT_EQUAL((int)ImageCheck::Ok, check(b));
+  TEST_ASSERT_EQUAL_STRING("The file doesn't start with an iHeater vector table (reset vector).",
+                           imageCheckMessage(ImageCheck::BadResetVector));
 }
 
 void test_fallback_needs_whole_vector_table() {
@@ -196,7 +218,8 @@ int main(int, char **) {
   RUN_TEST(test_record_checks_in_order);
   RUN_TEST(test_fallback_uart_vectors);
   RUN_TEST(test_fallback_refuses_non_uart_vectors);
-  RUN_TEST(test_magic_ignored_below_0xE0);
+  RUN_TEST(test_marker_image_truncated_is_refused);
+  RUN_TEST(test_fallback_refuses_reset_vector_past_image);
   RUN_TEST(test_fallback_needs_whole_vector_table);
   RUN_TEST(test_messages_and_failed_summary);
   return UNITY_END();

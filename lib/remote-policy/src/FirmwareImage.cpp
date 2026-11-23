@@ -11,7 +11,8 @@ namespace {
 
 constexpr size_t kVectorCount = 48;
 constexpr size_t kVectorTableBytes = kVectorCount * 4;
-constexpr size_t kMarkerSearchMin = 0xE0;
+// The magic word is readable from here; the whole 32-byte record needs 0xE0.
+constexpr size_t kMagicSearchMin = kMarkerOffset + 4;
 constexpr size_t kUartVectorFirst = 16;
 constexpr size_t kUartVectorIndex = 43;
 
@@ -76,7 +77,14 @@ ImageInfo checkImage(const uint8_t *data, size_t len) {
     return info;
   }
 
-  if (len >= kMarkerSearchMin && rd32(data + kMarkerOffset) == kMarkerMagic) {
+  if (len >= kMagicSearchMin && rd32(data + kMarkerOffset) == kMarkerMagic) {
+    // A cut-off marker image would otherwise pass the fallback checks and
+    // flash a valid page 0 whose reset vector points at pages never sent.
+    if (len < kMarkerOffset + kMarkerBytes) {
+      info.hasMarker = true;
+      info.result = ImageCheck::LengthMismatch;
+      return info;
+    }
     const uint8_t *m = data + kMarkerOffset;
     info.hasMarker = true;
     info.protocol = rd16(m + 0x0A);
@@ -119,6 +127,12 @@ ImageInfo checkImage(const uint8_t *data, size_t len) {
   // build (vector 43 differs from the common handler).
   if (len < kVectorTableBytes || rd32(data + kUartVectorIndex * 4) == commonVector(data)) {
     info.result = ImageCheck::NotUartVectors;
+    return info;
+  }
+  // The reset handler must lie inside the image; the Thumb bit is not part of
+  // the address.
+  if ((reset & ~1u) >= kFlashBase + (uint32_t)len) {
+    info.result = ImageCheck::BadResetVector;
     return info;
   }
   info.result = ImageCheck::Ok;

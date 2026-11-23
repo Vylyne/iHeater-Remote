@@ -260,9 +260,10 @@ pulse output.
    touches the iHeater. It refuses a file that is under 8 B or over
    30,720 B, has a bad vector table, or has a marker record with the wrong
    build type, length or CRC, or an unsupported protocol (a pulse build, a
-   truncated file or a changed byte all fail this way). An older image with
-   no marker is accepted with a warning, because it only passes the
-   vector-table check.
+   marker image cut short or a changed byte all fail this way). An older image
+   with no marker is accepted with a warning, because it only passes the
+   vector-table check; that check can't tell whether such a file was cut
+   short, beyond refusing one whose reset vector points past its end.
 2. Press **Update iHeater**. The update refuses to start while heat is
    wanted: Manual on, or a Klipper target above 0.
 3. **Cool-down.** The Remote sets the air target to 0 and waits for the heater
