@@ -381,6 +381,10 @@ static ReportInputs upIdle() {
   return in;
 }
 
+void test_link_status_name_updating() {
+  TEST_ASSERT_EQUAL_STRING("updating", linkStatusName(LinkStatus::Updating));
+}
+
 void test_link_and_state_names() {
   TEST_ASSERT_EQUAL_STRING("no-reply", linkStatusName(LinkStatus::NoReply));
   TEST_ASSERT_EQUAL_STRING("hold", iheaterStateName(IheaterState::Hold));
@@ -707,6 +711,7 @@ int main() {
   RUN_TEST(test_link_loss_carry_zero_is_valid);
   RUN_TEST(test_link_loss_carry_adds_boot_time);
   RUN_TEST(test_link_and_state_names);
+  RUN_TEST(test_link_status_name_updating);
   RUN_TEST(test_report_values_null_when_link_not_up);
   RUN_TEST(test_report_values_null_on_no_reading);
   RUN_TEST(test_report_values_range_air_and_element);

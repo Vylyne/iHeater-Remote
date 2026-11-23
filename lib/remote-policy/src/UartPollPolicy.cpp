@@ -162,6 +162,7 @@ const char *linkStatusName(LinkStatus s) {
     case LinkStatus::Up: return "up";
     case LinkStatus::Restarting: return "restarting";
     case LinkStatus::NoReply: return "no-reply";
+    case LinkStatus::Updating: return "updating";
   }
   return "unknown";
 }

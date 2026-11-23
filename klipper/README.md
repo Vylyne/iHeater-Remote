@@ -17,7 +17,8 @@ sends the iHeater's readings back, so Klipper shows the chamber air
 temperature, the heater power, the fan, the iHeater state and any fault, and
 `M191` waits on the air reading. If the Remote stops reporting, the heater
 falls back to `sensor:` (or to the last air reading when `sensor:` is not
-set) and `linked` turns false.
+set) and `linked` turns false. While the Remote is updating the iHeater's
+firmware the link state is `updating`; `linked` is false.
 
 ## Install
 

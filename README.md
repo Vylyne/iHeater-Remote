@@ -250,6 +250,51 @@ LED:
 
 [![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/wildtang3nt)
 
+## Updating the iHeater's firmware
+
+With the output set to UART, the **/fw** page has an **iHeater firmware**
+card that updates the iHeater (STM32) over the link. It does not appear in
+pulse output.
+
+1. Choose the iHeater's UART build `.bin`. The Remote checks it before it
+   touches the iHeater. It refuses a file that is under 8 B or over
+   30,720 B, has a bad vector table, or has a marker record with the wrong
+   build type, length or CRC, or an unsupported protocol (a pulse build, a
+   marker image cut short or a changed byte all fail this way). An older image
+   with no marker is accepted with a warning, because it only passes the
+   vector-table check; that check can't tell whether such a file was cut
+   short, beyond refusing one whose reset vector points past its end.
+2. Press **Update iHeater**. The update refuses to start while heat is
+   wanted: Manual on, or a Klipper target above 0.
+3. **Cool-down.** The Remote sets the air target to 0 and waits for the heater
+   to read 50 C or lower. It gives up after 30 minutes, and stops if heat
+   becomes wanted. **Cancel** works only during the cool-down.
+4. The Remote then enters the iHeater's bootloader, erases, writes and
+   verifies the image, and starts it. The page shows the phase and a progress
+   bar.
+
+From entry until the end, the iHeater's application is erased. Do not power
+off the iHeater or the Remote. Setup, Wi-Fi and integration saves and Remote
+OTA return 409 while an update runs.
+
+If an update fails, the page says why, and whether the iHeater is still
+running its firmware. **Retry** starts again from the bootloader sync.
+
+**Recovery.** If the Remote and iHeater lose power or the link during a
+flash, the iHeater stays in its bootloader. Once the link has had no reply
+for 10 s, the Remote probes for the bootloader every 30 s. When it answers,
+the page shows "iHeater is in its bootloader: upload firmware to recover".
+Upload a file and press **Update iHeater** to finish.
+
+If the update finishes but the iHeater is still in its bootloader, the page
+says "The iHeater was updated but is still in its bootloader. Power-cycle the
+iHeater; don't flash it again." Do what it says.
+
+While an update runs, the Remote reports the link as `updating`, and Klipper
+shows it. Update the host's Klipper and Moonraker parts first (run
+`./install.sh` again). Until then, they refuse the reports during an update,
+which is harmless.
+
 ## Updating from 2.0
 
 Settings from 2.0 (idryer-core) carry over once: the Remote reads them at

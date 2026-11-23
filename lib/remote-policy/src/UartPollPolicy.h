@@ -16,9 +16,9 @@ constexpr uint32_t kReplyTimeoutMs = 200;
 constexpr uint32_t kNoReplyAfterMs = 1000;
 constexpr uint32_t kRestartWindowMs = 10000;
 
-enum class LinkStatus : uint8_t { Waiting, Up, Restarting, NoReply };
+enum class LinkStatus : uint8_t { Waiting, Up, Restarting, NoReply, Updating };
 enum class ClearPhase : uint8_t { Idle, AwaitRestart, Blocked };
-enum class PollKind : uint8_t { None, ReadInputs, ReadSettings, WriteTarget, WriteClear };
+enum class PollKind : uint8_t { None, ReadInputs, ReadSettings, WriteTarget, WriteClear, WriteBootloader };
 struct PollRequest {
   PollKind kind;
   uint16_t addr;
@@ -42,7 +42,7 @@ class UartPollPolicy {
   const IheaterSnapshot &snapshot() const { return snapshot_; }
   bool hasLimits() const { return hasLimits_; }
   const IheaterLimits &limits() const { return limits_; }
-  bool protocolSupported() const { return hasSnapshot_ && snapshot_.proto == 1; }
+  bool protocolSupported() const { return hasSnapshot_ && snapshot_.proto == kSupportedProtocol; }
   bool desiredKnown() const { return desiredKnown_; }
   uint16_t desiredT10() const { return desiredT10_; }
   bool rangeEmpty() const { return rangeEmpty_; }

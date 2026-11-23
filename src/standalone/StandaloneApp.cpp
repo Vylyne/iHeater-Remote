@@ -21,6 +21,7 @@
 #endif
 
 #include "controller/RmtOutputAdapter.h"
+#include <FirmwareImage.h>
 #include <RemotePolicy.h>
 #include "version.h"
 
@@ -113,6 +114,8 @@ bool s_otaActive = false;
 bool s_otaOk = false;
 size_t s_otaBytesWritten = 0;
 String s_otaError;
+// A refused OTA upload (an iHeater update is running) must not touch Update.
+bool s_otaRefused = false;
 policy::TargetRange s_range{policy::kDefaultMinC, policy::kDefaultMaxC};
 String s_targetSource = "manual";
 // One-shot message from the last setup save, shown on the next Setup page and
@@ -125,6 +128,18 @@ int s_txPower = kDefaultTxPower;
 int s_wifiRssi = 0;
 uint32_t s_wifiRssiAtMs = 0;
 uint32_t s_heapLogAtMs = 0;
+
+// The iHeater firmware image, held in RAM from upload until it is flashed. The
+// flash job reads the buffer, so it is only freed while flashBusy() is false.
+uint8_t *s_ihImage = nullptr;
+size_t s_ihImageLen = 0;
+policy::ImageInfo s_ihInfo;
+String s_ihError;
+bool s_ihUploading = false;  // this upload owns s_ihImage
+bool s_ihImageReady = false;  // uploaded whole and checked Ok
+uint32_t s_ihImageSeq = 0;     // bumped at each accepted upload start
+uint32_t s_ihJobImageSeq = 0;  // s_ihImageSeq when the last job started
+constexpr const char *kUpdateRunningMessage = "An iHeater update is running.";
 
 // Manual-mode resume record. RTC no-init memory survives a software reset
 // (crash, watchdog, OTA, Setup save) but is garbage after a power-on or
@@ -501,23 +516,45 @@ const char *uartLinkName(policy::LinkStatus status) {
       return "restarting";
     case policy::LinkStatus::NoReply:
       return "noreply";
+    case policy::LinkStatus::Updating:
+      return "updating";
   }
   return "unknown";
 }
 
-// Logs each change of the UART link status. Runs on loopTask against the
-// task's published view, so the poll task itself never logs for this.
+// Logs each phase change of a flash job, and its outcome. Idle is not logged:
+// the task resets the status to it when it takes a new job.
+void logUartFlash(const policy::FlashStatus &flash) {
+  static policy::FlashPhase s_lastPhase = policy::FlashPhase::Idle;
+  static policy::FlashOutcome s_lastOutcome = policy::FlashOutcome::None;
+  if (flash.phase != s_lastPhase) {
+    s_lastPhase = flash.phase;
+    if (flash.phase != policy::FlashPhase::Idle)
+      Serial.printf("[UART] flash phase=%s\n", policy::flashPhaseName(flash.phase));
+  }
+  if (flash.outcome != s_lastOutcome) {
+    s_lastOutcome = flash.outcome;
+    if (flash.outcome != policy::FlashOutcome::None)
+      Serial.printf("[UART] flash outcome=%s%s%s\n", policy::flashOutcomeName(flash.outcome),
+                    flash.detail[0] ? " " : "", flash.detail);
+  }
+}
+
+// Logs each change of the UART link status and of a flash job. Runs on
+// loopTask against the task's published view, so the poll task itself never
+// logs for this.
 void updateUartLinkLog() {
   if (s_outputKind != OutputKind::Uart || !s_uart.isEnabled())
     return;
   static bool s_logged = false;
   static policy::LinkStatus s_lastLink = policy::LinkStatus::Waiting;
-  const policy::LinkStatus link = s_uart.view().link;
-  if (s_logged && link == s_lastLink)
+  const UartLinkView view = s_uart.view();
+  logUartFlash(view.flash);
+  if (s_logged && view.link == s_lastLink)
     return;
   s_logged = true;
-  s_lastLink = link;
-  Serial.printf("[UART] link=%s\n", uartLinkName(link));
+  s_lastLink = view.link;
+  Serial.printf("[UART] link=%s\n", uartLinkName(view.link));
 }
 
 // Sends the iHeater's readings to the Klipper plugin. Only while the Remote
@@ -695,11 +732,31 @@ void handleSetupPage() {
   s_server.send(200, "text/html", page);
 }
 
+// The iHeater update card for /fw (UART output only). It follows the status
+// WebSocket and posts the image as multipart field "firmware".
+const char kIheaterCard[] = R"HTML(<section class=card id=ih><style>#ih h2{font-size:16px;margin:0 0 6px}#ih button:disabled{opacity:.45;cursor:default}#ih .row{display:flex;gap:8px}#ih progress{width:100%}</style><h2>iHeater firmware</h2><p class=note id=ihVer>Running: not read yet</p><p class="note warning" id=ihRom hidden>iHeater is in its bootloader: upload firmware to recover</p><input id=ihFile accept=".bin,application/octet-stream" type=file><p class=note id=ihImg>Choose the iHeater UART build .bin.</p><div class=row><button id=ihGo disabled>Update iHeater</button><button id=ihCancel disabled>Cancel</button><button id=ihRetry disabled>Retry</button></div><progress id=ihBar max=100 value=0 hidden></progress><p class=note id=ihPhase></p><p class="note warning" id=ihErase hidden>The iHeater's application is erased. Do not power off the iHeater or the Remote.</p><p class="note warning" id=ihWarn hidden></p><p class=note id=ihMsg></p><script>(()=>{const $=i=>document.getElementById(i),I='/api/iheater/',busyP=['entering','syncing','erasing','writing','starting','restarting'];let u={},up=false;function say(id,t,w){$(id).textContent=t||'';$(id).classList.toggle('warning',!!w)}
+function show(s){const i=s.iheater||{};u=s.iheaterUpdate||{};if(!s.iheaterUpdate)return;const im=u.image||{},r=u.running,p=u.phase;
+say('ihVer',i.fw?'Running: v'+i.fw+', protocol '+i.proto:'Running: not read yet');
+$('ihRom').hidden=!(u.romDetected&&u.outcome!=='power-cycle'&&!r);
+if(!up){say('ihImg',im.error||im.line||'Choose the iHeater UART build .bin.',im.error||im.fallback)}
+$('ihGo').disabled=!u.canUpdate||up;$('ihCancel').disabled=!u.canCancel;$('ihRetry').disabled=!u.canRetry||up;$('ihFile').disabled=!!r||up;
+$('ihBar').hidden=!r||p==='cooling'||p==='idle';$('ihBar').value=u.progress||0;
+say('ihPhase',r?(p==='cooling'?'Cooling down'+(typeof u.heaterC==='number'?': heater at '+u.heaterC.toFixed(1)+' °C':''):p==='idle'?'Starting…':p[0].toUpperCase()+p.slice(1)+' ('+(u.progress||0)+'%)'):'');
+$('ihErase').hidden=!(r&&busyP.includes(p));
+{const w=[];if(u.unexpectedPid)w.push("Unexpected chip ID "+(u.pid?"0x"+u.pid.toString(16).toUpperCase():"(unknown)")+"; expected 0x445.");if(u.entryUnconfirmed)w.push("The iHeater didn't confirm the bootloader request.");$('ihWarn').textContent=w.join(' ');$('ihWarn').hidden=!w.length}
+say('ihMsg',r?'':u.message||u.hint||'',!r&&u.outcome&&u.outcome!=='none'&&u.outcome!=='updated'&&u.outcome!=='cancelled');
+if(!r&&u.detail)$('ihMsg').textContent+=' ('+u.detail+')'}
+function post(path,done){const x=new XMLHttpRequest();x.open('POST',I+path);x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=300)say('ihMsg',r.error||'Request failed.',1);else if(r.iheaterUpdate)show(r);if(done)done()};x.onerror=()=>say('ihMsg','Request failed.',1);x.send()}
+$('ihFile').onchange=()=>{const file=$('ihFile').files[0];if(!file)return;up=true;say('ihImg','Uploading…');$('ihGo').disabled=true;const x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST',I+'image');x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}up=false;if(x.status>=300)say('ihImg',r.error||'Upload failed.',1);else say('ihImg',r.line,r.fallback);$('ihFile').value=''};x.onerror=()=>{up=false;say('ihImg','Upload failed.',1)};x.send(d)};
+$('ihGo').onclick=()=>post('update');$('ihRetry').onclick=()=>post('retry');$('ihCancel').onclick=()=>post('cancel');
+let ws;function conn(){ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.hostname+':81/');ws.onmessage=e=>{try{show(JSON.parse(e.data))}catch(_){}};ws.onclose=()=>setTimeout(conn,2000)}conn()})()</script></section>)HTML";
+
 void handleFirmwarePage() {
   if (captiveRedirectIfNeeded())
     return;
-  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater firmware update</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;--bad:#ff8893;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:560px;margin:auto;padding:36px 15px}.logo{font-size:24px;font-weight:800;letter-spacing:-1px}.logo i{font-style:normal;color:var(--a)}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:18px;margin:16px 0}h1{font-size:22px;margin:14px 0 7px}.note{color:var(--m);font-size:13px;line-height:1.5}input,button{box-sizing:border-box;width:100%;min-height:45px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:8px;margin:8px 0}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;cursor:pointer}.warning{color:var(--bad)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><div class=logo><i>i</i>Heater</div><h1>Firmware update</h1><p class=note>Installed: iHeater Remote v__VERSION__</p><section class=card><p class="note warning"><strong>__HEATNOTE__</strong> Do not disconnect power while the upload is in progress.</p><input id=file accept=".bin,application/octet-stream" type=file><button id=install>Install update</button><p class=note id=msg></p></section></main><script>const f=document.getElementById('file'),m=document.getElementById('msg');document.getElementById('install').onclick=()=>{let file=f.files[0];if(!file){m.textContent='Choose a firmware .bin first.';return}let x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST','/api/ota');x.upload.onprogress=e=>m.textContent=e.lengthComputable?'Uploading '+Math.round(e.loaded/e.total*100)+'%':'Uploading…';x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=200&&x.status<300){m.textContent='Update written. Rebooting…';setTimeout(waitForDevice,1500)}else m.textContent=r.error||'Update failed.'};x.onerror=()=>m.textContent='Update failed.';x.send(d)};function waitForDevice(){let end=Date.now()+120000,t=setInterval(async()=>{try{let r=await fetch('/',{cache:'no-store'});if(r.ok){clearInterval(t);location.href='/'}}catch(_){}if(Date.now()>end){clearInterval(t);m.textContent='The device is restarting. Reopen the dashboard when it is back online.'}},1000)}</script></main>)HTML";
+  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater firmware update</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;--bad:#ff8893;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:560px;margin:auto;padding:36px 15px}.logo{font-size:24px;font-weight:800;letter-spacing:-1px}.logo i{font-style:normal;color:var(--a)}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:18px;margin:16px 0}h1{font-size:22px;margin:14px 0 7px}.note{color:var(--m);font-size:13px;line-height:1.5}input,button{box-sizing:border-box;width:100%;min-height:45px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:8px;margin:8px 0}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;cursor:pointer}.warning{color:var(--bad)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><div class=logo><i>i</i>Heater</div><h1>Firmware update</h1><p class=note>Installed: iHeater Remote v__VERSION__</p><section class=card><p class="note warning"><strong>__HEATNOTE__</strong> Do not disconnect power while the upload is in progress.</p><input id=file accept=".bin,application/octet-stream" type=file><button id=install>Install update</button><p class=note id=msg></p></section>__IHCARD__</main><script>const f=document.getElementById('file'),m=document.getElementById('msg');document.getElementById('install').onclick=()=>{let file=f.files[0];if(!file){m.textContent='Choose a firmware .bin first.';return}let x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST','/api/ota');x.upload.onprogress=e=>m.textContent=e.lengthComputable?'Uploading '+Math.round(e.loaded/e.total*100)+'%':'Uploading…';x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=200&&x.status<300){m.textContent='Update written. Rebooting…';setTimeout(waitForDevice,1500)}else m.textContent=r.error||'Update failed.'};x.onerror=()=>m.textContent='Update failed.';x.send(d)};function waitForDevice(){let end=Date.now()+120000,t=setInterval(async()=>{try{let r=await fetch('/',{cache:'no-store'});if(r.ok){clearInterval(t);location.href='/'}}catch(_){}if(Date.now()>end){clearInterval(t);m.textContent='The device is restarting. Reopen the dashboard when it is back online.'}},1000)}</script></main>)HTML";
   page.replace("__VERSION__", VERSION_STR);
+  page.replace("__IHCARD__", s_outputKind == OutputKind::Uart ? kIheaterCard : "");
   page.replace("__HEATNOTE__",
                s_outputKind == OutputKind::Uart
                    ? "Heating continues: the iHeater holds its target while the Remote restarts."
@@ -725,6 +782,76 @@ const char *uartClearName(policy::ClearPhase phase) {
       return "blocked";
   }
   return "idle";
+}
+
+// Frees the image and forgets its check. Callers make sure no job holds it.
+void freeIhImage() {
+  free(s_ihImage);
+  s_ihImage = nullptr;
+  s_ihImageLen = 0;
+  s_ihInfo = policy::ImageInfo{};
+  s_ihUploading = false;
+  s_ihImageReady = false;
+}
+
+// What the Update iHeater button would do right now.
+policy::FlashStartDecision ihStartDecision(const UartLinkView &view, bool retry) {
+  const auto last = s_output->getLastCommand();
+  policy::FlashStartInputs in;
+  in.uartOutput = s_outputKind == OutputKind::Uart && s_uart.isEnabled();
+  in.imageOk = s_ihImageReady;
+  in.heatWanted = policy::heatWanted(last.mode == ControllerOutputMode::TargetTemperature,
+                                     last.targetTempC);
+  in.jobRunning = s_uart.flashBusy();
+  // A restart already scheduled (OTA, setup save, output switch) would cut the job off.
+  in.restartPending = s_restartAtMs != 0 || s_outputSwitchPending;
+  in.romDetected = view.romDetected;
+  in.link = view.link;
+  in.lastOutcome = view.flash.outcome;
+  return policy::decideFlashStart(in, retry);
+}
+
+// The iHeater update card's state. While a job is only queued, the view still
+// holds the previous job's result, so the job fields stay empty until it runs.
+void fillUpdateJson(JsonObject out) {
+  const UartLinkView view = s_uart.view();
+  const bool busy = s_uart.flashBusy();
+  const bool stale = busy && !view.flashRunning;
+  const policy::FlashStatus fs = stale ? policy::FlashStatus{} : view.flash;
+  out["phase"] = policy::flashPhaseName(fs.phase);
+  out["outcome"] = policy::flashOutcomeName(fs.outcome);
+  if (fs.phase == policy::FlashPhase::Finished)
+    out["message"] = policy::flashOutcomeMessage(fs.outcome);
+  out["failedPhase"] = policy::flashPhaseName(fs.failedPhase);
+  out["detail"] = String(fs.detail);  // a const char array would be stored by pointer; fs dies on return
+  out["progress"] = static_cast<int>(fs.progressPermille / 10);
+  setTempC(out, "heaterC", fs.heaterT10);
+  out["entryUnconfirmed"] = fs.entryUnconfirmed;
+  out["unexpectedPid"] = fs.unexpectedPid;
+  if (fs.unexpectedPid)
+    out["pid"] = fs.pid;  // the card names the chip ID it saw
+  out["romDetected"] = view.romDetected;
+  out["running"] = busy;
+  out["canCancel"] = busy && !stale && fs.phase == policy::FlashPhase::Cooling;
+  const policy::FlashRefusal refusal = ihStartDecision(view, false).refusal;
+  out["canUpdate"] = !busy && s_ihImageReady && refusal == policy::FlashRefusal::None;
+  out["canRetry"] = !busy && s_ihImageReady && policy::retryAllowed(fs.outcome) &&
+                    ihStartDecision(view, true).refusal != policy::FlashRefusal::RestartPending;
+  if (!busy && s_ihImageReady && refusal != policy::FlashRefusal::None)
+    out["hint"] = policy::flashRefusalMessage(refusal);
+  JsonObject image = out.createNestedObject("image");
+  if (s_ihImageReady) {
+    char line[160];
+    policy::imageSummary(s_ihInfo, line, sizeof(line));
+    image["loaded"] = true;
+    image["size"] = s_ihImageLen;
+    image["line"] = line;  // copied into the document
+    image["fallback"] = !s_ihInfo.hasMarker;
+  } else if (s_ihError.length()) {
+    image["error"] = s_ihError;
+  } else {
+    image["loaded"] = false;
+  }
 }
 
 // The iHeater's live state for the dashboard. The state fields appear once a
@@ -780,9 +907,9 @@ void fillIheaterJson(JsonObject out) {
 String statusJson() {
   updateHeatTimer();
 
-  // Static so the 2 KB document stays off the 8 KB loopTask stack; every
+  // Static so the 3 KB document stays off the 8 KB loopTask stack; every
   // caller (HTTP handlers, the WebSocket push) runs on that one task.
-  static StaticJsonDocument<2048> doc;
+  static StaticJsonDocument<3072> doc;
   doc.clear();
   doc["mode"] = s_mode;
   const auto output = s_output->getLastCommand();
@@ -816,8 +943,10 @@ String statusJson() {
   doc["moonrakerState"] = s_moonraker.stateString();
   doc["heaterObject"] = s_moonraker.heaterObject();
   doc["moonrakerError"] = klipper ? s_moonraker.lastError() : String();
-  if (s_outputKind == OutputKind::Uart)
+  if (s_outputKind == OutputKind::Uart) {
     fillIheaterJson(doc.createNestedObject("iheater"));
+    fillUpdateJson(doc.createNestedObject("iheaterUpdate"));
+  }
 
   String out;
   serializeJson(doc, out);
@@ -1092,6 +1221,10 @@ bool applySetupForm(String &error) {
 }
 
 void handleIntegrationPost() {
+  if (s_uart.flashBusy()) {
+    s_server.send(409, "application/json", String("{\"error\":\"") + kUpdateRunningMessage + "\"}");
+    return;
+  }
   String error;
   if (!applySetupForm(error)) {
     s_server.send(400, "application/json", String("{\"error\":\"") + error + "\"}");
@@ -1107,7 +1240,19 @@ void handleIntegrationPost() {
   s_server.send(200, "application/json", status);
 }
 
+void sendJsonError(int code, const char *message) {
+  StaticJsonDocument<384> doc;
+  doc["error"] = message;
+  String out;
+  serializeJson(doc, out);
+  s_server.send(code, "application/json", out);
+}
+
 void handleSetupPost() {
+  if (s_uart.flashBusy()) {
+    s_server.send(409, "text/plain", kUpdateRunningMessage);
+    return;
+  }
   String error;
   if (!applySetupForm(error)) {
     s_server.send(400, "text/plain", error);
@@ -1145,6 +1290,10 @@ void handleSetupPost() {
 }
 
 void handleWifiPost() {
+  if (s_uart.flashBusy()) {
+    sendJsonError(409, kUpdateRunningMessage);
+    return;
+  }
   if (!s_server.hasArg("ssid")) {
     s_server.send(400, "application/json", "{\"error\":\"missing ssid\"}");
     return;
@@ -1180,6 +1329,10 @@ void handleWifiPost() {
 }
 
 void handleWifiClearPost() {
+  if (s_uart.flashBusy()) {
+    sendJsonError(409, kUpdateRunningMessage);
+    return;
+  }
   if (!clearStoredWifiCredentials()) {
     s_server.send(500, "application/json", "{\"error\":\"clear failed\"}");
     return;
@@ -1193,6 +1346,10 @@ void handleWifiClearPost() {
 }
 
 void handleOtaPost() {
+  if (s_otaRefused) {
+    sendJsonError(409, kUpdateRunningMessage);
+    return;
+  }
   if (Update.hasError() || !s_otaOk) {
     StaticJsonDocument<192> doc;
     doc["error"] = s_otaError.length() ? s_otaError : Update.errorString();
@@ -1220,9 +1377,15 @@ void handleOtaUpload() {
   HTTPUpload &upload = s_server.upload();
 
   if (upload.status == UPLOAD_FILE_START) {
-    s_otaActive = true;
     s_otaOk = false;
     s_otaBytesWritten = 0;
+    s_otaRefused = s_uart.flashBusy();
+    if (s_otaRefused) {
+      // The Remote must not restart under a running iHeater update.
+      s_otaError = kUpdateRunningMessage;
+      return;
+    }
+    s_otaActive = true;
     s_otaError = "";
 
     // Pulse stops heat before the image is written. The UART output keeps its
@@ -1237,6 +1400,8 @@ void handleOtaUpload() {
       s_otaError = Update.errorString();
       Serial.printf("[REMOTE] OTA begin failed: %s\n", s_otaError.c_str());
     }
+  } else if (s_otaRefused) {
+    return;
   } else if (upload.status == UPLOAD_FILE_WRITE) {
     if (!Update.hasError()) {
       const size_t written = Update.write(upload.buf, upload.currentSize);
@@ -1267,6 +1432,120 @@ void handleOtaUpload() {
   }
 }
 
+// The image upload. A refused upload (busy, no memory) copies nothing and never
+// touches the buffer, which a running job may be reading.
+void handleIheaterImageUpload() {
+  HTTPUpload &upload = s_server.upload();
+  if (upload.status == UPLOAD_FILE_START) {
+    s_ihUploading = false;
+    if (s_uart.flashBusy()) {
+      s_ihError = kUpdateRunningMessage;
+      return;
+    }
+    freeIhImage();
+    s_ihError = "";
+    ++s_ihImageSeq;
+    s_ihImage = static_cast<uint8_t *>(malloc(policy::kMaxImageBytes));
+    if (!s_ihImage) {
+      s_ihError = "Not enough memory for the image.";
+      return;
+    }
+    s_ihUploading = true;
+  } else if (!s_ihUploading) {
+    return;
+  } else if (upload.status == UPLOAD_FILE_WRITE) {
+    if (s_ihError.length())
+      return;
+    if (s_ihImageLen + upload.currentSize > policy::kMaxImageBytes) {
+      s_ihError = policy::imageCheckMessage(policy::ImageCheck::TooLarge);
+      return;
+    }
+    memcpy(s_ihImage + s_ihImageLen, upload.buf, upload.currentSize);
+    s_ihImageLen += upload.currentSize;
+  } else if (upload.status == UPLOAD_FILE_END) {
+    if (!s_ihError.length()) {
+      s_ihInfo = policy::checkImage(s_ihImage, s_ihImageLen);
+      if (s_ihInfo.result == policy::ImageCheck::Ok)
+        s_ihImageReady = true;
+      else
+        s_ihError = policy::imageCheckMessage(s_ihInfo.result);
+    }
+    if (!s_ihImageReady)
+      freeIhImage();
+    s_ihUploading = false;
+  } else if (upload.status == UPLOAD_FILE_ABORTED) {
+    freeIhImage();
+    s_ihError = "Upload aborted.";
+  }
+}
+
+void handleIheaterImagePost() {
+  if (s_ihError.length() || !s_ihImageReady) {
+    sendJsonError(400, s_ihError.length() ? s_ihError.c_str() : "No file received.");
+    return;
+  }
+  char line[160];
+  policy::imageSummary(s_ihInfo, line, sizeof(line));
+  StaticJsonDocument<384> doc;
+  doc["ok"] = true;
+  doc["line"] = line;
+  doc["fallback"] = !s_ihInfo.hasMarker;
+  String out;
+  serializeJson(doc, out);
+  s_server.send(200, "application/json", out);
+}
+
+void handleIheaterStart(bool retry) {
+  const UartLinkView view = s_uart.view();
+  const policy::FlashStartDecision decision = ihStartDecision(view, retry);
+  if (decision.refusal != policy::FlashRefusal::None) {
+    sendJsonError(409, policy::flashRefusalMessage(decision.refusal));
+    return;
+  }
+  if (!s_uart.startFlash(s_ihImage, s_ihImageLen, decision.start)) {
+    sendJsonError(409, policy::flashRefusalMessage(policy::FlashRefusal::JobRunning));
+    return;
+  }
+  s_ihJobImageSeq = s_ihImageSeq;
+  Serial.printf("[REMOTE] iHeater update queued (%s)\n", retry ? "retry" : "update");
+  sendActionStatus();
+}
+
+void handleIheaterCancel() {
+  if (!s_uart.flashBusy() || s_uart.view().flash.phase != policy::FlashPhase::Cooling) {
+    sendJsonError(409, "Cancel is only possible while cooling down.");
+    return;
+  }
+  s_uart.cancelFlash();
+  sendActionStatus();
+}
+
+void handleIheaterDiscard() {
+  if (s_uart.flashBusy()) {
+    sendJsonError(409, kUpdateRunningMessage);
+    return;
+  }
+  freeIhImage();
+  s_ihError = "";
+  sendActionStatus();
+}
+
+// Once a job has put the image on the iHeater, the buffer is not needed. A
+// newer upload (different sequence) is never freed here.
+void updateIheaterImageHousekeeping() {
+  static bool s_wasBusy = false;
+  const bool busy = s_uart.flashBusy();
+  if (s_wasBusy && !busy && s_ihImage && !s_ihUploading && s_ihImageSeq == s_ihJobImageSeq) {
+    const policy::FlashOutcome outcome = s_uart.view().flash.outcome;
+    if (outcome == policy::FlashOutcome::Updated ||
+        outcome == policy::FlashOutcome::PowerCycleNeeded) {
+      freeIhImage();
+      s_ihError = "";
+    }
+  }
+  s_wasBusy = busy;
+}
+
 void handleRoot() {
   if (captiveRedirectIfNeeded())
     return;
@@ -1286,6 +1565,11 @@ void configureRoutes() {
   s_server.on("/api/wifi", HTTP_POST, handleWifiPost);
   s_server.on("/api/wifi/clear", HTTP_POST, handleWifiClearPost);
   s_server.on("/api/ota", HTTP_POST, handleOtaPost, handleOtaUpload);
+  s_server.on("/api/iheater/image", HTTP_POST, handleIheaterImagePost, handleIheaterImageUpload);
+  s_server.on("/api/iheater/update", HTTP_POST, []() { handleIheaterStart(false); });
+  s_server.on("/api/iheater/retry", HTTP_POST, []() { handleIheaterStart(true); });
+  s_server.on("/api/iheater/cancel", HTTP_POST, handleIheaterCancel);
+  s_server.on("/api/iheater/image/discard", HTTP_POST, handleIheaterDiscard);
   s_server.on("/api/off", HTTP_POST, []() {
     applyMode(0, "web");
     sendActionStatus();
@@ -1598,6 +1882,7 @@ void loop() {
   s_moonraker.loop();
   updateKlipperReport();
   updateUartLinkLog();
+  updateIheaterImageHousekeeping();
   updateHeapLog();
   pushStatusIfChanged();
   delay(2);

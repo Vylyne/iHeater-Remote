@@ -16,7 +16,8 @@ import re
 from ..common import RequestType, WebRequest
 
 _TOKEN_RE = re.compile(r'^[0-9A-HJKMNP-TV-Z]{8}$')
-_LINKS = ('up', 'waiting', 'restarting', 'no-reply')
+_LINKS = ('up', 'waiting', 'restarting', 'no-reply',
+          'updating')
 _KLIPPY_ENDPOINT = 'heater_iheater_remote/report'
 
 

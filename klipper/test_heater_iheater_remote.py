@@ -393,6 +393,17 @@ class HeaterIheaterRemoteTest(unittest.TestCase):
         hv.set_temp(50.)
         self.assertEqual(hv.get_status(100.)['power'], 1.)
 
+    def test_link_updating_falls_back_to_sensor(self):
+        hv = self.make_connected(remote_token='7K3P9QXM')
+        self.printer.reactor.now = 100.
+        self.post(link='updating', air=None, element=None, power=None)
+        st = hv.get_status(100.)
+        self.assertFalse(st['linked'])
+        self.assertEqual(st['temperature'], 21.5)
+        self.assertEqual(st['power'], 0.)
+        hv.set_temp(50.)
+        self.assertEqual(hv.get_status(100.)['power'], 1.)
+
     def test_no_sensor_keeps_last_air(self):
         config = FakeConfig(self.printer, 'heater_iheater_remote chamber',
                             {'remote_token': '7K3P9QXM'})
