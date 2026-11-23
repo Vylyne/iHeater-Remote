@@ -820,7 +820,7 @@ void fillUpdateJson(JsonObject out) {
   if (fs.phase == policy::FlashPhase::Finished)
     out["message"] = policy::flashOutcomeMessage(fs.outcome);
   out["failedPhase"] = policy::flashPhaseName(fs.failedPhase);
-  out["detail"] = fs.detail;  // copied into the document
+  out["detail"] = String(fs.detail);  // a const char array would be stored by pointer; fs dies on return
   out["progress"] = static_cast<int>(fs.progressPermille / 10);
   setTempC(out, "heaterC", fs.heaterT10);
   out["entryUnconfirmed"] = fs.entryUnconfirmed;
@@ -1215,6 +1215,10 @@ bool applySetupForm(String &error) {
 }
 
 void handleIntegrationPost() {
+  if (s_uart.flashBusy()) {
+    s_server.send(409, "application/json", String("{\"error\":\"") + kUpdateRunningMessage + "\"}");
+    return;
+  }
   String error;
   if (!applySetupForm(error)) {
     s_server.send(400, "application/json", String("{\"error\":\"") + error + "\"}");
