@@ -1,4 +1,7 @@
 #include "standalone/StandaloneApp.h"
+#include "standalone/AuthPages.h"
+#include "standalone/AuthScript.h"
+#include "standalone/AuthStore.h"
 #include "standalone/MoonrakerLink.h"
 #include "standalone/RemoteDashboard.h"
 #include "standalone/RemoteSettings.h"
@@ -14,6 +17,7 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
+#include <esp_system.h>
 #include <string.h>
 
 #if __has_include("secrets.h")
@@ -21,6 +25,9 @@
 #endif
 
 #include "controller/RmtOutputAdapter.h"
+#include <AuthCrypto.h>
+#include <AuthPolicy.h>
+#include <AuthState.h>
 #include <FirmwareImage.h>
 #include <KlipperOverride.h>
 #include <RemotePolicy.h>
@@ -103,6 +110,12 @@ OutputKind s_outputKind = OutputKind::Pulse;
 RemoteSettings s_settings;
 policy::KlipperOverride s_override;
 MoonrakerLink s_moonraker;
+// The web login. These tables aren't locked: WebServer handlers run in loop().
+AuthSettings s_auth;
+policy::SessionTable s_sessions;
+policy::NonceTable s_nonces;
+policy::LoginLockout s_lockout;
+policy::RunningHours s_hours;
 
 uint8_t s_mode = 0;
 bool s_apMode = false;
@@ -1566,6 +1579,396 @@ void updateIheaterImageHousekeeping() {
   s_wasBusy = busy;
 }
 
+// ---- Web login: the request gate, the login endpoints and the pages ----
+
+constexpr const char *kSessionCookie = "iheater_session";
+constexpr const char *kSessionCookieAttrs = "; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000";
+
+uint32_t ipValue(const IPAddress &ip) {
+  return (static_cast<uint32_t>(ip[0]) << 24) | (static_cast<uint32_t>(ip[1]) << 16) |
+         (static_cast<uint32_t>(ip[2]) << 8) | static_cast<uint32_t>(ip[3]);
+}
+
+String ipText(uint32_t ip) {
+  char text[16];
+  policy::formatIpv4(ip, text);
+  return String(text);
+}
+
+struct RequestAuth {
+  policy::RequestClass cls;
+  policy::AuthVerdict verdict;
+  policy::AuthMethod method;
+  bool viaHttpsProxy;
+  uint32_t client;
+  String user;
+};
+
+// The request the gate last let through; the login handlers read it.
+RequestAuth s_req{};
+// The upload routes decide once, at UPLOAD_FILE_START. s_uploadRoute names the
+// route that computed s_uploadAuth, and is null when no upload is pending.
+RequestAuth s_uploadAuth{};
+const char *s_uploadRoute = nullptr;
+
+RequestAuth checkRequest() {
+  RequestAuth a{};
+  const uint32_t peer = ipValue(s_server.client().remoteIP());
+  // Task 7 passes the Moonraker address as the automatic entry.
+  const bool trusted = policy::isTrustedProxy(peer, s_auth.proxies, s_auth.proxyCount, 0);
+
+  // Forwarded values count only from a trusted peer.
+  String fwdProto, fwdHost, fwdFor;
+  if (trusted) {
+    fwdProto = s_server.header("X-Forwarded-Proto");
+    fwdHost = s_server.header("X-Forwarded-Host");
+    fwdFor = s_server.header("X-Forwarded-For");
+  }
+  a.client = policy::clientAddress(peer, trusted, fwdFor.c_str());
+  a.viaHttpsProxy = policy::viaHttpsProxy(trusted, fwdProto.c_str());
+
+  const String uri = s_server.uri();
+  const bool isPost = s_server.method() == HTTP_POST;
+  a.cls = policy::classifyRequest(uri.c_str(), isPost, s_auth.passwordSet);
+
+  bool cookieValid = false;
+  uint8_t token[policy::kSessionTokenLen];
+  const String cookie = s_server.header("Cookie");
+  if (policy::sessionTokenFromCookie(cookie.c_str(), token)) {
+    const policy::SessionTable::Check check = s_sessions.check(token, s_hours.hours());
+    if (check == policy::SessionTable::Check::Valid)
+      cookieValid = true;
+    else if (check == policy::SessionTable::Check::Expired)
+      saveSessions(s_sessions);
+  }
+
+  String user;
+  bool headerOk = false;
+  if (trusted && s_auth.headerLogin) {
+    user = s_server.header(s_auth.userHeader);
+    user.trim();
+    headerOk = policy::headerLoginOk(s_auth.headerLogin, trusted, user.c_str(),
+                                     s_auth.allowedUsers.c_str(),
+                                     s_server.header(s_auth.groupsHeader).c_str(),
+                                     s_auth.allowedGroups.c_str());
+  }
+  a.method = policy::authMethod(cookieValid, headerOk);
+  if (a.method == policy::AuthMethod::Header) {
+    a.user = user;
+    static String s_lastHeaderUser;
+    if (user != s_lastHeaderUser) {
+      s_lastHeaderUser = user;
+      Serial.printf("[AUTH] header login user=%s client=%s\n", user.c_str(),
+                    ipText(a.client).c_str());
+    }
+  }
+
+  policy::RequestFacts facts{};
+  facts.cls = a.cls;
+  facts.apMode = s_apMode;
+  facts.proxyOnly = s_auth.proxyOnly;
+  facts.viaHttpsProxy = a.viaHttpsProxy;
+  facts.loggedIn = a.method != policy::AuthMethod::None;
+  facts.originOk = a.cls == policy::RequestClass::Public ||
+                   policy::originAllowed(s_server.header("Origin").c_str(),
+                                         s_server.header("Referer").c_str(),
+                                         s_server.hostHeader().c_str(), trusted,
+                                         fwdProto.c_str(), fwdHost.c_str());
+  a.verdict = policy::decideRequest(facts);
+  return a;
+}
+
+// Keeps control characters out of the Serial log.
+String logSafe(const String &raw) {
+  String out = raw;
+  for (size_t i = 0; i < out.length(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(out[i]);
+    if (c < 0x20 || c == 0x7F)
+      out.setCharAt(i, '?');
+  }
+  return out;
+}
+
+// Everything except letters, digits, "-_.~" and "/" becomes %XX.
+String percentEncode(const String &raw) {
+  static const char kHex[] = "0123456789ABCDEF";
+  String out;
+  for (size_t i = 0; i < raw.length(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(raw[i]);
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+        c == '-' || c == '_' || c == '.' || c == '~' || c == '/') {
+      out += static_cast<char>(c);
+    } else {
+      out += '%';
+      out += kHex[c >> 4];
+      out += kHex[c & 15];
+    }
+  }
+  return out;
+}
+
+void sendAuthJson(int code, const String &body) {
+  s_server.sendHeader("Cache-Control", "no-store");
+  s_server.send(code, "application/json", body);
+}
+
+void sendAuthError(int code, const char *message) {
+  StaticJsonDocument<192> doc;
+  doc["error"] = message;
+  String out;
+  serializeJson(doc, out);
+  sendAuthJson(code, out);
+}
+
+void sendRefusal(const RequestAuth &a) {
+  const char *why = "login";
+  if (a.verdict == policy::AuthVerdict::BadOrigin)
+    why = "origin";
+  else if (a.verdict == policy::AuthVerdict::ProxyOnly)
+    why = "proxy-only";
+  const String uri = s_server.uri();
+  Serial.printf("[AUTH] refused %s %s: %s client=%s\n",
+                s_server.method() == HTTP_POST ? "POST" : "GET", logSafe(uri).c_str(), why,
+                ipText(a.client).c_str());
+
+  const bool page = a.cls == policy::RequestClass::ProtectedPage;
+  if (a.verdict == policy::AuthVerdict::NeedLogin) {
+    if (page) {
+      s_server.sendHeader("Location", String("/login?next=") + percentEncode(uri));
+      s_server.sendHeader("Cache-Control", "no-store");
+      s_server.send(302, "text/plain", "");
+    } else {
+      // The text is fixed, so the body is written out whole.
+      sendAuthJson(401, String("{\"error\":\"") +
+                            (s_auth.passwordSet ? "Log in first." : "Set a password first.") +
+                            "\",\"login\":\"/login\"}");
+    }
+    return;
+  }
+  const char *message = a.verdict == policy::AuthVerdict::ProxyOnly
+                            ? "This Remote only takes changes through its HTTPS proxy."
+                            : "Refused: the request did not come from this Remote's page.";
+  if (a.verdict == policy::AuthVerdict::ProxyOnly && page) {
+    s_server.sendHeader("Cache-Control", "no-store");
+    s_server.send(403, "text/html",
+                  String("<!doctype html><title>Refused</title><p>") + message + "</p>");
+    return;
+  }
+  sendAuthError(403, message);
+}
+
+// Every route goes through this, public ones included: the policy classifies
+// by path, so a route added later is protected by default.
+std::function<void()> guarded(std::function<void()> handler) {
+  return [handler]() {
+    const RequestAuth a = checkRequest();
+    if (a.verdict == policy::AuthVerdict::Allow) {
+      s_req = a;
+      handler();
+    } else {
+      sendRefusal(a);
+    }
+  };
+}
+
+// The upload function runs only while the verdict taken at UPLOAD_FILE_START
+// is Allow, for every upload status, so a refused upload never reaches
+// Update.begin, applyMode or the image buffer.
+std::function<void()> guardedUpload(const char *route, std::function<void()> upload) {
+  return [route, upload]() {
+    if (s_server.upload().status == UPLOAD_FILE_START) {
+      s_uploadAuth = checkRequest();
+      s_uploadRoute = route;
+    }
+    if (s_uploadRoute == route && s_uploadAuth.verdict == policy::AuthVerdict::Allow)
+      upload();
+    if (s_server.upload().status == UPLOAD_FILE_ABORTED && s_uploadRoute == route)
+      s_uploadRoute = nullptr;  // no final handler follows an abort
+  };
+}
+
+// The final handler uses the verdict the upload took and never recomputes it,
+// so a stale s_otaOk from an earlier upload can't restart the Remote. A
+// request that carried no upload at all (no START) has no verdict yet and is
+// checked here, once.
+std::function<void()> guardedAfterUpload(const char *route, std::function<void()> handler) {
+  return [route, handler]() {
+    if (s_uploadRoute != route)
+      s_uploadAuth = checkRequest();
+    const RequestAuth a = s_uploadAuth;
+    s_uploadRoute = nullptr;
+    if (a.verdict == policy::AuthVerdict::Allow) {
+      s_req = a;
+      handler();
+    } else {
+      sendRefusal(a);
+    }
+  };
+}
+
+// 16 random bytes in a cookie that lasts for 30 real days; the table keeps
+// only the hash. Secure is added when the request came through the HTTPS proxy.
+void startSession(const RequestAuth &a) {
+  uint8_t token[policy::kSessionTokenLen];
+  esp_fill_random(token, sizeof(token));
+  s_sessions.add(token, s_hours.hours());
+  if (!saveSessions(s_sessions))
+    Serial.println("[AUTH] could not save the sessions; this one ends at a restart");
+  char hex[policy::kSessionTokenLen * 2 + 1];
+  policy::toHex(token, sizeof(token), hex);
+  String cookie = String(kSessionCookie) + "=" + hex + kSessionCookieAttrs;
+  if (a.viaHttpsProxy)
+    cookie += "; Secure";
+  s_server.sendHeader("Set-Cookie", cookie);
+}
+
+void handleLoginPage() {
+  s_server.sendHeader("Cache-Control", "no-store");
+  s_server.send_P(200, "text/html", kLoginHtml);
+}
+
+void handleAuthScript() { s_server.send_P(200, "application/javascript", kAuthJs); }
+
+void handleAuthChallenge() {
+  uint8_t nonce[policy::kNonceLen];
+  uint8_t newSalt[policy::kSaltLen];
+  esp_fill_random(nonce, sizeof(nonce));
+  esp_fill_random(newSalt, sizeof(newSalt));
+  s_nonces.add(nonce, millis());
+
+  char nonceHex[policy::kNonceLen * 2 + 1];
+  char newSaltHex[policy::kSaltLen * 2 + 1];
+  char saltHex[policy::kSaltLen * 2 + 1];
+  policy::toHex(nonce, sizeof(nonce), nonceHex);
+  policy::toHex(newSalt, sizeof(newSalt), newSaltHex);
+
+  StaticJsonDocument<512> doc;
+  doc["passwordSet"] = s_auth.passwordSet;
+  if (s_auth.passwordSet) {
+    policy::toHex(s_auth.salt, sizeof(s_auth.salt), saltHex);
+    doc["salt"] = saltHex;
+    doc["iterations"] = s_auth.iterations;
+  }
+  doc["nonce"] = nonceHex;
+  doc["newSalt"] = newSaltHex;
+  doc["newIterations"] = policy::kDefaultIterations;
+  String out;
+  serializeJson(doc, out);
+  sendAuthJson(200, out);
+}
+
+void handleAuthLogin() {
+  const uint32_t now = millis();
+  const uint32_t client = s_req.client;
+
+  // A locked client is refused before anything else is touched.
+  const uint32_t waitMs = s_lockout.retryAfterMs(client, now);
+  if (waitMs != 0) {
+    const uint32_t waitS = (waitMs + 999) / 1000;
+    StaticJsonDocument<192> doc;
+    doc["error"] = String("Too many tries. Wait ") + waitS + " s and try again.";
+    doc["retryAfterS"] = waitS;
+    String out;
+    serializeJson(doc, out);
+    sendAuthJson(429, out);
+    return;
+  }
+
+  uint8_t nonce[policy::kNonceLen];
+  uint8_t proof[policy::kSha256Len];
+  if (!policy::fromHex(s_server.arg("nonce").c_str(), nonce, sizeof(nonce)) ||
+      !policy::fromHex(s_server.arg("proof").c_str(), proof, sizeof(proof))) {
+    sendAuthError(400, "Bad request.");
+    return;
+  }
+  if (!s_auth.passwordSet) {
+    sendAuthError(400, "No password is set yet.");
+    return;
+  }
+  // The nonce is burned whether or not the proof is right.
+  if (!s_nonces.take(nonce, now)) {
+    sendAuthError(401, "The login expired. Try again.");
+    return;
+  }
+  if (!policy::proofMatches(s_auth.verifier, nonce, proof)) {
+    s_lockout.failure(client, now);
+    Serial.printf("[AUTH] login failed client=%s (%u/%u)\n", ipText(client).c_str(),
+                  static_cast<unsigned>(s_lockout.failureCount(client)),
+                  static_cast<unsigned>(policy::kLockoutFailures));
+    if (s_lockout.retryAfterMs(client, now) != 0)
+      Serial.printf("[AUTH] locked out client=%s for %u s\n", ipText(client).c_str(),
+                    static_cast<unsigned>(policy::kLockoutMs / 1000));
+    sendAuthError(401, "Wrong password.");
+    return;
+  }
+  s_lockout.success(client);
+  startSession(s_req);
+  Serial.printf("[AUTH] login ok client=%s\n", ipText(client).c_str());
+  sendAuthJson(200, "{\"ok\":true}");
+}
+
+// Setting the first password (no login needed, once) and changing it (needs a
+// login): the gate has already told the two apart. Either way every session
+// ends and this request gets a new one.
+void handleAuthPassword() {
+  uint8_t salt[policy::kSaltLen];
+  uint8_t verifier[policy::kVerifierLen];
+  const String iterText = s_server.arg("iterations");
+  bool digits = iterText.length() > 0 && iterText.length() <= 6;
+  for (size_t i = 0; digits && i < iterText.length(); ++i)
+    digits = iterText[i] >= '0' && iterText[i] <= '9';
+  const uint32_t iterations = digits ? static_cast<uint32_t>(iterText.toInt()) : 0;
+  if (!policy::fromHex(s_server.arg("salt").c_str(), salt, sizeof(salt)) ||
+      !policy::fromHex(s_server.arg("verifier").c_str(), verifier, sizeof(verifier)) ||
+      !digits || !policy::validIterations(iterations)) {
+    sendAuthError(400, "Bad request.");
+    return;
+  }
+
+  const bool changing = s_auth.passwordSet;
+  AuthSettings next = s_auth;
+  memcpy(next.salt, salt, sizeof(salt));
+  memcpy(next.verifier, verifier, sizeof(verifier));
+  next.iterations = iterations;
+  next.passwordSet = true;
+  if (!savePassword(next)) {
+    sendAuthError(500, "The password could not be saved.");
+    return;
+  }
+  s_auth = next;
+  s_sessions.clear();
+  s_nonces.clear();
+  startSession(s_req);  // adds the new session and saves the table
+  Serial.println(changing ? "[AUTH] password changed, sessions ended" : "[AUTH] password set");
+  sendAuthJson(200, "{\"ok\":true}");
+}
+
+void handleAuthLogout() {
+  uint8_t token[policy::kSessionTokenLen];
+  const String cookie = s_server.header("Cookie");
+  if (policy::sessionTokenFromCookie(cookie.c_str(), token) && s_sessions.remove(token))
+    saveSessions(s_sessions);
+  Serial.printf("[AUTH] logout client=%s\n", ipText(s_req.client).c_str());
+  s_server.sendHeader("Set-Cookie", String(kSessionCookie) + "=; Path=/; Max-Age=0");
+  sendAuthJson(200, "{\"ok\":true}");
+}
+
+void handleAuthMe() {
+  const policy::AuthMethod method = s_req.method;
+  StaticJsonDocument<384> doc;
+  doc["loggedIn"] = method != policy::AuthMethod::None;
+  doc["method"] = method == policy::AuthMethod::Password ? "password"
+                  : method == policy::AuthMethod::Header ? "header"
+                                                         : "none";
+  doc["user"] = s_req.user;
+  doc["passwordSet"] = s_auth.passwordSet;
+  // softAP() is called without a password unless it has at least 8 characters.
+  doc["apOpen"] = s_apMode && strlen(IHEATER_AP_PASSWORD) < 8;
+  String out;
+  serializeJson(doc, out);
+  sendAuthJson(200, out);
+}
+
 void handleRoot() {
   if (captiveRedirectIfNeeded())
     return;
@@ -1575,33 +1978,43 @@ void handleRoot() {
 
 void configureRoutes() {
   s_server.serveStatic("/logo.png", LittleFS, "/logo.png");
-  s_server.on("/", HTTP_GET, handleRoot);
-  s_server.on("/setup", HTTP_GET, handleSetupPage);
-  s_server.on("/fw", HTTP_GET, handleFirmwarePage);
-  s_server.on("/api/mode", HTTP_POST, handleModePost);
-  s_server.on("/api/override/end", HTTP_POST, handleOverrideEnd);
-  s_server.on("/api/timer", HTTP_POST, handleTimerPost);
-  s_server.on("/api/integration", HTTP_POST, handleIntegrationPost);
-  s_server.on("/api/setup", HTTP_POST, handleSetupPost);
-  s_server.on("/api/wifi", HTTP_POST, handleWifiPost);
-  s_server.on("/api/wifi/clear", HTTP_POST, handleWifiClearPost);
-  s_server.on("/api/ota", HTTP_POST, handleOtaPost, handleOtaUpload);
-  s_server.on("/api/iheater/image", HTTP_POST, handleIheaterImagePost, handleIheaterImageUpload);
-  s_server.on("/api/iheater/update", HTTP_POST, []() { handleIheaterStart(false); });
-  s_server.on("/api/iheater/retry", HTTP_POST, []() { handleIheaterStart(true); });
-  s_server.on("/api/iheater/cancel", HTTP_POST, handleIheaterCancel);
-  s_server.on("/api/iheater/image/discard", HTTP_POST, handleIheaterDiscard);
-  s_server.on("/api/off", HTTP_POST, []() {
+  s_server.on("/", HTTP_GET, guarded(handleRoot));
+  s_server.on("/login", HTTP_GET, guarded(handleLoginPage));
+  s_server.on("/auth.js", HTTP_GET, guarded(handleAuthScript));
+  s_server.on("/api/auth/challenge", HTTP_GET, guarded(handleAuthChallenge));
+  s_server.on("/api/auth/me", HTTP_GET, guarded(handleAuthMe));
+  s_server.on("/api/auth/login", HTTP_POST, guarded(handleAuthLogin));
+  s_server.on("/api/auth/password", HTTP_POST, guarded(handleAuthPassword));
+  s_server.on("/api/auth/logout", HTTP_POST, guarded(handleAuthLogout));
+  s_server.on("/setup", HTTP_GET, guarded(handleSetupPage));
+  s_server.on("/fw", HTTP_GET, guarded(handleFirmwarePage));
+  s_server.on("/api/mode", HTTP_POST, guarded(handleModePost));
+  s_server.on("/api/override/end", HTTP_POST, guarded(handleOverrideEnd));
+  s_server.on("/api/timer", HTTP_POST, guarded(handleTimerPost));
+  s_server.on("/api/integration", HTTP_POST, guarded(handleIntegrationPost));
+  s_server.on("/api/setup", HTTP_POST, guarded(handleSetupPost));
+  s_server.on("/api/wifi", HTTP_POST, guarded(handleWifiPost));
+  s_server.on("/api/wifi/clear", HTTP_POST, guarded(handleWifiClearPost));
+  s_server.on("/api/ota", HTTP_POST, guardedAfterUpload("ota", handleOtaPost),
+              guardedUpload("ota", handleOtaUpload));
+  s_server.on("/api/iheater/image", HTTP_POST,
+              guardedAfterUpload("iheater-image", handleIheaterImagePost),
+              guardedUpload("iheater-image", handleIheaterImageUpload));
+  s_server.on("/api/iheater/update", HTTP_POST, guarded([]() { handleIheaterStart(false); }));
+  s_server.on("/api/iheater/retry", HTTP_POST, guarded([]() { handleIheaterStart(true); }));
+  s_server.on("/api/iheater/cancel", HTTP_POST, guarded(handleIheaterCancel));
+  s_server.on("/api/iheater/image/discard", HTTP_POST, guarded(handleIheaterDiscard));
+  s_server.on("/api/off", HTTP_POST, guarded([]() {
     applyMode(0, "web");
     sendActionStatus();
-  });
-  s_server.on("/generate_204", HTTP_GET, handleRoot);
-  s_server.on("/gen_204", HTTP_GET, handleRoot);
-  s_server.on("/hotspot-detect.html", HTTP_GET, handleRoot);
-  s_server.on("/library/test/success.html", HTTP_GET, handleRoot);
-  s_server.on("/ncsi.txt", HTTP_GET, handleRoot);
-  s_server.on("/connecttest.txt", HTTP_GET, handleRoot);
-  s_server.on("/redirect", HTTP_GET, handleRoot);
+  }));
+  s_server.on("/generate_204", HTTP_GET, guarded(handleRoot));
+  s_server.on("/gen_204", HTTP_GET, guarded(handleRoot));
+  s_server.on("/hotspot-detect.html", HTTP_GET, guarded(handleRoot));
+  s_server.on("/library/test/success.html", HTTP_GET, guarded(handleRoot));
+  s_server.on("/ncsi.txt", HTTP_GET, guarded(handleRoot));
+  s_server.on("/connecttest.txt", HTTP_GET, guarded(handleRoot));
+  s_server.on("/redirect", HTTP_GET, guarded(handleRoot));
   s_server.onNotFound([]() {
     if (s_apMode) {
       handleRoot();
@@ -1874,11 +2287,17 @@ void setup() {
   // After Wi-Fi: a first-boot pairing token needs esp_random() with RF entropy.
   loadRemoteSettings(s_settings);
   bootDecision();
+  {
+    uint32_t storedHours = 0;
+    loadAuth(s_auth, s_sessions, storedHours);
+    s_hours.begin(storedHours, millis());
+  }
   s_moonraker.onTarget(onKlipperTarget);
   s_moonraker.onUnpaired([]() { s_override.reset(); });
   if (klipperSource())
     s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
   configureRoutes();
+  s_server.collectAllHeaders();  // the login reads Origin, Cookie, X-Forwarded-* and the proxy's user headers
   s_server.begin();
   s_statusSocket.begin();
   s_statusSocket.onEvent(onStatusSocketEvent);
@@ -1890,6 +2309,8 @@ void loop() {
   if (s_apMode)
     s_dnsServer.processNextRequest();
   s_server.handleClient();
+  if (s_hours.tick(millis()))
+    saveRunningHours(s_hours.hours());
   s_statusSocket.loop();
   updateButton();
   updateHeatTimer();

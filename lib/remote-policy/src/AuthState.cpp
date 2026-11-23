@@ -104,6 +104,13 @@ void LoginLockout::failure(uint32_t client, uint32_t nowMs) {
   target->lastFailureMs = nowMs;
 }
 
+uint8_t LoginLockout::failureCount(uint32_t client) const {
+  for (const Entry &e : entries_) {
+    if (e.used && e.client == client) return e.failures;
+  }
+  return 0;
+}
+
 void LoginLockout::success(uint32_t client) {
   for (Entry &e : entries_) {
     if (e.used && e.client == client) e = Entry{};

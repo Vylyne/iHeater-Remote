@@ -55,6 +55,9 @@ class LoginLockout {
  public:
   uint32_t retryAfterMs(uint32_t client, uint32_t nowMs) const;  // 0: may try now
   void failure(uint32_t client, uint32_t nowMs);
+  // The client's failures in a row, for the log line: read it right after
+  // failure(), when it is the count that call produced. 0 for an unknown client.
+  uint8_t failureCount(uint32_t client) const;
   void success(uint32_t client);
   void clear();
 

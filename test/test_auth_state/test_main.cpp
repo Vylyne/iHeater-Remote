@@ -108,6 +108,20 @@ void test_lockout_count_restarts() {
   TEST_ASSERT_TRUE(l.retryAfterMs(7, 31001) > 0);
 }
 
+void test_lockout_failure_count() {
+  LoginLockout l;
+  TEST_ASSERT_EQUAL_UINT8(0, l.failureCount(7));
+  for (int i = 1; i <= 5; i++) {
+    l.failure(7, 1000);
+    TEST_ASSERT_EQUAL_UINT8(i, l.failureCount(7));
+  }
+  TEST_ASSERT_EQUAL_UINT8(0, l.failureCount(8));
+  l.failure(7, 31000);  // the lockout ended: the count starts again
+  TEST_ASSERT_EQUAL_UINT8(1, l.failureCount(7));
+  l.success(7);
+  TEST_ASSERT_EQUAL_UINT8(0, l.failureCount(7));
+}
+
 void test_lockout_success_clears() {
   LoginLockout l;
   for (int i = 0; i < 4; i++) l.failure(7, 100);
@@ -293,6 +307,7 @@ int main(int, char **) {
   RUN_TEST(test_nonce_wraps);
   RUN_TEST(test_lockout_after_five);
   RUN_TEST(test_lockout_count_restarts);
+  RUN_TEST(test_lockout_failure_count);
   RUN_TEST(test_lockout_success_clears);
   RUN_TEST(test_lockout_per_client);
   RUN_TEST(test_lockout_table_full_drops_oldest);
