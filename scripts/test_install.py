@@ -118,6 +118,8 @@ class Fixture:
         self.printer_cfg = self.config_dir / "printer.cfg"
         self.moonraker_conf = self.config_dir / "moonraker.conf"
         self.nginx = self.root / "nginx"
+        self.sbin = self.root / "sbin"  # empty, so no real /usr/sbin/nginx
+        self.sbin.mkdir()
         self.extra_env = {}
 
         self.extras.mkdir(parents=True)
@@ -151,6 +153,7 @@ class Fixture:
             "NO_COLOR": "1",
             "STUB_LOG": self.log.as_posix(),
             "NGINX_DIR": self.nginx.as_posix(),
+            "NGINX_SBIN": self.sbin.as_posix(),
         })
         env.update(self.extra_env)
         if state is not None:
@@ -433,6 +436,17 @@ class NginxStepTests(ScriptTestBase):
         self.assertNotIn("nginx", result.stdout + result.stderr)
         self.assertFalse(self.site.exists())
         self.assertFalse(os.path.lexists(str(self.link)))
+
+    def test_nginx_found_in_sbin_off_path(self):
+        (self.fx.bin / "nginx").unlink()
+        stub = self.fx.sbin / "nginx"
+        write_lf(stub, STUBS["nginx"])
+        stub.chmod(0o755)
+        result = self.run_ok("install.sh", self.ANSWERS)
+        self.assertIn("HTTPS nginx site", result.stderr)
+        self.assertIn("heater.example.com", read_text(self.site))
+        self.assertTrue(os.path.lexists(str(self.link)))
+        self.assertEqual(self.fx.log_text(), "nginx -t\nreload nginx\n")
 
     def test_nginx_declined(self):
         self.run_ok("install.sh", "n\n")
