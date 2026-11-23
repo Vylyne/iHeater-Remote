@@ -501,6 +501,8 @@ const char *uartLinkName(policy::LinkStatus status) {
       return "restarting";
     case policy::LinkStatus::NoReply:
       return "noreply";
+    case policy::LinkStatus::Updating:
+      return "updating";
   }
   return "unknown";
 }

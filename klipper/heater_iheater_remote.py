@@ -21,7 +21,8 @@ import math
 import re
 
 _TOKEN_RE = re.compile(r'^[0-9A-HJKMNP-TV-Z]{8}$')
-_LINKS = ('up', 'waiting', 'restarting', 'no-reply')
+_LINKS = ('up', 'waiting', 'restarting', 'no-reply',
+          'updating')
 _REPORT_PATH = 'heater_iheater_remote/report'
 _ROUTER_NAME = 'heater_iheater_remote_router'
 _SENSOR_TYPE = 'iheater_remote'

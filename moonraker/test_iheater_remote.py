@@ -169,6 +169,13 @@ class IheaterRemoteTest(unittest.TestCase):
         self.assertIsNone(sent['element'])
         self.assertIsNone(sent['power'])
 
+    def test_updating_link_accepted(self):
+        comp = self.make()
+        args = good()
+        args['link'] = 'updating'
+        self.assertEqual(self.call(comp, args), {'ok': True})
+        self.assertEqual(self.conn.requests[0].args['link'], 'updating')
+
     def test_klippy_not_connected(self):
         comp = self.make(connected=False)
         with self.assertRaises(ServerError) as cm:
