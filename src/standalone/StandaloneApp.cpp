@@ -59,7 +59,6 @@ constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kRestartDelayMs = 800;
 constexpr uint32_t kButtonDebounceMs = 30;
 constexpr uint32_t kMultiClickWindowMs = 650;
-constexpr uint32_t kLongPressMs = 2000;
 constexpr uint32_t kLedOnMs = 80;
 constexpr uint32_t kLedOffMs = 120;
 constexpr uint32_t kLedPauseMs = 1600;
@@ -180,7 +179,8 @@ bool s_klipperRecoveryPending = false;
 
 bool s_buttonStableDown = false;
 bool s_buttonLastRawDown = false;
-bool s_longPressHandled = false;
+bool s_longPressHandled = false;  // heat-off step done for this press
+bool s_authResetDone = false;
 uint8_t s_pendingClicks = 0;
 uint32_t s_buttonLastRawChangeMs = 0;
 uint32_t s_buttonDownAtMs = 0;
@@ -189,6 +189,8 @@ uint32_t s_clickDeadlineMs = 0;
 bool s_ledOn = false;
 uint8_t s_ledFlashesDone = 0;
 uint32_t s_ledNextAtMs = 0;
+bool s_ledSolid = false;
+uint32_t s_ledSolidUntilMs = 0;
 
 void applyTxPower(const char *context) {
   const bool ok = WiFi.setTxPower(static_cast<wifi_power_t>(s_txPower));
@@ -2243,6 +2245,7 @@ void updateButton() {
     if (s_buttonStableDown) {
       s_buttonDownAtMs = now;
       s_longPressHandled = false;
+      s_authResetDone = false;
     } else if (!s_longPressHandled) {
       if (s_pendingClicks < 255)
         ++s_pendingClicks;
@@ -2250,11 +2253,23 @@ void updateButton() {
     }
   }
 
-  if (s_buttonStableDown && !s_longPressHandled &&
-      (uint32_t)(now - s_buttonDownAtMs) >= kLongPressMs) {
-    s_pendingClicks = 0;
-    s_longPressHandled = true;
-    applyMode(0, "button:long");
+  if (s_buttonStableDown) {
+    const policy::HoldStep step = policy::holdStep(
+        (uint32_t)(now - s_buttonDownAtMs), s_longPressHandled, s_authResetDone);
+    if (step == policy::HoldStep::HeatOff) {
+      s_pendingClicks = 0;
+      s_longPressHandled = true;
+      applyMode(0, "button:long");
+    } else if (step == policy::HoldStep::AuthReset) {
+      s_authResetDone = true;
+      if (!resetAuth(s_auth, s_sessions))
+        Serial.println("[AUTH] BOOT reset: could not clear the saved login; it will return at a restart");
+      s_nonces.clear();
+      s_lockout.clear();
+      Serial.println("[AUTH] BOOT reset: password, sessions, header login and proxy-only cleared");
+      s_ledSolid = true;
+      s_ledSolidUntilMs = now + 3000;
+    }
   }
 
   if (s_pendingClicks && !s_buttonStableDown &&
@@ -2270,6 +2285,15 @@ void updateLed() {
     return;
 
   const uint32_t now = millis();
+  if (s_ledSolid) {
+    if ((int32_t)(s_ledSolidUntilMs - now) > 0) {
+      if (!s_ledOn)
+        writeLed(true);
+      return;
+    }
+    s_ledSolid = false;
+    resetLedPattern();
+  }
   if (s_mode == 0) {
     if (s_ledOn)
       writeLed(false);

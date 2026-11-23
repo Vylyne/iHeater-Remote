@@ -231,4 +231,10 @@ bool setupSaveStopsHeat(bool uartOutput, bool wasKlipper, bool nowKlipper,
   return uartOutput ? wasKlipper : true;
 }
 
+HoldStep holdStep(uint32_t heldMs, bool heatOffDone, bool resetDone) {
+  if (!heatOffDone) return heldMs >= kHeatOffHoldMs ? HoldStep::HeatOff : HoldStep::None;
+  if (!resetDone) return heldMs >= kAuthResetHoldMs ? HoldStep::AuthReset : HoldStep::None;
+  return HoldStep::None;
+}
+
 }  // namespace iheaterlink::policy

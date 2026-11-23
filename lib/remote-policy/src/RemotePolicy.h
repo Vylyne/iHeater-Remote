@@ -168,4 +168,13 @@ uint32_t linkLossBaselineMs(uint32_t carriedMs);
 bool setupSaveStopsHeat(bool uartOutput, bool wasKlipper, bool nowKlipper,
                         bool bindingChanged, bool outputChanged);
 
+// --- BOOT button hold ---------------------------------------------------------
+constexpr uint32_t kHeatOffHoldMs = 2000;
+constexpr uint32_t kAuthResetHoldMs = 10000;
+enum class HoldStep : uint8_t { None, HeatOff, AuthReset };
+
+// One step per call, in order: heat off first even if a stalled loop sees the
+// hold only at 10 s.
+HoldStep holdStep(uint32_t heldMs, bool heatOffDone, bool resetDone);
+
 }  // namespace iheaterlink::policy

@@ -661,6 +661,21 @@ void test_pulse_frame_refuses_bad_width() {
   TEST_ASSERT_EQUAL_UINT32(0, buildPulseFrame(10, PulseTiming{120000, 32768, 2000}, out, 128));
 }
 
+void test_hold_step_heat_off() {
+  TEST_ASSERT_EQUAL(HoldStep::None, holdStep(1999, false, false));
+  TEST_ASSERT_EQUAL(HoldStep::HeatOff, holdStep(2000, false, false));
+}
+
+void test_hold_step_auth_reset() {
+  TEST_ASSERT_EQUAL(HoldStep::None, holdStep(9999, true, false));
+  TEST_ASSERT_EQUAL(HoldStep::AuthReset, holdStep(10000, true, false));
+  TEST_ASSERT_EQUAL(HoldStep::None, holdStep(15000, true, true));
+}
+
+void test_hold_step_heat_off_first() {
+  TEST_ASSERT_EQUAL(HoldStep::HeatOff, holdStep(12000, false, false));
+}
+
 int main() {
   UNITY_BEGIN();
   RUN_TEST(test_token_normalize);
@@ -736,5 +751,8 @@ int main() {
   RUN_TEST(test_pulse_frame_no_zero_duration);
   RUN_TEST(test_pulse_frame_refuses_when_too_small);
   RUN_TEST(test_pulse_frame_refuses_bad_width);
+  RUN_TEST(test_hold_step_heat_off);
+  RUN_TEST(test_hold_step_auth_reset);
+  RUN_TEST(test_hold_step_heat_off_first);
   return UNITY_END();
 }
