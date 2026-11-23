@@ -372,6 +372,7 @@ bool romProbeDue(uint32_t nowMs, uint32_t lastOkMs, uint32_t lastProbeMs) {
 bool heatWanted(bool targetMode, float targetC) { return targetMode && targetC > 0.0f; }
 
 FlashStartDecision decideFlashStart(const FlashStartInputs &in, bool retry) {
+  if (in.restartPending) return {FlashRefusal::RestartPending, FlashStart::Normal};
   if (!in.uartOutput) return {FlashRefusal::NotUart, FlashStart::Normal};
   if (in.jobRunning) return {FlashRefusal::JobRunning, FlashStart::Normal};
   if (!in.imageOk) return {FlashRefusal::NoImage, FlashStart::Normal};
@@ -394,6 +395,7 @@ const char *flashRefusalMessage(FlashRefusal r) {
     case FlashRefusal::JobRunning: return "An iHeater update is already running.";
     case FlashRefusal::LinkDown: return "The iHeater isn't answering, and its bootloader wasn't detected.";
     case FlashRefusal::NothingToRetry: return "There's no failed update to retry.";
+    case FlashRefusal::RestartPending: return "The Remote is about to restart. Try again in a few seconds.";
   }
   return "";
 }

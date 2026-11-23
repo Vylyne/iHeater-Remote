@@ -541,7 +541,7 @@ void test_decide_flash_start() {
   in.romDetected = false;
   TEST_ASSERT_TRUE(decideFlashStart(in, false).refusal == FlashRefusal::LinkDown);
 
-  // Refusal order: NotUart, JobRunning, NoImage, HeatWanted, LinkDown.
+  // Refusal order: (RestartPending first), NotUart, JobRunning, NoImage, HeatWanted, LinkDown.
   FlashStartInputs all;  // everything wrong
   all.jobRunning = true;
   all.heatWanted = true;
@@ -571,6 +571,39 @@ void test_decide_flash_start() {
   in.uartOutput = true;
   in.imageOk = false;
   TEST_ASSERT_TRUE(decideFlashStart(in, true).refusal == FlashRefusal::NoImage);
+}
+
+void test_restart_pending_refuses_every_start_kind() {
+  FlashStartInputs in;
+  in.uartOutput = true;
+  in.imageOk = true;
+  in.link = LinkStatus::Up;
+  in.lastOutcome = FlashOutcome::SyncFailed;
+  TEST_ASSERT_TRUE(decideFlashStart(in, false).refusal == FlashRefusal::None);
+  in.restartPending = true;
+  // Normal.
+  TEST_ASSERT_TRUE(decideFlashStart(in, false).refusal == FlashRefusal::RestartPending);
+  // Recovery: link down, ROM detected.
+  in.link = LinkStatus::NoReply;
+  in.romDetected = true;
+  in.restartPending = false;
+  TEST_ASSERT_TRUE(decideFlashStart(in, false).start == FlashStart::Recovery);
+  in.restartPending = true;
+  TEST_ASSERT_TRUE(decideFlashStart(in, false).refusal == FlashRefusal::RestartPending);
+  // Retry.
+  in.restartPending = false;
+  TEST_ASSERT_TRUE(decideFlashStart(in, true).refusal == FlashRefusal::None);
+  in.restartPending = true;
+  TEST_ASSERT_TRUE(decideFlashStart(in, true).refusal == FlashRefusal::RestartPending);
+  // Checked first: it wins over every other refusal.
+  FlashStartInputs all;
+  all.jobRunning = true;
+  all.heatWanted = true;
+  all.restartPending = true;
+  TEST_ASSERT_TRUE(decideFlashStart(all, false).refusal == FlashRefusal::RestartPending);
+  TEST_ASSERT_TRUE(decideFlashStart(all, true).refusal == FlashRefusal::RestartPending);
+  TEST_ASSERT_EQUAL_STRING("The Remote is about to restart. Try again in a few seconds.",
+                           flashRefusalMessage(FlashRefusal::RestartPending));
 }
 
 void test_refusal_messages() {
@@ -629,6 +662,7 @@ int main(int, char **) {
   RUN_TEST(test_entry_not_confirmed);
   RUN_TEST(test_heat_wanted_rule);
   RUN_TEST(test_decide_flash_start);
+  RUN_TEST(test_restart_pending_refuses_every_start_kind);
   RUN_TEST(test_refusal_messages);
   return UNITY_END();
 }

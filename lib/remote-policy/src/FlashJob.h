@@ -73,17 +73,21 @@ bool romProbeDue(uint32_t nowMs, uint32_t lastOkMs, uint32_t lastProbeMs);
 bool heatWanted(bool targetMode, float targetC);
 
 struct FlashStartInputs {
-  bool uartOutput = false, imageOk = false, heatWanted = false, jobRunning = false, romDetected = false;
+  bool uartOutput = false, imageOk = false, heatWanted = false, jobRunning = false, romDetected = false,
+       restartPending = false;  // a Remote restart is already scheduled
   LinkStatus link = LinkStatus::Waiting;
   FlashOutcome lastOutcome = FlashOutcome::None;
 };
-enum class FlashRefusal : uint8_t { None, NotUart, NoImage, HeatWanted, JobRunning, LinkDown, NothingToRetry };
+enum class FlashRefusal : uint8_t { None, NotUart, NoImage, HeatWanted, JobRunning, LinkDown, NothingToRetry,
+                                  RestartPending };
 struct FlashStartDecision {
   FlashRefusal refusal;
   FlashStart start;  // meaningful only when refusal is None
 };
-// Refusals are checked in the order NotUart, JobRunning, NoImage, HeatWanted,
-// then LinkDown (NothingToRetry for a retry, which ignores the link).
+// RestartPending is checked first, for every kind of start: a restart already
+// scheduled would cut a job off mid-erase. The rest are checked in the order
+// NotUart, JobRunning, NoImage, HeatWanted, then LinkDown (NothingToRetry for
+// a retry, which ignores the link).
 FlashStartDecision decideFlashStart(const FlashStartInputs &in, bool retry);
 const char *flashRefusalMessage(FlashRefusal refusal);
 

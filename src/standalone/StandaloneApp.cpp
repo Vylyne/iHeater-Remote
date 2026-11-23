@@ -802,6 +802,8 @@ policy::FlashStartDecision ihStartDecision(const UartLinkView &view, bool retry)
   in.heatWanted = policy::heatWanted(last.mode == ControllerOutputMode::TargetTemperature,
                                      last.targetTempC);
   in.jobRunning = s_uart.flashBusy();
+  // A restart already scheduled (OTA, setup save, output switch) would cut the job off.
+  in.restartPending = s_restartAtMs != 0 || s_outputSwitchPending;
   in.romDetected = view.romDetected;
   in.link = view.link;
   in.lastOutcome = view.flash.outcome;
@@ -830,7 +832,8 @@ void fillUpdateJson(JsonObject out) {
   out["canCancel"] = busy && !stale && fs.phase == policy::FlashPhase::Cooling;
   const policy::FlashRefusal refusal = ihStartDecision(view, false).refusal;
   out["canUpdate"] = !busy && s_ihImageReady && refusal == policy::FlashRefusal::None;
-  out["canRetry"] = !busy && s_ihImageReady && policy::retryAllowed(fs.outcome);
+  out["canRetry"] = !busy && s_ihImageReady && policy::retryAllowed(fs.outcome) &&
+                    ihStartDecision(view, true).refusal != policy::FlashRefusal::RestartPending;
   if (!busy && s_ihImageReady && refusal != policy::FlashRefusal::None)
     out["hint"] = policy::flashRefusalMessage(refusal);
   JsonObject image = out.createNestedObject("image");
