@@ -52,5 +52,8 @@ Git Bash, so run `pio run` from PowerShell or `cmd`, or from a shell without
 - Policy files in `lib/remote-policy/` use CRLF line endings. Keep each
   file's existing line endings.
 - Put design and plan documents in `docs/design/`.
+- iHeater flashing: never mass erase or erase above page 29, never send
+  write/read-protect or option-byte commands, and send `0xB007` at most once
+  per job.
 - Commit messages end with a blank line, then a `Co-Authored-By` trailer
   naming the AI model that wrote the change.
