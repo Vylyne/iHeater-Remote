@@ -374,8 +374,13 @@ AuthVerdict decideRequest(const RequestFacts &f) {
   return AuthVerdict::Allow;
 }
 
-bool proxyOnlySaveAllowed(bool turningOn, bool viaHttpsProxy) {
-  return !turningOn || viaHttpsProxy;
+ProxyOnlySave checkProxyOnlySave(bool proxyOnly, bool apMode,
+                                 bool viaHttpsProxy, uint32_t peer,
+                                 const uint32_t *list, size_t count) {
+  if (!proxyOnly || apMode) return ProxyOnlySave::Allowed;
+  if (!isTrustedProxy(peer, list, count, 0)) return ProxyOnlySave::NeedListedProxy;
+  if (!viaHttpsProxy) return ProxyOnlySave::NeedHttps;
+  return ProxyOnlySave::Allowed;
 }
 
 bool safeNextPath(const char *next) {

@@ -374,7 +374,9 @@ the Setup page holds up to four IPv4 addresses. Add nginx's address there.
   the Remote's latest successful Moonraker connection is trusted too, so
   nginx on the printer host works with no setup. It is on by default, and a
   checkbox turns it off. It is trusted only while the source is Klipper, and
-  the Remote clears it if it can't resolve the Moonraker host.
+  the Remote clears it if it can't resolve the Moonraker host. Proxy-only
+  mode doesn't count this entry: type the proxy's address into the trusted
+  list for that.
 - **nginx in Docker:** the peer is then the Docker bridge's gateway address,
   not the container's. Add that address as a trusted proxy.
 - **IPv6 clients:** behind a proxy, a client whose `X-Forwarded-For` entry is
@@ -412,10 +414,15 @@ endpoints and actions unless the peer is a trusted proxy that sent
 open. It is off by default.
 
 - You can turn it on only from the HTTPS address, so you know it works.
-- A save that leaves it on must still trust the proxy you're using; otherwise
-  the Remote refuses the save.
-- The Remote's own access point always works, as if the setting were off.
-  That is the way back in if a proxy breaks, and so is the BOOT reset.
+- A save that leaves it on must have the address of the proxy you're using in
+  the trusted proxy list. The automatic Moonraker entry doesn't count,
+  because it disappears when the source switches to Manual, when Moonraker is
+  down at boot or when the host can't be resolved, and that would lock you
+  out. The Remote refuses the save otherwise.
+- The Remote's own access point ignores this setting, as if it were off. It
+  opens only when the Remote can't join Wi-Fi at start-up, so it isn't a
+  dependable way back in while Wi-Fi works. If a proxy breaks, hold BOOT for
+  10 s to turn proxy-only off again. That reset also clears the password.
 
 ## Updating the iHeater's firmware
 

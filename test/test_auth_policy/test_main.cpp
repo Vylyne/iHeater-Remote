@@ -408,11 +408,52 @@ void test_decide_proxy_only() {
   TEST_ASSERT_EQUAL_INT((int)AuthVerdict::ProxyOnly, (int)decideRequest(h));
 }
 
-void test_proxy_only_save_allowed() {
-  TEST_ASSERT_FALSE(proxyOnlySaveAllowed(true, false));
-  TEST_ASSERT_TRUE(proxyOnlySaveAllowed(true, true));
-  TEST_ASSERT_TRUE(proxyOnlySaveAllowed(false, false));
-  TEST_ASSERT_TRUE(proxyOnlySaveAllowed(false, true));
+// The save is judged on the new manual list only. The automatic Moonraker
+// entry can vanish (a switch to Manual, an outage at boot, a host edit), and
+// proxy-only would then lock the owner out.
+void test_proxy_only_save_off_or_ap_always_allowed() {
+  const uint32_t list[] = {0x0A000001u};
+  // Proxy-only stays off: nothing to check, whoever the peer is.
+  TEST_ASSERT_EQUAL_INT(
+      (int)ProxyOnlySave::Allowed,
+      (int)checkProxyOnlySave(false, false, false, 0x01020304u, list, 1));
+  // The access point ignores proxy-only, so a save there must always work.
+  TEST_ASSERT_EQUAL_INT(
+      (int)ProxyOnlySave::Allowed,
+      (int)checkProxyOnlySave(true, true, false, 0x01020304u, list, 1));
+  TEST_ASSERT_EQUAL_INT(
+      (int)ProxyOnlySave::Allowed,
+      (int)checkProxyOnlySave(true, true, false, 0, nullptr, 0));
+}
+
+void test_proxy_only_save_listed_https_peer_allowed() {
+  const uint32_t list[] = {0x0A000001u, 0x0A000002u};
+  TEST_ASSERT_EQUAL_INT(
+      (int)ProxyOnlySave::Allowed,
+      (int)checkProxyOnlySave(true, false, true, 0x0A000002u, list, 2));
+}
+
+void test_proxy_only_save_unlisted_peer_refused() {
+  const uint32_t list[] = {0x0A000001u};
+  // The peer may be trusted today through the automatic entry, but that
+  // doesn't count: it is not in the manual list.
+  TEST_ASSERT_EQUAL_INT(
+      (int)ProxyOnlySave::NeedListedProxy,
+      (int)checkProxyOnlySave(true, false, true, 0x0A000009u, list, 1));
+  TEST_ASSERT_EQUAL_INT(
+      (int)ProxyOnlySave::NeedListedProxy,
+      (int)checkProxyOnlySave(true, false, true, 0x0A000009u, nullptr, 0));
+  // An unknown peer (0) is never listed.
+  TEST_ASSERT_EQUAL_INT(
+      (int)ProxyOnlySave::NeedListedProxy,
+      (int)checkProxyOnlySave(true, false, true, 0, list, 1));
+}
+
+void test_proxy_only_save_listed_peer_without_https_refused() {
+  const uint32_t list[] = {0x0A000001u};
+  TEST_ASSERT_EQUAL_INT(
+      (int)ProxyOnlySave::NeedHttps,
+      (int)checkProxyOnlySave(true, false, false, 0x0A000001u, list, 1));
 }
 
 // ---- Redirect path and cookie ----
@@ -543,7 +584,10 @@ int main(int, char **) {
   RUN_TEST(test_decide_protected_page);
   RUN_TEST(test_decide_action);
   RUN_TEST(test_decide_proxy_only);
-  RUN_TEST(test_proxy_only_save_allowed);
+  RUN_TEST(test_proxy_only_save_off_or_ap_always_allowed);
+  RUN_TEST(test_proxy_only_save_listed_https_peer_allowed);
+  RUN_TEST(test_proxy_only_save_unlisted_peer_refused);
+  RUN_TEST(test_proxy_only_save_listed_peer_without_https_refused);
   RUN_TEST(test_safe_next_path);
   RUN_TEST(test_cookie_single);
   RUN_TEST(test_cookie_among_others);

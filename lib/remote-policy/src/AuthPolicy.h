@@ -54,8 +54,15 @@ struct RequestFacts {
 };
 AuthVerdict decideRequest(const RequestFacts &f);
 
-// Turning proxy-only on from a direct request would lock the owner out.
-bool proxyOnlySaveAllowed(bool turningOn, bool viaHttpsProxy);
+// Judges a security save that would leave proxy-only on. Trust comes from the
+// new MANUAL proxy list alone: the automatic Moonraker entry can vanish (a
+// switch to Manual, an outage at boot, a host edit, a DNS failure), and
+// proxy-only would then lock the owner out. The access point ignores
+// proxy-only, so a save made there is always allowed.
+enum class ProxyOnlySave : uint8_t { Allowed, NeedHttps, NeedListedProxy };
+ProxyOnlySave checkProxyOnlySave(bool proxyOnly, bool apMode,
+                                 bool viaHttpsProxy, uint32_t peer,
+                                 const uint32_t *list, size_t count);
 bool safeNextPath(const char *next);
 
 constexpr size_t kSessionTokenLen = 16;

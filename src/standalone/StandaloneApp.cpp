@@ -700,7 +700,7 @@ String tenthsText(int16_t t10) {
 
 // The Security card on /setup. It sits in its own form, outside the main setup
 // form, and posts to /api/auth/settings and /api/auth/password with fetch.
-const char kSecurityCard[] = R"HTML(<form id=sec onsubmit="return false"><section class=card><h2>Security</h2><p class=note id=secMsg role=status></p><h2>Change password</h2><label>New password<input id=secPw type=password minlength=8 maxlength=64 autocomplete=new-password></label><label>Confirm password<input id=secPw2 type=password minlength=8 maxlength=64 autocomplete=new-password></label><button type=button id=secPwGo>Change password</button><p class=note>At least 8 characters. Changing it logs every other device out.</p><h2>Trusted proxies</h2><label class=check><input id=secAuto type=checkbox __AUTO_CHK__>Trust the Moonraker host automatically</label><p class=note>Moonraker host: __AUTO_ADDR__</p><label>Trusted proxy addresses<input id=secProxies value="__SEC_PROXIES__" maxlength=80 placeholder="192.168.1.10, 192.168.1.11" autocomplete=off></label><p class=note>Up to four IPv4 addresses, separated by commas. If nginx runs in Docker, add the bridge gateway address.</p><h2>Header login</h2><label class=check><input id=secHdr type=checkbox __HDR_CHK__>Log in from a proxy header</label><label>User header<input id=secUserH value="__HDR_USER__" maxlength=40 autocomplete=off></label><label>Allowed users (comma separated, blank allows any)<input id=secUsers value="__HDR_USERS__" maxlength=128 autocomplete=off></label><label>Groups header<input id=secGroupH value="__HDR_GRPH__" maxlength=40 autocomplete=off></label><label>Allowed groups (comma separated, blank allows any)<input id=secGroups value="__HDR_GROUPS__" maxlength=128 autocomplete=off></label><p class=note style="color:#ffb347">Every trusted proxy, the automatic Moonraker entry included, can then log anyone in.</p><h2>Proxy-only</h2><label class=check><input id=secOnly type=checkbox __PO_CHK__>Only allow actions through the HTTPS proxy</label><p class=note>Hold BOOT for 10 s to turn this off again. The access point always works.</p><button type=button id=secGo>Save security settings</button></section></form><script src="/auth.js"></script><script>(()=>{const $=i=>document.getElementById(i),say=t=>{$('secMsg').textContent=t};
+const char kSecurityCard[] = R"HTML(<form id=sec onsubmit="return false"><section class=card><h2>Security</h2><p class=note id=secMsg role=status></p><h2>Change password</h2><label>New password<input id=secPw type=password minlength=8 maxlength=64 autocomplete=new-password></label><label>Confirm password<input id=secPw2 type=password minlength=8 maxlength=64 autocomplete=new-password></label><button type=button id=secPwGo>Change password</button><p class=note>At least 8 characters. Changing it logs every other device out.</p><h2>Trusted proxies</h2><label class=check><input id=secAuto type=checkbox __AUTO_CHK__>Trust the Moonraker host automatically</label><p class=note>Moonraker host: __AUTO_ADDR__</p><label>Trusted proxy addresses<input id=secProxies value="__SEC_PROXIES__" maxlength=80 placeholder="192.168.1.10, 192.168.1.11" autocomplete=off></label><p class=note>Up to four IPv4 addresses, separated by commas. If nginx runs in Docker, add the bridge gateway address.</p><h2>Header login</h2><label class=check><input id=secHdr type=checkbox __HDR_CHK__>Log in from a proxy header</label><label>User header<input id=secUserH value="__HDR_USER__" maxlength=40 autocomplete=off></label><label>Allowed users (comma separated, blank allows any)<input id=secUsers value="__HDR_USERS__" maxlength=128 autocomplete=off></label><label>Groups header<input id=secGroupH value="__HDR_GRPH__" maxlength=40 autocomplete=off></label><label>Allowed groups (comma separated, blank allows any)<input id=secGroups value="__HDR_GROUPS__" maxlength=128 autocomplete=off></label><p class=note style="color:#ffb347">Every trusted proxy, the automatic Moonraker entry included, can then log anyone in.</p><h2>Proxy-only</h2><label class=check><input id=secOnly type=checkbox __PO_CHK__>Only allow actions through the HTTPS proxy</label><p class=note>Hold BOOT for 10 s to turn this off again. The Remote's own access point, which opens when it can't join Wi-Fi, ignores this setting.</p><button type=button id=secGo>Save security settings</button></section></form><script src="/auth.js"></script><script>(()=>{const $=i=>document.getElementById(i),say=t=>{$('secMsg').textContent=t};
 $('secPwGo').onclick=()=>{const a=$('secPw').value;if(a.length<8){say('Use at least 8 characters.');return}if(a!==$('secPw2').value){say("The passwords don't match.");return}
 const b=$('secPwGo');b.disabled=true;say('Working...');setTimeout(()=>{IHA.setPassword(a).then(()=>{$('secPw').value='';$('secPw2').value='';say('Password changed. Every other device is logged out.')},e=>say(e.message)).then(()=>{b.disabled=false})},30)};
 $('secGo').onclick=()=>{const f=new URLSearchParams();f.set('proxies',$('secProxies').value);if($('secAuto').checked)f.set('autoProxy','1');if($('secHdr').checked)f.set('headerLogin','1');if($('secOnly').checked)f.set('proxyOnly','1');
@@ -2038,21 +2038,23 @@ void handleAuthSettingsPost() {
     return;
   }
   const bool proxyOnly = s_server.arg("proxyOnly") == "1";
-  if (!policy::proxyOnlySaveAllowed(proxyOnly && !s_auth.proxyOnly, s_req.viaHttpsProxy)) {
-    sendAuthError(400, "Turn on proxy-only mode from the HTTPS address, so you know it works.");
-    return;
-  }
-  // Proxy-only must also hold under the new trust settings, or every action
-  // would be refused after the save.
   const bool autoProxy = s_server.arg("autoProxy") == "1";
-  if (proxyOnly) {
-    const uint32_t automatic =
-        (klipperSource() && autoProxy) ? s_moonraker.connectedAddress() : 0;
-    const uint32_t peer = ipValue(s_server.client().remoteIP());
-    if (!policy::isTrustedProxy(peer, proxies, proxyCount, automatic) || !s_req.viaHttpsProxy) {
-      sendAuthError(400, "Keep the HTTPS proxy you're using trusted while proxy-only mode is on.");
+  // Proxy-only must hold under the new MANUAL proxy list alone. The automatic
+  // Moonraker entry can vanish and would lock the owner out. The access point
+  // ignores proxy-only, so a save made there skips the check.
+  switch (policy::checkProxyOnlySave(proxyOnly, s_apMode, s_req.viaHttpsProxy,
+                                     ipValue(s_server.client().remoteIP()), proxies,
+                                     proxyCount)) {
+    case policy::ProxyOnlySave::Allowed:
+      break;
+    case policy::ProxyOnlySave::NeedListedProxy:
+      sendAuthError(400,
+                    "Proxy-only mode needs the HTTPS proxy's address in the trusted proxy list. "
+                    "The automatic Moonraker entry isn't enough.");
       return;
-    }
+    case policy::ProxyOnlySave::NeedHttps:
+      sendAuthError(400, "Turn on proxy-only mode from the HTTPS address, so you know it works.");
+      return;
   }
 
   // Nothing is committed to s_auth until the save succeeds.
