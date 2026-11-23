@@ -1969,6 +1969,37 @@ void handleAuthMe() {
   sendAuthJson(200, out);
 }
 
+// Registers the request headers the login gate reads, and no others: the
+// framework heap-allocates every header it collects, so collecting them all
+// would let any client exhaust the heap. Host is read by the framework itself.
+// Call it before s_server.begin(), and again when Setup changes the user or
+// groups header names. It clears the current request's headers, so it must
+// not run inside a request handler.
+void registerAuthHeaders() {
+  const String userHeader = s_auth.userHeader;
+  const String groupsHeader = s_auth.groupsHeader;
+  const char *keys[8];
+  size_t count = 0;
+  const auto add = [&](const char *name) {
+    if (!name || !*name)
+      return;
+    for (size_t i = 0; i < count; ++i) {
+      if (strcasecmp(keys[i], name) == 0)
+        return;
+    }
+    keys[count++] = name;
+  };
+  add("Origin");
+  add("Referer");
+  add("Cookie");
+  add("X-Forwarded-Proto");
+  add("X-Forwarded-Host");
+  add("X-Forwarded-For");
+  add(userHeader.c_str());
+  add(groupsHeader.c_str());
+  s_server.collectHeaders(keys, count);
+}
+
 void handleRoot() {
   if (captiveRedirectIfNeeded())
     return;
@@ -2297,7 +2328,7 @@ void setup() {
   if (klipperSource())
     s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
   configureRoutes();
-  s_server.collectAllHeaders();  // the login reads Origin, Cookie, X-Forwarded-* and the proxy's user headers
+  registerAuthHeaders();
   s_server.begin();
   s_statusSocket.begin();
   s_statusSocket.onEvent(onStatusSocketEvent);
