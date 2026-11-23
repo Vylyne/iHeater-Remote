@@ -101,7 +101,9 @@ class UartLink : public OutputPort {
   void runRequest(const policy::PollRequest &req, bool &gotOk);
   // Runs a queued flash job, if there is one, to its end.
   void runQueuedFlash(FlashPort &port);
-  void publishView();
+  // holdUpdating keeps link = Updating for the publish right after a job; the
+  // next cycle's publish, after its poll, reports the real link again.
+  void publishView(bool holdUpdating = false);
 
   // Written once by begin() before the task starts; read by anyone.
   bool initialized_ = false;

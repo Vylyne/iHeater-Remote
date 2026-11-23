@@ -258,7 +258,7 @@ void UartLink::runRequest(const policy::PollRequest &req, bool &gotOk) {
   }
 }
 
-void UartLink::publishView() {
+void UartLink::publishView(bool holdUpdating) {
   UartLinkView v;
   v.link = policy_.link(millis());
   v.hasSnapshot = policy_.hasSnapshot();
@@ -281,7 +281,7 @@ void UartLink::publishView() {
   portENTER_CRITICAL(&mux_);
   v.flash = flashStatus_;
   v.flashRunning = flashRunning_;
-  if (flashRunning_)
+  if (flashRunning_ || holdUpdating)
     v.link = policy::LinkStatus::Updating;
   view_ = v;
   portEXIT_CRITICAL(&mux_);
@@ -323,7 +323,10 @@ void UartLink::runQueuedFlash(FlashPort &port) {
   flashImage_ = nullptr;
   flashLen_ = 0;
   portEXIT_CRITICAL(&mux_);
-  publishView();
+  // The poll policy saw no Ok during the job, so its link would read NoReply
+  // here. Stay Updating until this cycle's poll has run and its publish
+  // (step 4 below) reports the real link.
+  publishView(true);
 }
 
 // One cycle every kPollPeriodMs, forever: the read of the input block, then at
@@ -407,6 +410,10 @@ void UartLink::FlashPort::send(const uint8_t *data, size_t len) {
 }
 
 size_t UartLink::FlashPort::receive(uint8_t *buf, size_t len, uint32_t timeoutMs) {
+  // Wait for one byte at a time, then take whatever else has already arrived,
+  // as exchange() does. uart_read_bytes() applies its timeout to each wait,
+  // not to the whole call, so asking it for many bytes on a line that
+  // trickles could block far past the slice and the deadline.
   size_t got = 0;
   const uint32_t startMs = millis();
   while (got < len) {
@@ -416,10 +423,20 @@ size_t UartLink::FlashPort::receive(uint8_t *buf, size_t len, uint32_t timeoutMs
     uint32_t slice = timeoutMs - elapsed;
     if (slice > kWaitSliceMs)
       slice = kWaitSliceMs;
-    const int n = uart_read_bytes(kPort, buf + got, len - got, pdMS_TO_TICKS(slice));
-    if (n > 0)
-      got += static_cast<size_t>(n);
+    const int n = uart_read_bytes(kPort, buf + got, 1, pdMS_TO_TICKS(slice));
     link_.feedWatchdog();
+    if (n <= 0)
+      continue;
+    got += static_cast<size_t>(n);
+
+    size_t avail = 0;
+    if (got < len && uart_get_buffered_data_len(kPort, &avail) == ESP_OK && avail > 0) {
+      if (avail > len - got)
+        avail = len - got;
+      const int more = uart_read_bytes(kPort, buf + got, avail, 0);
+      if (more > 0)
+        got += static_cast<size_t>(more);
+    }
   }
   return got;
 }
