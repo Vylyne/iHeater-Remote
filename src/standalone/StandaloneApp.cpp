@@ -1622,7 +1622,12 @@ void updateIheaterImageHousekeeping() {
 constexpr const char *kSessionCookie = "iheater_session";
 constexpr const char *kSessionCookieAttrs = "; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000";
 
+// IPv4 only. A v4-mapped peer already arrives as IPv4 from remoteIP(). Any
+// other IPv6 peer is 0, which isTrustedProxy() never trusts; reading its first
+// four bytes instead would let a crafted IPv6 address equal a trusted proxy.
 uint32_t ipValue(const IPAddress &ip) {
+  if (ip.type() != IPv4)
+    return 0;
   return (static_cast<uint32_t>(ip[0]) << 24) | (static_cast<uint32_t>(ip[1]) << 16) |
          (static_cast<uint32_t>(ip[2]) << 8) | static_cast<uint32_t>(ip[3]);
 }

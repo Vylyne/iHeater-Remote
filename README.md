@@ -382,6 +382,9 @@ the Setup page holds up to four IPv4 addresses. Add nginx's address there.
 - **IPv6 clients:** behind a proxy, a client whose `X-Forwarded-For` entry is
   IPv6 is counted by the proxy's address. All such clients then share one
   lockout slot, so five wrong passwords from one lock them all out for 30 s.
+  The same holds for clients that reach the Remote directly over IPv6: the
+  Remote reads IPv4 peer addresses only, so an IPv6 peer is never trusted as
+  a proxy and shares that one slot.
 
 Trust covers the whole host: anything on a trusted address can send forwarded
 headers and, with header login on, log in.
