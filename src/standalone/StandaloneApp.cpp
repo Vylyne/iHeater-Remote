@@ -2039,12 +2039,24 @@ void handleAuthSettingsPost() {
     sendAuthError(400, "Turn on proxy-only mode from the HTTPS address, so you know it works.");
     return;
   }
+  // Proxy-only must also hold under the new trust settings, or every action
+  // would be refused after the save.
+  const bool autoProxy = s_server.arg("autoProxy") == "1";
+  if (proxyOnly) {
+    const uint32_t automatic =
+        (klipperSource() && autoProxy) ? s_moonraker.connectedAddress() : 0;
+    const uint32_t peer = ipValue(s_server.client().remoteIP());
+    if (!policy::isTrustedProxy(peer, proxies, proxyCount, automatic) || !s_req.viaHttpsProxy) {
+      sendAuthError(400, "Keep the HTTPS proxy you're using trusted while proxy-only mode is on.");
+      return;
+    }
+  }
 
   // Nothing is committed to s_auth until the save succeeds.
   AuthSettings next = s_auth;
   memcpy(next.proxies, proxies, sizeof(proxies));
   next.proxyCount = proxyCount;
-  next.autoProxy = s_server.arg("autoProxy") == "1";
+  next.autoProxy = autoProxy;
   next.headerLogin = s_server.arg("headerLogin") == "1";
   next.proxyOnly = proxyOnly;
   next.userHeader = userHeader;

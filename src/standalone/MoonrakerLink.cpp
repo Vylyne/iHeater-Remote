@@ -254,11 +254,17 @@ void MoonrakerLink::onConnected() {
   const uint32_t value = (static_cast<uint32_t>(addr[0]) << 24) |
                          (static_cast<uint32_t>(addr[1]) << 16) |
                          (static_cast<uint32_t>(addr[2]) << 8) | static_cast<uint32_t>(addr[3]);
-  if (value != 0 && value != connectedAddress_) {
+  // An address that cannot be resolved clears the entry: a stale one would
+  // keep trusting whatever device now holds the old address.
+  if (value != connectedAddress_) {
     connectedAddress_ = value;
-    char text[16];
-    policy::formatIpv4(value, text);
-    Serial.printf("[MOON] connected address %s\n", text);
+    if (value != 0) {
+      char text[16];
+      policy::formatIpv4(value, text);
+      Serial.printf("[MOON] connected address %s\n", text);
+    } else {
+      Serial.println("[MOON] connected address unknown");
+    }
   }
   Serial.println("[MOON] connected, identifying");
   if (running_) sendIdentify();
