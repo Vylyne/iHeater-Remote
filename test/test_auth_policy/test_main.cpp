@@ -146,6 +146,41 @@ void test_forwarded_default_port() {
                                  true, "https", "heater.example.com"));
 }
 
+// Behind the proxy the plain-HTTP twin of the page is not the same site, so
+// the direct candidate stops counting once both forwarded headers are there.
+void test_proxied_refuses_plain_http_twin() {
+  TEST_ASSERT_FALSE(originAllowed("http://h", "", "h", true, "https", "h"));
+  TEST_ASSERT_TRUE(originAllowed("https://h", "", "h", true, "https", "h"));
+  TEST_ASSERT_FALSE(originAllowed("http://h:80", "", "h", true, "https", "h"));
+  TEST_ASSERT_FALSE(
+      originAllowed("http://192.168.1.5", "", kHost, true, "https", "h"));
+}
+
+void test_proxied_http_forwarded_proto_accepts_http() {
+  TEST_ASSERT_TRUE(originAllowed("http://h", "", "h", true, "http", "h"));
+  TEST_ASSERT_FALSE(originAllowed("https://h", "", "h", true, "http", "h"));
+}
+
+void test_untrusted_peer_still_uses_host() {
+  TEST_ASSERT_TRUE(originAllowed("http://h", "", "h", false, "https", "h"));
+  TEST_ASSERT_FALSE(originAllowed("https://h", "", "h", false, "https", "h"));
+}
+
+void test_trusted_peer_without_forwarded_uses_host() {
+  TEST_ASSERT_TRUE(originAllowed("http://h", "", "h", true, "", ""));
+  TEST_ASSERT_TRUE(originAllowed("http://h", "", "h", true, "https", ""));
+  TEST_ASSERT_TRUE(originAllowed("http://h", "", "h", true, "", "h"));
+}
+
+void test_proxied_referer_fallback() {
+  TEST_ASSERT_FALSE(
+      originAllowed("", "http://h/setup", "h", true, "https", "h"));
+  TEST_ASSERT_TRUE(
+      originAllowed("", "https://h/setup?x=1", "h", true, "https", "h"));
+  TEST_ASSERT_TRUE(originAllowed("", "http://h/setup", "h", false, "https", "h"));
+  TEST_ASSERT_TRUE(originAllowed("", "http://h/setup", "h", true, "", ""));
+}
+
 // ---- Proxies and client address ----
 
 void test_ipv4_parse_and_format() {
@@ -482,6 +517,11 @@ int main(int, char **) {
   RUN_TEST(test_forwarded_from_untrusted_ignored);
   RUN_TEST(test_forwarded_needs_both_headers);
   RUN_TEST(test_forwarded_default_port);
+  RUN_TEST(test_proxied_refuses_plain_http_twin);
+  RUN_TEST(test_proxied_http_forwarded_proto_accepts_http);
+  RUN_TEST(test_untrusted_peer_still_uses_host);
+  RUN_TEST(test_trusted_peer_without_forwarded_uses_host);
+  RUN_TEST(test_proxied_referer_fallback);
   RUN_TEST(test_ipv4_parse_and_format);
   RUN_TEST(test_proxy_list_parse);
   RUN_TEST(test_proxy_list_rejects);

@@ -192,21 +192,19 @@ bool originAllowed(const char *origin, const char *referer, const char *host,
     return false;
   }
 
+  // Through a trusted proxy that sent both forwarded headers, the browser's
+  // real origin is <proto>://<host> and nothing else. Host is then only the
+  // bare server name, and accepting http://<Host> would let the plain-HTTP twin
+  // of the page count as same-site.
   Origin want;
-  if (parseAuthority(host, strlen(host), Scheme::Http, want) &&
-      sameOrigin(got, want)) {
-    return true;
-  }
-
   if (peerTrusted && *fwdProto && *fwdHost) {
     Scheme scheme;
-    if (parseScheme(fwdProto, strlen(fwdProto), scheme) &&
-        parseAuthority(fwdHost, strlen(fwdHost), scheme, want) &&
-        sameOrigin(got, want)) {
-      return true;
-    }
+    return parseScheme(fwdProto, strlen(fwdProto), scheme) &&
+           parseAuthority(fwdHost, strlen(fwdHost), scheme, want) &&
+           sameOrigin(got, want);
   }
-  return false;
+  return parseAuthority(host, strlen(host), Scheme::Http, want) &&
+         sameOrigin(got, want);
 }
 
 bool parseIpv4(const char *text, uint32_t &out) {
