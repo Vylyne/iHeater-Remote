@@ -42,7 +42,7 @@ class UartPollPolicy {
   const IheaterSnapshot &snapshot() const { return snapshot_; }
   bool hasLimits() const { return hasLimits_; }
   const IheaterLimits &limits() const { return limits_; }
-  bool protocolSupported() const { return hasSnapshot_ && snapshot_.proto == 1; }
+  bool protocolSupported() const { return hasSnapshot_ && snapshot_.proto == kSupportedProtocol; }
   bool desiredKnown() const { return desiredKnown_; }
   uint16_t desiredT10() const { return desiredT10_; }
   bool rangeEmpty() const { return rangeEmpty_; }
