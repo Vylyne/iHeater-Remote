@@ -38,6 +38,10 @@ class MoonrakerLink {
   const char *stateString() const;  // disconnected/connecting/klippy-not-ready/ready
   const String &heaterObject() const;
   const String &lastError() const;
+  // The Moonraker host's IPv4 address in the policy's byte order (a<<24|...),
+  // or 0 when none is known. Cleared only when the host, port or TLS setting
+  // changes.
+  uint32_t connectedAddress() const { return connectedAddress_; }
 
   // Sends the iHeater's readings to the Klipper plugin when one is due. Call
   // every loop() pass; it does nothing until the link is subscribed.
@@ -106,6 +110,7 @@ class MoonrakerLink {
 
   String heater_;
   String lastError_;
+  uint32_t connectedAddress_ = 0;
 
   policy::ReportScheduler scheduler_;
   uint32_t lastRefusedLogMs_ = 0;

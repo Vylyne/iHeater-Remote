@@ -696,12 +696,22 @@ String tenthsText(int16_t t10) {
   return text;
 }
 
+// The Security card on /setup. It sits in its own form, outside the main setup
+// form, and posts to /api/auth/settings and /api/auth/password with fetch.
+const char kSecurityCard[] = R"HTML(<form id=sec onsubmit="return false"><section class=card><h2>Security</h2><p class=note id=secMsg role=status></p><h2>Change password</h2><label>New password<input id=secPw type=password minlength=8 maxlength=64 autocomplete=new-password></label><label>Confirm password<input id=secPw2 type=password minlength=8 maxlength=64 autocomplete=new-password></label><button type=button id=secPwGo>Change password</button><p class=note>At least 8 characters. Changing it logs every other device out.</p><h2>Trusted proxies</h2><label class=check><input id=secAuto type=checkbox __AUTO_CHK__>Trust the Moonraker host automatically</label><p class=note>Moonraker host: __AUTO_ADDR__</p><label>Trusted proxy addresses<input id=secProxies value="__SEC_PROXIES__" maxlength=80 placeholder="192.168.1.10, 192.168.1.11" autocomplete=off></label><p class=note>Up to four IPv4 addresses, separated by commas. If nginx runs in Docker, add the bridge gateway address.</p><h2>Header login</h2><label class=check><input id=secHdr type=checkbox __HDR_CHK__>Log in from a proxy header</label><label>User header<input id=secUserH value="__HDR_USER__" maxlength=40 autocomplete=off></label><label>Allowed users (comma separated, blank allows any)<input id=secUsers value="__HDR_USERS__" maxlength=128 autocomplete=off></label><label>Groups header<input id=secGroupH value="__HDR_GRPH__" maxlength=40 autocomplete=off></label><label>Allowed groups (comma separated, blank allows any)<input id=secGroups value="__HDR_GROUPS__" maxlength=128 autocomplete=off></label><p class=note style="color:#ffb347">Every trusted proxy, the automatic Moonraker entry included, can then log anyone in.</p><h2>Proxy-only</h2><label class=check><input id=secOnly type=checkbox __PO_CHK__>Only allow actions through the HTTPS proxy</label><p class=note>Hold BOOT for 10 s to turn this off again. The access point always works.</p><button type=button id=secGo>Save security settings</button></section></form><script src="/auth.js"></script><script>(()=>{const $=i=>document.getElementById(i),say=t=>{$('secMsg').textContent=t};
+$('secPwGo').onclick=()=>{const a=$('secPw').value;if(a.length<8){say('Use at least 8 characters.');return}if(a!==$('secPw2').value){say("The passwords don't match.");return}
+const b=$('secPwGo');b.disabled=true;say('Working...');setTimeout(()=>{IHA.setPassword(a).then(()=>{$('secPw').value='';$('secPw2').value='';say('Password changed. Every other device is logged out.')},e=>say(e.message)).then(()=>{b.disabled=false})},30)};
+$('secGo').onclick=()=>{const f=new URLSearchParams();f.set('proxies',$('secProxies').value);if($('secAuto').checked)f.set('autoProxy','1');if($('secHdr').checked)f.set('headerLogin','1');if($('secOnly').checked)f.set('proxyOnly','1');
+f.set('userHeader',$('secUserH').value);f.set('allowedUsers',$('secUsers').value);f.set('groupsHeader',$('secGroupH').value);f.set('allowedGroups',$('secGroups').value);
+const b=$('secGo');b.disabled=true;say('Saving...');
+fetch('/api/auth/settings',{method:'POST',credentials:'same-origin',body:f}).then(r=>r.json().catch(()=>({error:'Unexpected reply ('+r.status+').'})).then(j=>say(j.error?j.error:'Security settings saved.')),()=>say("Couldn't reach the Remote.")).then(()=>{b.disabled=false})}})()</script>)HTML";
+
 void handleSetupPage() {
   if (captiveRedirectIfNeeded())
     return;
   String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:15px;font-weight:650;margin:0 0 4px}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.check{display:flex;align-items:center;gap:10px}.check input{min-height:0;width:18px;height:18px;margin:0;padding:0}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>Blank password and API key fields keep their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label><label>Transmit power<select name=txPower><option value=34 __TXP_34__>8.5 dBm (default)</option><option value=44 __TXP_44__>11 dBm</option><option value=52 __TXP_52__>13 dBm</option><option value=60 __TXP_60__>15 dBm</option><option value=68 __TXP_68__>17 dBm</option><option value=78 __TXP_78__>19.5 dBm</option></select></label><p class=note>Higher power can help a weak signal; some C3 Super Mini boards fail to connect above 8.5 dBm. Changing it restarts the device.</p><p class=note>Signal: __RSSI__</p></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port id=port type=number value="__MOON_PORT__" min=1 max=65535></label><label class=check><input name=tls id=tls type=checkbox value=1 __MOON_TLS__>Use TLS (wss://, e.g. through Mainsail on 443)</label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div></section><section class=card><h2>Pairing</h2><label>Pairing token<input name=pairToken value="__PAIR_TOKEN__" maxlength=16 autocomplete=off autocapitalize=characters spellcheck=false></label><label class=check><input name=regenToken type=checkbox value=1>Generate a new token on save</label><p class=note>Put this in your [heater_iheater_remote] section as remote_token: __PAIR_TOKEN__. After a wipe, type your old token here to keep your printer.cfg unchanged.</p></section><section class=card><h2>Output</h2><label>iHeater output<select name=output><option value=pulse __OUT_PULSE__>Pulse on __PULSE_PIN__</option><option value=uart __OUT_UART__>UART on __UART_PINS__</option></select></label><p class=note>Switching restarts the Remote. The iHeater must run the matching build (pulse or UART).</p></section><section class=card><h2>iHeater target range</h2>__RANGE_NOTES__<label>Min target (C)<input name=minTargetC type=number value="__MIN_TARGET__" min=11 max=90></label><label>Max target (C)<input name=maxTargetC type=number value="__MAX_TARGET__" min=11 max=90></label></section><button>Save local setup</button></form></main><script>function showSource(){document.getElementById('moon').style.display=document.getElementById('source').value==='moonraker'?'block':'none'}showSource();document.getElementById('tls').onchange=e=>{let p=document.getElementById('port');if(e.target.checked&&p.value==='7125')p.value='443';else if(!e.target.checked&&p.value==='443')p.value='7125'}</script></html>)HTML";
   page.replace("</form></main>",
-               String("</form><p class=note><a href='/fw'>Firmware update</a> · iHeater Remote v") + VERSION_STR + "</p></main>");
+               String("</form>") + kSecurityCard + String("<p class=note><a href='/fw'>Firmware update</a> · iHeater Remote v") + VERSION_STR + "</p></main>");
   for (const int txp : {34, 44, 52, 60, 68, 78})
     page.replace(String("__TXP_") + txp + "__", s_txPower == txp ? "selected" : "");
   page.replace("__OUT_PULSE__", s_outputKind == OutputKind::Pulse ? "selected" : "");
@@ -741,6 +751,31 @@ void handleSetupPage() {
   page.replace("__PAIR_TOKEN__", token);
   page.replace("__MOON_HOST__", htmlEscape(s_settings.moon.host.c_str()));
   page.replace("__SSID__", htmlEscape(s_stationSsid.c_str()));
+  // The Security card: its stored values are escaped and go in last too.
+  page.replace("__AUTO_CHK__", s_auth.autoProxy ? "checked" : "");
+  page.replace("__HDR_CHK__", s_auth.headerLogin ? "checked" : "");
+  page.replace("__PO_CHK__", s_auth.proxyOnly ? "checked" : "");
+  String autoText = "none yet";
+  if (!klipper) {
+    autoText = "not used in Manual mode";
+  } else if (s_moonraker.connectedAddress() != 0) {
+    char addr[16];
+    policy::formatIpv4(s_moonraker.connectedAddress(), addr);
+    autoText = addr;
+  }
+  String proxies;
+  for (size_t i = 0; i < s_auth.proxyCount; ++i) {
+    char addr[16];
+    policy::formatIpv4(s_auth.proxies[i], addr);
+    if (i) proxies += ", ";
+    proxies += addr;
+  }
+  page.replace("__AUTO_ADDR__", autoText);
+  page.replace("__SEC_PROXIES__", htmlEscape(proxies.c_str()));
+  page.replace("__HDR_USER__", htmlEscape(s_auth.userHeader.c_str()));
+  page.replace("__HDR_USERS__", htmlEscape(s_auth.allowedUsers.c_str()));
+  page.replace("__HDR_GRPH__", htmlEscape(s_auth.groupsHeader.c_str()));
+  page.replace("__HDR_GROUPS__", htmlEscape(s_auth.allowedGroups.c_str()));
   if (s_setupNotice.length()) {
     page.replace("<h1>Wi-Fi &amp; printer setup</h1>",
                  "<h1>Wi-Fi &amp; printer setup</h1><p class=note style='color:#ffb347'>" +
@@ -1614,8 +1649,10 @@ const char *s_uploadRoute = nullptr;
 RequestAuth checkRequest() {
   RequestAuth a{};
   const uint32_t peer = ipValue(s_server.client().remoteIP());
-  // Task 7 passes the Moonraker address as the automatic entry.
-  const bool trusted = policy::isTrustedProxy(peer, s_auth.proxies, s_auth.proxyCount, 0);
+  // The automatic entry is the Moonraker host, and only while following Klipper.
+  const uint32_t automatic =
+      (klipperSource() && s_auth.autoProxy) ? s_moonraker.connectedAddress() : 0;
+  const bool trusted = policy::isTrustedProxy(peer, s_auth.proxies, s_auth.proxyCount, automatic);
 
   // Forwarded values count only from a trusted peer.
   String fwdProto, fwdHost, fwdFor;
@@ -1969,6 +2006,65 @@ void handleAuthMe() {
   sendAuthJson(200, out);
 }
 
+// Set when a save changes a header name; loop() re-registers the headers,
+// because collectHeaders() clears the current request's headers.
+bool s_headersDirty = false;
+
+// Security settings: every field is checked before anything changes, so a 400
+// leaves memory and NVS as they were.
+void handleAuthSettingsPost() {
+  uint32_t proxies[policy::kMaxTrustedProxies] = {};
+  size_t proxyCount = 0;
+  if (!policy::parseProxyList(s_server.arg("proxies").c_str(), proxies, proxyCount)) {
+    sendAuthError(400, "Trusted proxies: up to four IPv4 addresses, separated by commas.");
+    return;
+  }
+  String userHeader = s_server.arg("userHeader");
+  String groupsHeader = s_server.arg("groupsHeader");
+  userHeader.trim();
+  groupsHeader.trim();
+  if (!policy::validHeaderName(userHeader.c_str()) ||
+      !policy::validHeaderName(groupsHeader.c_str())) {
+    sendAuthError(400, "Header names may use letters, digits and dashes only.");
+    return;
+  }
+  const String allowedUsers = s_server.arg("allowedUsers");
+  const String allowedGroups = s_server.arg("allowedGroups");
+  if (allowedUsers.length() > 128 || allowedGroups.length() > 128) {
+    sendAuthError(400, "The allowed lists can be at most 128 characters each.");
+    return;
+  }
+  const bool proxyOnly = s_server.arg("proxyOnly") == "1";
+  if (!policy::proxyOnlySaveAllowed(proxyOnly && !s_auth.proxyOnly, s_req.viaHttpsProxy)) {
+    sendAuthError(400, "Turn on proxy-only mode from the HTTPS address, so you know it works.");
+    return;
+  }
+
+  // Nothing is committed to s_auth until the save succeeds.
+  AuthSettings next = s_auth;
+  memcpy(next.proxies, proxies, sizeof(proxies));
+  next.proxyCount = proxyCount;
+  next.autoProxy = s_server.arg("autoProxy") == "1";
+  next.headerLogin = s_server.arg("headerLogin") == "1";
+  next.proxyOnly = proxyOnly;
+  next.userHeader = userHeader;
+  next.allowedUsers = allowedUsers;
+  next.groupsHeader = groupsHeader;
+  next.allowedGroups = allowedGroups;
+  if (!saveAuthOptions(next)) {
+    saveAuthOptions(s_auth);  // put back anything a partial write changed
+    sendAuthError(500, "Could not save the security settings.");
+    return;
+  }
+  const bool namesChanged =
+      s_auth.userHeader != next.userHeader || s_auth.groupsHeader != next.groupsHeader;
+  s_auth = next;
+  if (namesChanged)
+    s_headersDirty = true;
+  Serial.println("[AUTH] security settings saved");
+  sendAuthJson(200, "{\"ok\":true}");
+}
+
 // Registers the request headers the login gate reads, and no others: the
 // framework heap-allocates every header it collects, so collecting them all
 // would let any client exhaust the heap. Host is read by the framework itself.
@@ -2017,6 +2113,7 @@ void configureRoutes() {
   s_server.on("/api/auth/login", HTTP_POST, guarded(handleAuthLogin));
   s_server.on("/api/auth/password", HTTP_POST, guarded(handleAuthPassword));
   s_server.on("/api/auth/logout", HTTP_POST, guarded(handleAuthLogout));
+  s_server.on("/api/auth/settings", HTTP_POST, guarded(handleAuthSettingsPost));
   s_server.on("/setup", HTTP_GET, guarded(handleSetupPage));
   s_server.on("/fw", HTTP_GET, guarded(handleFirmwarePage));
   s_server.on("/api/mode", HTTP_POST, guarded(handleModePost));
@@ -2340,6 +2437,10 @@ void loop() {
   if (s_apMode)
     s_dnsServer.processNextRequest();
   s_server.handleClient();
+  if (s_headersDirty) {
+    s_headersDirty = false;
+    registerAuthHeaders();
+  }
   if (s_hours.tick(millis()))
     saveRunningHours(s_hours.hours());
   s_statusSocket.loop();

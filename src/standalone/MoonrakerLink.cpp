@@ -2,6 +2,9 @@
 
 #include <string.h>
 
+#include <AuthPolicy.h>
+#include <WiFi.h>
+
 #include "standalone/MoonrakerCa.h"
 #include <UartRegisters.h>
 #include "version.h"
@@ -92,6 +95,8 @@ void MoonrakerLink::onUnpaired(UnpairedCallback cb) { unpairedCb_ = cb; }
 void MoonrakerLink::configure(const MoonrakerSettings &s,
                               const char *pairToken) {
   stop();
+  if (s.host != settings_.host || s.port != settings_.port || s.tls != settings_.tls)
+    connectedAddress_ = 0;
   settings_ = s;
   rawToken_ = pairToken != nullptr ? pairToken : "";
   if (!policy::normalizePairToken(pairToken, token_)) token_[0] = '\0';
@@ -241,6 +246,20 @@ void MoonrakerLink::onConnected() {
   attemptConnected_ = true;
   resetSession();
   lastQueryMs_ = millis();
+  // The address the library just connected to: a literal, or the cached lookup.
+  IPAddress addr;
+  if (!addr.fromString(settings_.host)) {
+    if (!WiFi.hostByName(settings_.host.c_str(), addr)) addr = IPAddress();
+  }
+  const uint32_t value = (static_cast<uint32_t>(addr[0]) << 24) |
+                         (static_cast<uint32_t>(addr[1]) << 16) |
+                         (static_cast<uint32_t>(addr[2]) << 8) | static_cast<uint32_t>(addr[3]);
+  if (value != 0 && value != connectedAddress_) {
+    connectedAddress_ = value;
+    char text[16];
+    policy::formatIpv4(value, text);
+    Serial.printf("[MOON] connected address %s\n", text);
+  }
   Serial.println("[MOON] connected, identifying");
   if (running_) sendIdentify();
 }
