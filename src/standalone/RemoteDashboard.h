@@ -59,7 +59,7 @@ applyIheater(s,uart,i,has)}
 function faultInfo(i){if(!num(i.fault)||i.fault===0)return["none",""];const n=i.faultName||("0x"+i.fault.toString(16));return[n,i.clear==="waiting-restart"?"Waiting for the iHeater to restart":i.clear==="blocked"?"The iHeater could not erase it: power-cycle the iHeater":i.allowed===false?"Needs MODE at power-on":i.clearsLeft===0?"No remote clears left: power-cycle the iHeater":"Clearing when safe"]}
 function applyIheater(s,uart,i,has){$("ihCard").classList.toggle("hidden",!uart);if(!uart)return;
 const stale=has&&i.link!=="up";["ihBody","readout","scale","heaterTile","outTile"].forEach(id=>$(id).classList.toggle("stale",stale));
-const L=i.link;tone("ihLink",L==="up"?"ok":L==="restarting"?"warn":L==="no-reply"?"bad":"idle",L==="up"?"Link up":L==="restarting"?"Link restarting":L==="no-reply"?"No reply":L==="waiting"?"Link waiting":"Link —");
+const L=i.link;tone("ihLink",L==="up"?"ok":L==="restarting"||L==="updating"?"warn":L==="no-reply"?"bad":"idle",L==="up"?"Link up":L==="restarting"?"Link restarting":L==="updating"?"Link updating":L==="no-reply"?"No reply":L==="waiting"?"Link waiting":"Link —");
 put("ihHeater",has?deg(i.heaterC):"—",has&&num(i.setpointC)&&i.setpointC>0?"set "+deg(i.setpointC):"");
 put("ihOut",has&&num(i.pwmPct)?Math.round(i.pwmPct)+" %":"—",has?"fan "+(i.fan?"on":"off"):"");
 put("ihState",has?i.state:"—",has&&i.state==="hold"&&num(i.holdS)&&i.holdS>0?i.holdS+" s left":"");
