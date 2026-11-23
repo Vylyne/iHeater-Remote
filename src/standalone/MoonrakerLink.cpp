@@ -87,6 +87,8 @@ MoonrakerLink::MoonrakerLink() {
 
 void MoonrakerLink::onTarget(TargetCallback cb) { targetCb_ = cb; }
 
+void MoonrakerLink::onUnpaired(UnpairedCallback cb) { unpairedCb_ = cb; }
+
 void MoonrakerLink::configure(const MoonrakerSettings &s,
                               const char *pairToken) {
   stop();
@@ -657,6 +659,7 @@ void MoonrakerLink::goUnpaired(const char *error) {
   lastError_ = error;
   phase_ = Phase::Unpaired;
   Serial.printf("[MOON] unpaired: %s, target off\n", error);
+  if (unpairedCb_ != nullptr) unpairedCb_();
   if (targetCb_ != nullptr) targetCb_(0.0f);
 }
 

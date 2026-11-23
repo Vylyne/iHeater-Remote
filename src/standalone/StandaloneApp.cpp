@@ -22,6 +22,7 @@
 
 #include "controller/RmtOutputAdapter.h"
 #include <FirmwareImage.h>
+#include <KlipperOverride.h>
 #include <RemotePolicy.h>
 #include "version.h"
 
@@ -100,6 +101,7 @@ UartLink s_uart;
 OutputPort *s_output = &s_rmt;  // setup() points this at s_uart for OutputKind::Uart
 OutputKind s_outputKind = OutputKind::Pulse;
 RemoteSettings s_settings;
+policy::KlipperOverride s_override;
 MoonrakerLink s_moonraker;
 
 uint8_t s_mode = 0;
@@ -257,7 +259,7 @@ void applyIntegrationTarget(float targetTempC, const char *source,
 // link holds the last target through outages; updateLinkSafety() cuts heat
 // if the link stays down.
 void onKlipperTarget(float targetC) {
-  if (klipperSource())
+  if (klipperSource() && s_override.target(targetC))
     applyIntegrationTarget(targetC, "klipper", "klipper");
 }
 
@@ -278,21 +280,18 @@ void resetLedPattern() {
   writeLed(false);
 }
 
-// Only user actions (web and button) pass releasePrinter: a manual press
-// unbinds the printer. Boot, the timer and OTA leave the binding alone.
-void applyMode(uint8_t mode, const char *source, bool releasePrinter = true) {
+// Only user actions (web and button) pass userPress: a manual press while
+// following Klipper starts an override and keeps the pairing. Boot, the timer
+// and OTA are not presses.
+void applyMode(uint8_t mode, const char *source, bool userPress = true) {
   if (mode > kMaxMode)
     mode = kMaxMode;
   s_klipperRecoveryPending = false;
   if (mode != 0 && refuseHeatForOutputSwitch())
     mode = 0;
 
-  if (releasePrinter && klipperSource()) {
-    s_settings.source = ControlSource::Manual;
-    if (!saveSourceAndMoonraker(s_settings))
-      Serial.println("[REMOTE] could not save manual source");
-    s_moonraker.stop();
-  }
+  if (userPress)
+    s_override.press(klipperSource());
   s_mode = mode;
   if (mode == 0) {
     s_timerOffAtMs = 0;
@@ -330,7 +329,11 @@ void updateHeatTimer() {
     return;
 
   if ((int32_t)(millis() - s_timerOffAtMs) >= 0) {
-    applyMode(0, "timer", false);
+    if (s_override.active())
+      applyIntegrationTarget(s_override.end(), "timer: back to klipper",
+                             "klipper");
+    else
+      applyMode(0, "timer", false);
   }
 }
 
@@ -499,11 +502,13 @@ void updateLinkSafety() {
   }
   const bool heatingFromPrinter =
       s_output->getLastCommand().mode == ControllerOutputMode::TargetTemperature &&
-      s_targetSource == "klipper";
+      (s_targetSource == "klipper" || s_override.active());
   if (policy::cutHeatForLinkLoss(printerSource, heatingFromPrinter, healthy,
                                  now, s_linkHealthyAtMs,
-                                 policy::kLinkLossGraceMs))
+                                 policy::kLinkLossGraceMs)) {
+    s_override.end();
     applyIntegrationTarget(0.0f, "printer link lost 10 min", "link-lost");
+  }
 }
 
 const char *uartLinkName(policy::LinkStatus status) {
@@ -943,6 +948,11 @@ String statusJson() {
   doc["moonrakerState"] = s_moonraker.stateString();
   doc["heaterObject"] = s_moonraker.heaterObject();
   doc["moonrakerError"] = klipper ? s_moonraker.lastError() : String();
+  doc["override"] = s_override.active();
+  if (s_override.hasKlipperTarget())
+    doc["klipperTargetC"] = s_override.klipperTargetC();
+  else
+    doc["klipperTargetC"] = nullptr;
   if (s_outputKind == OutputKind::Uart) {
     fillIheaterJson(doc.createNestedObject("iheater"));
     fillUpdateJson(doc.createNestedObject("iheaterUpdate"));
@@ -1158,6 +1168,7 @@ bool applySetupForm(String &error) {
   const bool stopHeat = policy::setupSaveStopsHeat(
       s_outputKind == OutputKind::Uart, wasKlipper, klipperSource(),
       bindingChanged, nextOutput != s_outputKind);
+  s_override.reset();
   if (klipperSource()) {
     // Heat from before the change (manual, or another printer or pairing)
     // must not be held: Klipper's own target replaces it once subscribed.
@@ -1178,8 +1189,10 @@ bool applySetupForm(String &error) {
     char shown[policy::kPairTokenLen + 2];
     policy::formatPairToken(s_settings.pairToken.c_str(), shown);
     Serial.printf("[REMOTE] pairing token set to %s\n", shown);
-    if (klipperSource())  // follow the link with the newly saved token
+    if (klipperSource()) {  // follow the link with the newly saved token
+      s_override.reset();
       s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
+    }
   }
   if ((minC != s_range.minC || maxC != s_range.maxC) && !saveRange(minC, maxC)) {
     error = "Could not save the target range.";
@@ -1218,6 +1231,12 @@ bool applySetupForm(String &error) {
     scheduleRestart();
   }
   return true;
+}
+
+void handleOverrideEnd() {
+  if (s_override.active())
+    applyIntegrationTarget(s_override.end(), "back to klipper", "klipper");
+  sendActionStatus();
 }
 
 void handleIntegrationPost() {
@@ -1559,6 +1578,7 @@ void configureRoutes() {
   s_server.on("/setup", HTTP_GET, handleSetupPage);
   s_server.on("/fw", HTTP_GET, handleFirmwarePage);
   s_server.on("/api/mode", HTTP_POST, handleModePost);
+  s_server.on("/api/override/end", HTTP_POST, handleOverrideEnd);
   s_server.on("/api/timer", HTTP_POST, handleTimerPost);
   s_server.on("/api/integration", HTTP_POST, handleIntegrationPost);
   s_server.on("/api/setup", HTTP_POST, handleSetupPost);
@@ -1854,6 +1874,7 @@ void setup() {
   loadRemoteSettings(s_settings);
   bootDecision();
   s_moonraker.onTarget(onKlipperTarget);
+  s_moonraker.onUnpaired([]() { s_override.reset(); });
   if (klipperSource())
     s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
   configureRoutes();

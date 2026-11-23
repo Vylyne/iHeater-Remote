@@ -23,12 +23,14 @@ struct MoonrakerSettings {
 class MoonrakerLink {
  public:
   using TargetCallback = void (*)(float targetC);
+  using UnpairedCallback = void (*)();
 
   MoonrakerLink();
   MoonrakerLink(const MoonrakerLink &) = delete;
   MoonrakerLink &operator=(const MoonrakerLink &) = delete;
 
   void onTarget(TargetCallback cb);
+  void onUnpaired(UnpairedCallback cb);  // called before the target-off callback
   void configure(const MoonrakerSettings &s, const char *pairToken);  // (re)starts
   void stop();  // disconnect, no reconnect
   void loop();  // call every loop() pass
@@ -88,6 +90,7 @@ class MoonrakerLink {
   String rawToken_;
   String extraHeaders_;
   TargetCallback targetCb_ = nullptr;
+  UnpairedCallback unpairedCb_ = nullptr;
 
   bool running_ = false;
   bool socketUp_ = false;
