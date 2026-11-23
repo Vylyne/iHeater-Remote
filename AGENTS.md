@@ -48,6 +48,8 @@ Git Bash, so run `pio run` from PowerShell or `cmd`, or from a shell without
 
 - Write Canadian English in code comments and documentation.
 - Put pure decisions in `lib/remote-policy/` and cover them with tests.
+- Never log or return the login verifier, a proof or a session token, and
+  check login before writing any upload data.
 - Never flash or upload to a device without asking first.
 - Use LF line endings (`.gitattributes` enforces it). The vendored
   `lib/modbus-rtu/` copy is left as it came.
