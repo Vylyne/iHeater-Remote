@@ -48,7 +48,8 @@ ImageInfo checkImage(const uint8_t *data, size_t len);
 // One sentence for the page; "OK" for Ok.
 const char *imageCheckMessage(ImageCheck result);
 
-// "v0.5.0-1a2b3c4[-dirty]". Writes a terminated string and returns its length.
+// "v<major>.<minor>.<patch>-1a2b3c4[-dirty]", from fwVersion = major << 8 | minor.
+// Writes a terminated string and returns its length.
 size_t imageVersion(const ImageInfo &info, char *out, size_t cap);
 
 // The page line: the marker summary, the fallback warning, or the message.

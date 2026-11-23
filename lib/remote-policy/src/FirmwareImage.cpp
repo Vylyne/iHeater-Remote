@@ -150,7 +150,8 @@ const char *imageCheckMessage(ImageCheck result) {
 size_t imageVersion(const ImageInfo &info, char *out, size_t cap) {
   if (cap == 0) return 0;
   const bool showSha = (info.flags & kMarkerFlagNoGit) == 0;
-  int n = snprintf(out, cap, "v0.%u.%u", (unsigned)info.fwVersion, (unsigned)info.fwPatch);
+  int n = snprintf(out, cap, "v%u.%u.%u", (unsigned)(info.fwVersion >> 8), (unsigned)(info.fwVersion & 0xFF),
+               (unsigned)info.fwPatch);
   if (n > 0 && (size_t)n < cap && showSha) {
     n += snprintf(out + n, cap - n, "-%07x", (unsigned)(info.gitSha >> 4));
     if (n > 0 && (size_t)n < cap && (info.flags & kMarkerFlagDirty)) {

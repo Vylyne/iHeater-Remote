@@ -73,6 +73,18 @@ void test_version_dirty_and_no_git() {
   }
 }
 
+void test_version_uses_major_and_minor() {
+  std::vector<uint8_t> b = makeImage(1024);
+  put16(b, kRec + 0x0C, 0x0105);
+  put16(b, kRec + 0x0E, 3);
+  patchImage(b, 1024, 0x1A2B3C4D, 0);
+  ImageInfo info = checkImage(b.data(), b.size());
+  TEST_ASSERT_EQUAL((int)ImageCheck::Ok, (int)info.result);
+  char out[48];
+  imageVersion(info, out, sizeof out);
+  TEST_ASSERT_EQUAL_STRING("v1.5.3-1a2b3c4", out);
+}
+
 void test_size_limits() {
   TEST_ASSERT_EQUAL((int)ImageCheck::TooSmall, check(makeImage(7)));
   TEST_ASSERT_EQUAL((int)ImageCheck::TooLarge, check(makeImage(30721)));
@@ -177,6 +189,7 @@ int main(int, char **) {
   RUN_TEST(test_marker_fixture_crc_matches_zlib);
   RUN_TEST(test_summary_line_for_marker_image);
   RUN_TEST(test_version_dirty_and_no_git);
+  RUN_TEST(test_version_uses_major_and_minor);
   RUN_TEST(test_size_limits);
   RUN_TEST(test_stack_pointer_range);
   RUN_TEST(test_reset_vector_range);
