@@ -186,6 +186,64 @@ class Job {
     return command(kRomGo) && address(addr);
   }
 
+  bool stillInApplication() {
+    link_.setParity(LinkParity::None);
+    link_.sleepMs(50);
+    Reply reply;
+    return link_.modbus({PollKind::ReadInputs, kInputBase, kInputCount}, reply) && reply.kind == ReplyKind::Ok;
+  }
+
+  // Waits for the heater to cool, with the air target at 0. Returns true when
+  // it is safe to enter the bootloader; otherwise the job has ended in `done`.
+  bool cool(FlashStatus &done) {
+    enter(FlashPhase::Cooling);
+    const uint32_t start = link_.nowMs();
+    uint8_t misses = 0;
+    for (;;) {
+      if (link_.cancelRequested()) return stop(FlashOutcome::Cancelled, done);
+      if (link_.heatWanted()) return stop(FlashOutcome::HeatRequested, done);
+      Reply reply;
+      IheaterSnapshot snap;
+      const bool ok = link_.modbus({PollKind::ReadInputs, kInputBase, kInputCount}, reply) &&
+                      reply.kind == ReplyKind::Ok && decodeInputs(reply.regs, reply.count, snap);
+      if (!ok) {
+        if (++misses >= kCoolMissLimit) return stop(FlashOutcome::NoReplyCooling, done);
+      } else {
+        misses = 0;
+        st.heaterT10 = snap.heaterT10;
+        link_.publish(st);
+        if (snap.heaterT10 == kNoReading || snap.airT10 == kNoReading)
+          return stop(FlashOutcome::BadReading, done);
+        if (snap.airTargetT10 != 0) {
+          Reply ignored;  // a lost write shows up as a non-zero target on the next read
+          link_.modbus({PollKind::WriteTarget, kRegTarget, 0}, ignored);
+        } else if (snap.heaterT10 <= kSafeHeaterT10) {
+          return true;
+        }
+      }
+      if ((uint32_t)(link_.nowMs() - start) >= kCoolTimeoutMs) return stop(FlashOutcome::CoolTimeout, done);
+      link_.sleepMs(kCoolPollMs);
+    }
+  }
+
+  // Writes 0xB007 once. True: carry on to the ROM phases (entry may be
+  // unconfirmed); false: the job has ended in `done`.
+  bool enterBootloader(FlashStatus &done) {
+    enter(FlashPhase::Entering);
+    if (link_.cancelRequested()) return stop(FlashOutcome::Cancelled, done);
+    if (link_.heatWanted()) return stop(FlashOutcome::HeatRequested, done);
+    Reply reply;
+    if (link_.modbus({PollKind::WriteBootloader, kRegBootloader, kBootloaderMagic}, reply)) {
+      if (reply.kind == ReplyKind::Exception) {
+        snprintf(st.detail, sizeof st.detail, "exception 0x%02X", (unsigned)reply.exception);
+        return stop(FlashOutcome::EntryRefused, done);
+      }
+      if (reply.kind == ReplyKind::Ok) return true;
+    }
+    st.entryUnconfirmed = true;
+    return true;
+  }
+
   bool restartAnswers() {
     const PollRequest req{PollKind::ReadInputs, kInputBase, kInputCount};
     const uint32_t start = link_.nowMs();
@@ -198,6 +256,11 @@ class Job {
   }
 
  private:
+  bool stop(FlashOutcome outcome, FlashStatus &done) {
+    done = fail(outcome);
+    return false;
+  }
+
   FlashLink &link_;
   char label_[32] = "";
 };
@@ -213,7 +276,12 @@ FlashStatus romPhases(Job &job, FlashLink &link, const uint8_t *image, size_t le
   const uint16_t pages = (uint16_t)((len + kFlashPageBytes - 1) / kFlashPageBytes);
 
   job.enter(FlashPhase::Syncing);
-  if (!job.sync()) return job.failWith(FlashOutcome::SyncFailed, "sync: no reply after 20 tries");
+  if (!job.sync()) {
+    // After an unconfirmed 0xB007, a Modbus answer means the iHeater never left its application.
+    if (job.st.entryUnconfirmed && job.stillInApplication())
+      return job.failWith(FlashOutcome::EntryNotConfirmed, "still answering Modbus after 0xB007");
+    return job.failWith(FlashOutcome::SyncFailed, "sync: no reply after 20 tries");
+  }
 
   bool extended = false, legacy = false;
   if (!job.get(extended, legacy)) return job.fail(FlashOutcome::RomError);
@@ -278,8 +346,10 @@ FlashStatus runFlashJob(FlashLink &link, const uint8_t *image, size_t len, Flash
   link.setParity(LinkParity::None);
   if (image == nullptr || len < kMinImageBytes || len > kMaxImageBytes)
     return job.failWith(FlashOutcome::ImageRejected, "image length out of range");
-  if (start == FlashStart::Normal)
-    return job.failWith(FlashOutcome::ImageRejected, "normal start not built yet");
+  if (start == FlashStart::Normal) {
+    FlashStatus done;
+    if (!job.cool(done) || !job.enterBootloader(done)) return done;
+  }
   return romPhases(job, link, image, len);
 }
 
@@ -297,6 +367,35 @@ bool probeRom(FlashLink &link) {
 bool romProbeDue(uint32_t nowMs, uint32_t lastOkMs, uint32_t lastProbeMs) {
   if ((uint32_t)(nowMs - lastOkMs) < kRomProbeAfterMs) return false;
   return lastProbeMs == 0 || (uint32_t)(nowMs - lastProbeMs) >= kRomProbePeriodMs;
+}
+
+bool heatWanted(bool targetMode, float targetC) { return targetMode && targetC > 0.0f; }
+
+FlashStartDecision decideFlashStart(const FlashStartInputs &in, bool retry) {
+  if (!in.uartOutput) return {FlashRefusal::NotUart, FlashStart::Normal};
+  if (in.jobRunning) return {FlashRefusal::JobRunning, FlashStart::Normal};
+  if (!in.imageOk) return {FlashRefusal::NoImage, FlashStart::Normal};
+  if (in.heatWanted) return {FlashRefusal::HeatWanted, FlashStart::Normal};
+  if (retry) {
+    if (!retryAllowed(in.lastOutcome)) return {FlashRefusal::NothingToRetry, FlashStart::Retry};
+    return {FlashRefusal::None, FlashStart::Retry};
+  }
+  if (in.link == LinkStatus::Up) return {FlashRefusal::None, FlashStart::Normal};
+  if (in.romDetected) return {FlashRefusal::None, FlashStart::Recovery};
+  return {FlashRefusal::LinkDown, FlashStart::Normal};
+}
+
+const char *flashRefusalMessage(FlashRefusal r) {
+  switch (r) {
+    case FlashRefusal::None: return "";
+    case FlashRefusal::NotUart: return "Switch the output to UART first.";
+    case FlashRefusal::NoImage: return "Upload a firmware file that passes the check first.";
+    case FlashRefusal::HeatWanted: return "Turn the heat off first: Manual Off, or a Klipper target of 0.";
+    case FlashRefusal::JobRunning: return "An iHeater update is already running.";
+    case FlashRefusal::LinkDown: return "The iHeater isn't answering, and its bootloader wasn't detected.";
+    case FlashRefusal::NothingToRetry: return "There's no failed update to retry.";
+  }
+  return "";
 }
 
 bool retryAllowed(FlashOutcome o) {

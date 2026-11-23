@@ -29,6 +29,7 @@ size_t buildFrame(const policy::PollRequest &req, uint8_t out[policy::kRequestLe
       return policy::buildReadRequest(policy::kFcReadHolding, req.addr, req.value, out);
     case policy::PollKind::WriteTarget:
     case policy::PollKind::WriteClear:
+    case policy::PollKind::WriteBootloader:
       return policy::buildWriteSingle(req.addr, req.value, out);
     default:
       return 0;

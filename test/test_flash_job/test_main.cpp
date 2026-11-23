@@ -357,6 +357,235 @@ void test_outcome_tables() {
   TEST_ASSERT_FALSE(applicationIntact(FlashOutcome::RomError));
 }
 
+// ---- Normal start: cool-down, entry and the start decision ----
+
+namespace {
+
+FlashStatus runNormal(FakeIheater &f, const std::vector<uint8_t> &img) {
+  f.mode = Mode::App;
+  return run(f, img, FlashStart::Normal);
+}
+
+void assertStoppedInApp(const FakeIheater &f, const FlashStatus &st, FlashOutcome want) {
+  TEST_ASSERT_EQUAL(want, st.outcome);
+  TEST_ASSERT_EQUAL(0, f.bootloaderWrites);
+  TEST_ASSERT_TRUE(applicationIntact(st.outcome));
+  TEST_ASSERT_TRUE(f.mode == Mode::App);
+  assertFinished(f, st);
+}
+
+}  // namespace
+
+void test_normal_update_end_to_end() {
+  FakeIheater f;
+  f.heaterT10 = 300;
+  const auto img = testImage();
+  const FlashStatus st = runNormal(f, img);
+  TEST_ASSERT_EQUAL(FlashOutcome::Updated, st.outcome);
+  assertFinished(f, st);
+  TEST_ASSERT_EQUAL(1, f.bootloaderWrites);
+  TEST_ASSERT_EQUAL(0, f.targetWrites);
+  const FlashPhase want[] = {FlashPhase::Cooling, FlashPhase::Entering, FlashPhase::Syncing,
+                             FlashPhase::Erasing, FlashPhase::Writing, FlashPhase::Starting,
+                             FlashPhase::Restarting, FlashPhase::Finished};
+  const std::vector<FlashPhase> got = phaseOrder(f);
+  TEST_ASSERT_EQUAL(8, got.size());
+  for (size_t i = 0; i < 8; i++) TEST_ASSERT_TRUE(want[i] == got[i]);
+  assertFlashMatches(f, img);
+  TEST_ASSERT_FALSE(st.entryUnconfirmed);
+}
+
+void test_cooling_writes_target_only_when_nonzero() {
+  FakeIheater f;
+  f.airTargetT10 = 600;
+  const FlashStatus st = runNormal(f, testImage());
+  TEST_ASSERT_EQUAL(FlashOutcome::Updated, st.outcome);
+  TEST_ASSERT_EQUAL(1, f.targetWrites);
+  TEST_ASSERT_EQUAL(0, f.lastTargetWritten);
+  TEST_ASSERT_EQUAL(1, f.bootloaderWrites);
+}
+
+void test_cooling_waits_until_50C() {
+  FakeIheater f;
+  f.heaterSeq = {800, 650, 501, 500};
+  const uint32_t start = f.clock;
+  const FlashStatus st = runNormal(f, testImage());
+  TEST_ASSERT_EQUAL(FlashOutcome::Updated, st.outcome);
+  TEST_ASSERT_EQUAL(1, f.bootloaderWrites);
+  TEST_ASSERT_EQUAL(500, st.heaterT10);
+  std::vector<int16_t> seen;
+  for (const FlashStatus &s : f.published)
+    if (s.phase == FlashPhase::Cooling && s.heaterT10 != kNoReading && (seen.empty() || seen.back() != s.heaterT10))
+      seen.push_back(s.heaterT10);
+  const int16_t wantSeen[] = {800, 650, 501, 500};
+  TEST_ASSERT_EQUAL(4, seen.size());
+  for (size_t i = 0; i < 4; i++) TEST_ASSERT_EQUAL(wantSeen[i], seen[i]);
+  // Three 5 s sleeps sit between the four reads, so the first sync byte goes
+  // out after 15 s plus the 100 ms settle.
+  TEST_ASSERT_EQUAL(start + 15000 + kSyncSettleMs, f.syncTimes.front());
+}
+
+void test_cooling_times_out_after_30_min() {
+  FakeIheater f;
+  f.heaterT10 = 600;
+  const uint32_t start = f.clock;
+  const FlashStatus st = runNormal(f, testImage());
+  assertStoppedInApp(f, st, FlashOutcome::CoolTimeout);
+  TEST_ASSERT_TRUE(f.clock - start >= 1800000u);
+  TEST_ASSERT_TRUE(st.failedPhase == FlashPhase::Cooling);
+}
+
+void test_cancel_during_cooling() {
+  FakeIheater f;
+  f.heaterT10 = 600;
+  f.cancelAtMs = f.clock + 10000;
+  const FlashStatus st = runNormal(f, testImage());
+  assertStoppedInApp(f, st, FlashOutcome::Cancelled);
+}
+
+void test_heat_requested_during_cooling() {
+  FakeIheater f;
+  f.heaterT10 = 600;
+  f.heatAtMs = f.clock + 10000;
+  const FlashStatus st = runNormal(f, testImage());
+  assertStoppedInApp(f, st, FlashOutcome::HeatRequested);
+}
+
+void test_heat_requested_just_before_entry() {
+  FakeIheater f;
+  f.heaterSeq = {800, 500};
+  f.heatAfterReads = 2;  // true once the 500 reading has been served
+  const FlashStatus st = runNormal(f, testImage());
+  assertStoppedInApp(f, st, FlashOutcome::HeatRequested);
+  TEST_ASSERT_TRUE(st.failedPhase == FlashPhase::Entering);
+}
+
+void test_invalid_heater_reading_stops() {
+  FakeIheater f;
+  f.heaterT10 = kNoReading;
+  assertStoppedInApp(f, runNormal(f, testImage()), FlashOutcome::BadReading);
+}
+
+void test_invalid_air_reading_stops_before_entry() {
+  FakeIheater f;
+  f.airT10 = kNoReading;
+  assertStoppedInApp(f, runNormal(f, testImage()), FlashOutcome::BadReading);
+}
+
+void test_cooling_stops_after_three_missed_reads() {
+  FakeIheater f;
+  f.heaterT10 = 600;
+  f.appSilentAfter = 1;
+  const FlashStatus st = runNormal(f, testImage());
+  assertStoppedInApp(f, st, FlashOutcome::NoReplyCooling);
+  TEST_ASSERT_EQUAL(4, f.inputReads);  // one good read, then three misses
+}
+
+void test_entry_exception_stops() {
+  FakeIheater f;
+  f.b007Exception = 2;
+  const FlashStatus st = runNormal(f, testImage());
+  TEST_ASSERT_EQUAL(FlashOutcome::EntryRefused, st.outcome);
+  TEST_ASSERT_EQUAL_STRING("exception 0x02", st.detail);
+  TEST_ASSERT_EQUAL(0, f.sentBytes);
+  TEST_ASSERT_TRUE(f.mode == Mode::App);
+  TEST_ASSERT_EQUAL(1, f.bootloaderWrites);
+  TEST_ASSERT_TRUE(applicationIntact(st.outcome));
+  assertFinished(f, st);
+}
+
+void test_entry_no_reply_still_syncs() {
+  FakeIheater f;
+  f.dropB007Reply = true;
+  const FlashStatus st = runNormal(f, testImage());
+  TEST_ASSERT_EQUAL(FlashOutcome::Updated, st.outcome);
+  TEST_ASSERT_TRUE(st.entryUnconfirmed);
+  TEST_ASSERT_EQUAL(1, f.bootloaderWrites);
+  assertFinished(f, st);
+}
+
+void test_entry_not_confirmed() {
+  FakeIheater f;
+  f.dropB007Reply = true;
+  f.b007StaysApp = true;
+  const FlashStatus st = runNormal(f, testImage());
+  TEST_ASSERT_EQUAL(FlashOutcome::EntryNotConfirmed, st.outcome);
+  TEST_ASSERT_TRUE(st.failedPhase == FlashPhase::Syncing);
+  TEST_ASSERT_FALSE(retryAllowed(st.outcome));
+  TEST_ASSERT_TRUE(applicationIntact(st.outcome));
+  TEST_ASSERT_EQUAL(1, f.bootloaderWrites);
+  assertFinished(f, st);
+}
+
+void test_heat_wanted_rule() {
+  TEST_ASSERT_FALSE(heatWanted(true, 0.0f));
+  TEST_ASSERT_TRUE(heatWanted(true, 0.5f));
+  TEST_ASSERT_FALSE(heatWanted(false, 60.0f));
+}
+
+void test_decide_flash_start() {
+  FlashStartInputs in;
+  in.uartOutput = true;
+  in.imageOk = true;
+  in.link = LinkStatus::Up;
+  FlashStartDecision d = decideFlashStart(in, false);
+  TEST_ASSERT_TRUE(d.refusal == FlashRefusal::None);
+  TEST_ASSERT_TRUE(d.start == FlashStart::Normal);
+
+  in.link = LinkStatus::NoReply;
+  in.romDetected = true;
+  d = decideFlashStart(in, false);
+  TEST_ASSERT_TRUE(d.refusal == FlashRefusal::None);
+  TEST_ASSERT_TRUE(d.start == FlashStart::Recovery);
+
+  in.romDetected = false;
+  TEST_ASSERT_TRUE(decideFlashStart(in, false).refusal == FlashRefusal::LinkDown);
+
+  // Refusal order: NotUart, JobRunning, NoImage, HeatWanted, LinkDown.
+  FlashStartInputs all;  // everything wrong
+  all.jobRunning = true;
+  all.heatWanted = true;
+  TEST_ASSERT_TRUE(decideFlashStart(all, false).refusal == FlashRefusal::NotUart);
+  all.uartOutput = true;
+  TEST_ASSERT_TRUE(decideFlashStart(all, false).refusal == FlashRefusal::JobRunning);
+  all.jobRunning = false;
+  TEST_ASSERT_TRUE(decideFlashStart(all, false).refusal == FlashRefusal::NoImage);
+  all.imageOk = true;
+  TEST_ASSERT_TRUE(decideFlashStart(all, false).refusal == FlashRefusal::HeatWanted);
+  all.heatWanted = false;
+  TEST_ASSERT_TRUE(decideFlashStart(all, false).refusal == FlashRefusal::LinkDown);
+
+  // Retry ignores the link; NothingToRetry takes LinkDown's place.
+  in.lastOutcome = FlashOutcome::SyncFailed;
+  d = decideFlashStart(in, true);
+  TEST_ASSERT_TRUE(d.refusal == FlashRefusal::None);
+  TEST_ASSERT_TRUE(d.start == FlashStart::Retry);
+  in.lastOutcome = FlashOutcome::Updated;
+  TEST_ASSERT_TRUE(decideFlashStart(in, true).refusal == FlashRefusal::NothingToRetry);
+  in.lastOutcome = FlashOutcome::SyncFailed;
+  in.heatWanted = true;
+  TEST_ASSERT_TRUE(decideFlashStart(in, true).refusal == FlashRefusal::HeatWanted);
+  in.heatWanted = false;
+  in.uartOutput = false;
+  TEST_ASSERT_TRUE(decideFlashStart(in, true).refusal == FlashRefusal::NotUart);
+  in.uartOutput = true;
+  in.imageOk = false;
+  TEST_ASSERT_TRUE(decideFlashStart(in, true).refusal == FlashRefusal::NoImage);
+}
+
+void test_refusal_messages() {
+  TEST_ASSERT_EQUAL_STRING("", flashRefusalMessage(FlashRefusal::None));
+  TEST_ASSERT_EQUAL_STRING("Switch the output to UART first.", flashRefusalMessage(FlashRefusal::NotUart));
+  TEST_ASSERT_EQUAL_STRING("Upload a firmware file that passes the check first.",
+                           flashRefusalMessage(FlashRefusal::NoImage));
+  TEST_ASSERT_EQUAL_STRING("Turn the heat off first: Manual Off, or a Klipper target of 0.",
+                           flashRefusalMessage(FlashRefusal::HeatWanted));
+  TEST_ASSERT_EQUAL_STRING("An iHeater update is already running.", flashRefusalMessage(FlashRefusal::JobRunning));
+  TEST_ASSERT_EQUAL_STRING("The iHeater isn't answering, and its bootloader wasn't detected.",
+                           flashRefusalMessage(FlashRefusal::LinkDown));
+  TEST_ASSERT_EQUAL_STRING("There's no failed update to retry.", flashRefusalMessage(FlashRefusal::NothingToRetry));
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_command_frame);
@@ -385,5 +614,21 @@ int main(int, char **) {
   RUN_TEST(test_probe_rom);
   RUN_TEST(test_rom_probe_due);
   RUN_TEST(test_outcome_tables);
+  RUN_TEST(test_normal_update_end_to_end);
+  RUN_TEST(test_cooling_writes_target_only_when_nonzero);
+  RUN_TEST(test_cooling_waits_until_50C);
+  RUN_TEST(test_cooling_times_out_after_30_min);
+  RUN_TEST(test_cancel_during_cooling);
+  RUN_TEST(test_heat_requested_during_cooling);
+  RUN_TEST(test_heat_requested_just_before_entry);
+  RUN_TEST(test_invalid_heater_reading_stops);
+  RUN_TEST(test_invalid_air_reading_stops_before_entry);
+  RUN_TEST(test_cooling_stops_after_three_missed_reads);
+  RUN_TEST(test_entry_exception_stops);
+  RUN_TEST(test_entry_no_reply_still_syncs);
+  RUN_TEST(test_entry_not_confirmed);
+  RUN_TEST(test_heat_wanted_rule);
+  RUN_TEST(test_decide_flash_start);
+  RUN_TEST(test_refusal_messages);
   return UNITY_END();
 }

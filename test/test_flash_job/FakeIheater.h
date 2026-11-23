@@ -39,6 +39,12 @@ class FakeIheater : public FlashLink {
   std::vector<int16_t> heaterSeq;
   int16_t heaterT10 = 250, airT10 = 200, airTargetT10 = 0;
   bool heat = false, cancel = false;
+  uint32_t heatAtMs = 0, cancelAtMs = 0;  // clock time from which the knob turns true; 0 = never
+  size_t heatAfterReads = 0;              // heat turns true once this many heater reads were served
+  int appSilentAfter = -1;                // input reads after the Nth get no reply; -1 = never
+  uint8_t b007Exception = 0;              // answer 0xB007 with this exception and stay in App
+  bool dropB007Reply = false;             // enter the ROM bootloader but send no reply
+  bool b007StaysApp = false;              // reply Ok but stay in App
 
   // State and records.
   Mode mode = Mode::Rom;
@@ -56,6 +62,8 @@ class FakeIheater : public FlashLink {
   size_t sentBytes = 0;
   int modbusCalls = 0, modbusBeforeRestarting = 0;
   size_t heaterIdx = 0;
+  int inputReads = 0, targetWrites = 0, bootloaderWrites = 0;
+  int16_t lastTargetWritten = -1;
 
   // FlashLink
   void setParity(LinkParity p) override {
@@ -77,15 +85,45 @@ class FakeIheater : public FlashLink {
     return n;
   }
   void flushInput() override { out_.clear(); }
-  bool modbus(const PollRequest &, Reply &reply) override {
+  bool modbus(const PollRequest &req, Reply &reply) override {
     modbusCalls++;
     if (published.empty() || published.back().phase != FlashPhase::Restarting) modbusBeforeRestarting++;
     if (parity != LinkParity::None || mode != Mode::App) return false;
+    if (req.kind == PollKind::WriteTarget) {
+      targetWrites++;
+      lastTargetWritten = (int16_t)req.value;
+      airTargetT10 = (int16_t)req.value;
+      reply = Reply{};
+      reply.kind = ReplyKind::Ok;
+      return true;
+    }
+    if (req.kind == PollKind::WriteBootloader) {
+      bootloaderWrites++;
+      reply = Reply{};
+      if (b007Exception != 0) {
+        reply.kind = ReplyKind::Exception;
+        reply.exception = b007Exception;
+        return true;
+      }
+      // The iHeater's own rule: air target 0 and heater at or below 50.0 C.
+      if (airTargetT10 != 0 || currentHeaterT10() > 500) {
+        reply.kind = ReplyKind::Exception;
+        reply.exception = 2;
+        return true;
+      }
+      if (!b007StaysApp) mode = Mode::Rom;
+      if (dropB007Reply) return false;
+      reply.kind = ReplyKind::Ok;
+      return true;
+    }
+    inputReads++;
+    if (appSilentAfter >= 0 && inputReads > appSilentAfter) return false;
     int16_t h = heaterT10;
     if (!heaterSeq.empty()) {
       h = heaterSeq[heaterIdx < heaterSeq.size() ? heaterIdx : heaterSeq.size() - 1];
       heaterIdx++;
     }
+    lastHeaterServed_ = h;
     reply = Reply{};
     reply.kind = ReplyKind::Ok;
     reply.count = kInputCount;
@@ -97,8 +135,10 @@ class FakeIheater : public FlashLink {
   }
   void sleepMs(uint32_t ms) override { clock += ms; }
   uint32_t nowMs() override { return clock; }
-  bool heatWanted() override { return heat; }
-  bool cancelRequested() override { return cancel; }
+  bool heatWanted() override {
+    return heat || (heatAtMs != 0 && clock >= heatAtMs) || (heatAfterReads != 0 && heaterIdx >= heatAfterReads);
+  }
+  bool cancelRequested() override { return cancel || (cancelAtMs != 0 && clock >= cancelAtMs); }
   void publish(const FlashStatus &s) override { published.push_back(s); }
 
  private:
@@ -109,6 +149,10 @@ class FakeIheater : public FlashLink {
   static constexpr size_t kSize = 32768;
 
   bool started_ = false;
+  int16_t lastHeaterServed_ = INT16_MIN;
+
+  // The heater reading the iHeater itself would hold now.
+  int16_t currentHeaterT10() const { return lastHeaterServed_ == INT16_MIN ? heaterT10 : lastHeaterServed_; }
   State state_ = State::Unsynced;
   Op op_ = Op::Write;
   uint32_t addr_ = 0;

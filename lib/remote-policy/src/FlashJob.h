@@ -69,6 +69,24 @@ bool probeRom(FlashLink &link);
 // last probe (0 means none yet) was at least kRomProbePeriodMs ago.
 bool romProbeDue(uint32_t nowMs, uint32_t lastOkMs, uint32_t lastProbeMs);
 
+// Heat is wanted when the source holds a positive target.
+bool heatWanted(bool targetMode, float targetC);
+
+struct FlashStartInputs {
+  bool uartOutput = false, imageOk = false, heatWanted = false, jobRunning = false, romDetected = false;
+  LinkStatus link = LinkStatus::Waiting;
+  FlashOutcome lastOutcome = FlashOutcome::None;
+};
+enum class FlashRefusal : uint8_t { None, NotUart, NoImage, HeatWanted, JobRunning, LinkDown, NothingToRetry };
+struct FlashStartDecision {
+  FlashRefusal refusal;
+  FlashStart start;  // meaningful only when refusal is None
+};
+// Refusals are checked in the order NotUart, JobRunning, NoImage, HeatWanted,
+// then LinkDown (NothingToRetry for a retry, which ignores the link).
+FlashStartDecision decideFlashStart(const FlashStartInputs &in, bool retry);
+const char *flashRefusalMessage(FlashRefusal refusal);
+
 bool retryAllowed(FlashOutcome outcome);
 bool applicationIntact(FlashOutcome outcome);
 

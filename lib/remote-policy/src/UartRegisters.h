@@ -15,6 +15,7 @@ constexpr uint16_t kSettingsBase = 0x0200;
 constexpr uint8_t kSettingsCount = 10;
 constexpr uint16_t kRegTarget = 0x0100;
 constexpr uint16_t kRegClear = 0x0101;
+constexpr uint16_t kRegBootloader = 0x0102, kBootloaderMagic = 0xB007;
 constexpr uint16_t kSupportedProtocol = 1;  // link protocol this Remote speaks
 constexpr int16_t kNoReading = INT16_MIN;  // wire 0x8000
 
