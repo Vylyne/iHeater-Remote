@@ -734,7 +734,7 @@ void handleSetupPage() {
 
 // The iHeater update card for /fw (UART output only). It follows the status
 // WebSocket and posts the image as multipart field "firmware".
-const char kIheaterCard[] = R"HTML(<section class=card id=ih><style>#ih h2{font-size:16px;margin:0 0 6px}#ih button:disabled{opacity:.45;cursor:default}#ih .row{display:flex;gap:8px}#ih progress{width:100%}</style><h2>iHeater firmware</h2><p class=note id=ihVer>Running: not read yet</p><p class="note warning" id=ihRom hidden>iHeater is in its bootloader: upload firmware to recover</p><input id=ihFile accept=".bin,application/octet-stream" type=file><p class=note id=ihImg>Choose the iHeater UART build .bin.</p><div class=row><button id=ihGo disabled>Update iHeater</button><button id=ihCancel disabled>Cancel</button><button id=ihRetry disabled>Retry</button></div><progress id=ihBar max=100 value=0 hidden></progress><p class=note id=ihPhase></p><p class="note warning" id=ihErase hidden>The iHeater's application is erased. Do not power off the iHeater or the Remote.</p><p class=note id=ihMsg></p><script>(()=>{const $=i=>document.getElementById(i),I='/api/iheater/',busyP=['entering','syncing','erasing','writing','starting','restarting'];let u={},up=false;function say(id,t,w){$(id).textContent=t||'';$(id).classList.toggle('warning',!!w)}
+const char kIheaterCard[] = R"HTML(<section class=card id=ih><style>#ih h2{font-size:16px;margin:0 0 6px}#ih button:disabled{opacity:.45;cursor:default}#ih .row{display:flex;gap:8px}#ih progress{width:100%}</style><h2>iHeater firmware</h2><p class=note id=ihVer>Running: not read yet</p><p class="note warning" id=ihRom hidden>iHeater is in its bootloader: upload firmware to recover</p><input id=ihFile accept=".bin,application/octet-stream" type=file><p class=note id=ihImg>Choose the iHeater UART build .bin.</p><div class=row><button id=ihGo disabled>Update iHeater</button><button id=ihCancel disabled>Cancel</button><button id=ihRetry disabled>Retry</button></div><progress id=ihBar max=100 value=0 hidden></progress><p class=note id=ihPhase></p><p class="note warning" id=ihErase hidden>The iHeater's application is erased. Do not power off the iHeater or the Remote.</p><p class="note warning" id=ihWarn hidden></p><p class=note id=ihMsg></p><script>(()=>{const $=i=>document.getElementById(i),I='/api/iheater/',busyP=['entering','syncing','erasing','writing','starting','restarting'];let u={},up=false;function say(id,t,w){$(id).textContent=t||'';$(id).classList.toggle('warning',!!w)}
 function show(s){const i=s.iheater||{};u=s.iheaterUpdate||{};if(!s.iheaterUpdate)return;const im=u.image||{},r=u.running,p=u.phase;
 say('ihVer',i.fw?'Running: v'+i.fw+', protocol '+i.proto:'Running: not read yet');
 $('ihRom').hidden=!(u.romDetected&&u.outcome!=='power-cycle'&&!r);
@@ -743,6 +743,7 @@ $('ihGo').disabled=!u.canUpdate||up;$('ihCancel').disabled=!u.canCancel;$('ihRet
 $('ihBar').hidden=!r||p==='cooling'||p==='idle';$('ihBar').value=u.progress||0;
 say('ihPhase',r?(p==='cooling'?'Cooling down'+(typeof u.heaterC==='number'?': heater at '+u.heaterC.toFixed(1)+' °C':''):p==='idle'?'Starting…':p[0].toUpperCase()+p.slice(1)+' ('+(u.progress||0)+'%)'):'');
 $('ihErase').hidden=!(r&&busyP.includes(p));
+{const w=[];if(u.unexpectedPid)w.push("Unexpected chip ID "+(u.pid?"0x"+u.pid.toString(16).toUpperCase():"(unknown)")+"; expected 0x445.");if(u.entryUnconfirmed)w.push("The iHeater didn't confirm the bootloader request.");$('ihWarn').textContent=w.join(' ');$('ihWarn').hidden=!w.length}
 say('ihMsg',r?'':u.message||u.hint||'',!r&&u.outcome&&u.outcome!=='none'&&u.outcome!=='updated'&&u.outcome!=='cancelled');
 if(!r&&u.detail)$('ihMsg').textContent+=' ('+u.detail+')'}
 function post(path,done){const x=new XMLHttpRequest();x.open('POST',I+path);x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=300)say('ihMsg',r.error||'Request failed.',1);else if(r.iheaterUpdate)show(r);if(done)done()};x.onerror=()=>say('ihMsg','Request failed.',1);x.send()}
@@ -827,6 +828,8 @@ void fillUpdateJson(JsonObject out) {
   setTempC(out, "heaterC", fs.heaterT10);
   out["entryUnconfirmed"] = fs.entryUnconfirmed;
   out["unexpectedPid"] = fs.unexpectedPid;
+  if (fs.unexpectedPid)
+    out["pid"] = fs.pid;  // the card names the chip ID it saw
   out["romDetected"] = view.romDetected;
   out["running"] = busy;
   out["canCancel"] = busy && !stale && fs.phase == policy::FlashPhase::Cooling;

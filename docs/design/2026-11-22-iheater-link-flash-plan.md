@@ -874,5 +874,12 @@ repo.
        its bootloader".
      - Upload and update. It finishes `updated`, or with the power-cycle
        message; power-cycling the iHeater then gives `up`.
+     - Also interrupt a flash and power-cycle the iHeater while the Remote
+       stays up (design bench check 4). Confirm the Remote detects the ROM
+       (the "iHeater is in its bootloader" line) within about 40 s and
+       recovers it with an update. This also checks that the 8N1 polls the
+       Remote sends before its first probe don't upset the freshly started
+       ROM's autobaud. If they do, the fix is to probe before polling at
+       boot.
   7. `stackFree` in the dashboard's link details stays above 1 KB after a
      job.
