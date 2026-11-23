@@ -72,17 +72,24 @@ void LoginLockout::failure(uint32_t client, uint32_t nowMs) {
     }
   }
   if (target == nullptr) {
-    // A free slot, else the entry whose last failure is oldest.
+    // A free slot, else the unlocked entry whose last failure is oldest.
+    // Only when every entry is locked is the oldest locked one replaced.
     Entry *oldest = nullptr;
+    bool oldestLocked = true;
     uint32_t oldestAge = 0;
     for (Entry &e : entries_) {
       if (!e.used) {
         target = &e;
         break;
       }
+      const bool locked = lockedNow(e, nowMs);
       const uint32_t age = static_cast<uint32_t>(nowMs - e.lastFailureMs);
-      if (oldest == nullptr || age > oldestAge) {
+      const bool better = oldest == nullptr ||
+                          (oldestLocked && !locked) ||
+                          (locked == oldestLocked && age > oldestAge);
+      if (better) {
         oldest = &e;
+        oldestLocked = locked;
         oldestAge = age;
       }
     }

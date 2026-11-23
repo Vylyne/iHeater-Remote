@@ -49,6 +49,8 @@ constexpr size_t kLockoutClients = 8;
 
 // Per-client failure counts. The fifth failure in a row locks that client
 // for kLockoutMs, and the count starts again from 0 once the lockout ends.
+// When the table is full, a new client replaces the unlocked entry whose last
+// failure is oldest; a locked entry is replaced only when all are locked.
 class LoginLockout {
  public:
   uint32_t retryAfterMs(uint32_t client, uint32_t nowMs) const;  // 0: may try now

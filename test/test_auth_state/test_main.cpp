@@ -131,6 +131,25 @@ void test_lockout_table_full_drops_oldest() {
   TEST_ASSERT_EQUAL_UINT32(0, l.retryAfterMs(1, 204));
 }
 
+void test_lockout_full_table_evicts_oldest_not_slot_zero() {
+  LoginLockout l;
+  for (int i = 0; i < 3; i++) l.failure(1, 10 + i);
+  l.failure(2, 20);
+  l.failure(1, 30);  // client 1 is in slot 0 but newer than client 2
+  for (uint32_t c = 3; c <= 9; c++) l.failure(c, c * 10 + 10);  // 9 drops 2
+  l.failure(1, 110);  // client 1 kept its four failures, so this locks
+  TEST_ASSERT_TRUE(l.retryAfterMs(1, 110) > 0);
+  for (int i = 0; i < 4; i++) l.failure(2, 120 + i);  // count restarted
+  TEST_ASSERT_EQUAL_UINT32(0, l.retryAfterMs(2, 123));
+}
+
+void test_lockout_full_table_keeps_locked_client() {
+  LoginLockout l;
+  for (int i = 0; i < 5; i++) l.failure(1, 1000);
+  for (uint32_t c = 2; c <= 9; c++) l.failure(c, 1000 + c * 100);
+  TEST_ASSERT_TRUE(l.retryAfterMs(1, 2000) > 0);
+}
+
 // ---- Sessions ----
 
 void test_session_add_check() {
@@ -277,6 +296,8 @@ int main(int, char **) {
   RUN_TEST(test_lockout_success_clears);
   RUN_TEST(test_lockout_per_client);
   RUN_TEST(test_lockout_table_full_drops_oldest);
+  RUN_TEST(test_lockout_full_table_evicts_oldest_not_slot_zero);
+  RUN_TEST(test_lockout_full_table_keeps_locked_client);
   RUN_TEST(test_session_add_check);
   RUN_TEST(test_session_expiry_720h);
   RUN_TEST(test_session_future_login_expired);
