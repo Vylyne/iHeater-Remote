@@ -9,7 +9,7 @@
 // the markup. Keep it free of runtime placeholders and of the sequence that
 // closes the raw string below.
 static const char kLoginHtml[] PROGMEM = R"HTML(
-<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><link rel="icon" type="image/png" href="/logo.png"><title>iHeater Remote: log in</title>
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="same-origin"><link rel="icon" type="image/png" href="/logo.png"><title>iHeater Remote: log in</title>
 <style>
 :root{color-scheme:dark;--bg:#0a0e14;--panel:#111823;--inset:#0d131c;--line:#253244;--text:#e8eef6;--muted:#8c9bb0;--accent:#5ba9ff;--warn:#ffb347;--bad:#ff7a85;font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif}
 *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);color:var(--text);padding:16px}
