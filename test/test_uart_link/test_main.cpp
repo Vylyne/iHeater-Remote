@@ -720,9 +720,23 @@ void test_bootloader_drops_snapshot() {
 
 void test_bootloader_holds_writes() {
   UartPollPolicy p;
-  p.setDesired(60.0f, {11, 90});
-  feedInputs(p, bootloaderReply(), 0);
-  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+  feedInputs(p, inputsReply(), 0);
+  feedSettings(p, 0);
+  p.setDesired(60.0f, {45, 85});
+  TEST_ASSERT_EQUAL(PollKind::WriteTarget, p.followUp(0).kind);
+  feedInputs(p, bootloaderReply(), 200);
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(200).kind);
+}
+
+void test_bootloader_forgets_limits() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply(), 0);
+  feedSettings(p, 0);
+  TEST_ASSERT_TRUE(p.hasLimits());
+  feedInputs(p, bootloaderReply(), 200);
+  feedInputs(p, inputsReply(), 400);
+  TEST_ASSERT_FALSE(p.hasLimits());
+  TEST_ASSERT_EQUAL(PollKind::ReadSettings, p.followUp(400).kind);
 }
 
 void test_bootloader_left_on_app_read() {
@@ -745,6 +759,7 @@ int main() {
   RUN_TEST(test_bootloader_detected);
   RUN_TEST(test_bootloader_drops_snapshot);
   RUN_TEST(test_bootloader_holds_writes);
+  RUN_TEST(test_bootloader_forgets_limits);
   RUN_TEST(test_bootloader_left_on_app_read);
   RUN_TEST(test_bootloader_silent_ages_to_no_reply);
   RUN_TEST(test_build_read_vector);
