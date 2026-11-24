@@ -44,4 +44,35 @@ class ConsoleRing {
 // "<request> → <reply>", NUL-terminated, cut to outLen - 1 bytes.
 void describeExchange(const ConsoleRecord &r, char *out, size_t outLen);
 
+constexpr size_t kTicketLen = 16;
+// Free heap that must remain after the console ring is allocated.
+constexpr uint32_t kConsoleHeapFloor = 40960;
+
+// One-time tickets that let the logged-in /diag page subscribe to the console
+// over the socket. Tickets are secrets like session tokens: never log or
+// return them. Not thread-safe; the caller serializes access.
+class ConsoleTickets {
+ public:
+  static constexpr size_t kSlots = 4;
+  static constexpr uint32_t kLifetimeMs = 60000;
+  void issue(const uint8_t ticket[kTicketLen], uint32_t nowMs);   // a full table drops the oldest
+  bool redeem(const uint8_t ticket[kTicketLen], uint32_t nowMs);  // once, within the lifetime
+
+ private:
+  struct Slot {
+    bool used = false;
+    uint32_t issuedMs = 0;
+    uint32_t order = 0;  // issue counter, for dropping the oldest
+    uint8_t ticket[kTicketLen] = {};
+  };
+  Slot slots_[kSlots];
+  uint32_t counter_ = 0;
+};
+
+// Exactly 32 hex digits (either case) into 16 bytes.
+bool parseTicketHex(const char *text, uint8_t out[kTicketLen]);
+
+// True when freeHeap >= ringBytes + kConsoleHeapFloor.
+bool consoleHeapOk(uint32_t freeHeap, size_t ringBytes);
+
 }  // namespace iheaterlink::policy

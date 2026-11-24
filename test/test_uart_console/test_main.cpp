@@ -269,6 +269,72 @@ void test_describe_cuts_to_buffer() {
   TEST_ASSERT_EQUAL_UINT32(15, strlen(out));
 }
 
+static void fillTicket(uint8_t *t, uint8_t seed) {
+  for (size_t i = 0; i < kTicketLen; i++) t[i] = (uint8_t)(seed + i);
+}
+
+void test_ticket_redeems_once() {
+  ConsoleTickets c;
+  uint8_t t[kTicketLen];
+  fillTicket(t, 1);
+  c.issue(t, 0);
+  TEST_ASSERT_TRUE(c.redeem(t, 1000));
+  TEST_ASSERT_FALSE(c.redeem(t, 1001));
+}
+
+void test_ticket_expires() {
+  ConsoleTickets c;
+  uint8_t t[kTicketLen];
+  fillTicket(t, 1);
+  c.issue(t, 0);
+  TEST_ASSERT_FALSE(c.redeem(t, 60001));
+}
+
+void test_ticket_expiry_across_wrap() {
+  ConsoleTickets c;
+  uint8_t t[kTicketLen];
+  fillTicket(t, 1);
+  c.issue(t, 0xFFFFFF00u);
+  TEST_ASSERT_TRUE(c.redeem(t, 0x00000100u));
+}
+
+void test_unknown_ticket_refused() {
+  ConsoleTickets c;
+  uint8_t t[kTicketLen], zero[kTicketLen] = {};
+  fillTicket(t, 1);
+  TEST_ASSERT_FALSE(c.redeem(t, 0));
+  TEST_ASSERT_FALSE(c.redeem(zero, 0));
+}
+
+void test_fifth_ticket_drops_oldest() {
+  ConsoleTickets c;
+  uint8_t t[5][kTicketLen];
+  for (int i = 0; i < 5; i++) {
+    fillTicket(t[i], (uint8_t)(i * 16 + 1));
+    c.issue(t[i], (uint32_t)i);
+  }
+  TEST_ASSERT_FALSE(c.redeem(t[0], 10));
+  TEST_ASSERT_TRUE(c.redeem(t[4], 10));
+  TEST_ASSERT_TRUE(c.redeem(t[1], 10));
+}
+
+void test_parse_ticket_hex() {
+  uint8_t out[kTicketLen];
+  TEST_ASSERT_TRUE(parseTicketHex("00112233445566778899aAbBcCdDeEfF", out));
+  TEST_ASSERT_EQUAL_UINT8(0x00, out[0]);
+  TEST_ASSERT_EQUAL_UINT8(0xAA, out[10]);
+  TEST_ASSERT_EQUAL_UINT8(0xFF, out[15]);
+  TEST_ASSERT_FALSE(parseTicketHex("00112233445566778899aAbBcCdDeEf", out));
+  TEST_ASSERT_FALSE(parseTicketHex("00112233445566778899aAbBcCdDeEfF0", out));
+  TEST_ASSERT_FALSE(parseTicketHex("00112233445566778899aAbBcCdDeEfg", out));
+  TEST_ASSERT_FALSE(parseTicketHex(nullptr, out));
+}
+
+void test_console_heap_floor() {
+  TEST_ASSERT_TRUE(consoleHeapOk(40960 + 11000, 11000));
+  TEST_ASSERT_FALSE(consoleHeapOk(40959 + 11000, 11000));
+}
+
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_ring_seq_and_order);
@@ -292,5 +358,12 @@ int main(int, char **) {
   RUN_TEST(test_describe_unknown_fc);
   RUN_TEST(test_describe_short_request);
   RUN_TEST(test_describe_cuts_to_buffer);
+  RUN_TEST(test_ticket_redeems_once);
+  RUN_TEST(test_ticket_expires);
+  RUN_TEST(test_ticket_expiry_across_wrap);
+  RUN_TEST(test_unknown_ticket_refused);
+  RUN_TEST(test_fifth_ticket_drops_oldest);
+  RUN_TEST(test_parse_ticket_hex);
+  RUN_TEST(test_console_heap_floor);
   return UNITY_END();
 }

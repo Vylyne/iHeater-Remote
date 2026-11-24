@@ -8,6 +8,7 @@ extern "C" {
 #include "modbus_rtu.h"
 }
 
+#include "AuthCrypto.h"
 #include "UartFrames.h"
 #include "UartRegisters.h"
 
@@ -188,6 +189,61 @@ void describeExchange(const ConsoleRecord &r, char *out, size_t outLen) {
   size_t n = pos < outLen - 1 ? pos : outLen - 1;
   memcpy(out, buf, n);
   out[n] = 0;
+}
+
+void ConsoleTickets::issue(const uint8_t ticket[kTicketLen], uint32_t nowMs) {
+  Slot *pick = nullptr;
+  for (Slot &s : slots_) {
+    if (!s.used) {
+      pick = &s;
+      break;
+    }
+  }
+  if (!pick) {  // full: drop the oldest issue
+    pick = &slots_[0];
+    for (Slot &s : slots_) {
+      if ((uint32_t)(s.order - pick->order) > 0x7FFFFFFFu) pick = &s;
+    }
+  }
+  pick->used = true;
+  pick->issuedMs = nowMs;
+  pick->order = ++counter_;
+  memcpy(pick->ticket, ticket, kTicketLen);
+}
+
+bool ConsoleTickets::redeem(const uint8_t ticket[kTicketLen], uint32_t nowMs) {
+  bool ok = false;
+  for (Slot &s : slots_) {  // visit every slot so timing does not reveal a match
+    if (!s.used) continue;
+    bool match = equalConstantTime(s.ticket, ticket, kTicketLen);
+    if (!match) continue;
+    if ((uint32_t)(nowMs - s.issuedMs) <= kLifetimeMs) ok = true;
+    s.used = false;  // a presented ticket is spent, expired or not
+    memset(s.ticket, 0, kTicketLen);
+  }
+  return ok;
+}
+
+bool parseTicketHex(const char *text, uint8_t out[kTicketLen]) {
+  if (!text) return false;
+  uint8_t tmp[kTicketLen];
+  for (size_t i = 0; i < kTicketLen * 2; i++) {
+    char c = text[i];
+    uint8_t v;
+    if (c >= '0' && c <= '9') v = (uint8_t)(c - '0');
+    else if (c >= 'a' && c <= 'f') v = (uint8_t)(c - 'a' + 10);
+    else if (c >= 'A' && c <= 'F') v = (uint8_t)(c - 'A' + 10);
+    else return false;  // a short string ends in NUL, which lands here
+    if (i % 2 == 0) tmp[i / 2] = (uint8_t)(v << 4);
+    else tmp[i / 2] |= v;
+  }
+  if (text[kTicketLen * 2] != 0) return false;
+  memcpy(out, tmp, kTicketLen);
+  return true;
+}
+
+bool consoleHeapOk(uint32_t freeHeap, size_t ringBytes) {
+  return (uint64_t)freeHeap >= (uint64_t)ringBytes + kConsoleHeapFloor;
 }
 
 }  // namespace iheaterlink::policy
