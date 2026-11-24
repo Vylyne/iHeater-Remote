@@ -793,7 +793,7 @@ const char kIheaterCard[] = R"HTML(<section class=card id=ih data-auth=out><styl
 function show(s){const i=s.iheater||{};u=s.iheaterUpdate||{};if(!s.iheaterUpdate)return;const im=u.image||{},r=u.running,p=u.phase;
 say('ihVer',i.fw?'Running: v'+i.fw+', protocol '+i.proto:'Running: not read yet');
 $('ihRom').hidden=!(u.romDetected&&u.outcome!=='power-cycle'&&!r);
-if(!up){say('ihImg',im.error||im.line||'Choose the iHeater UART build .bin.',im.error||im.fallback)}
+if(!up){say('ihImg',im.error||im.line||'Choose the iHeater app build .bin (build_type 2).',im.error)}
 $('ihGo').disabled=!u.canUpdate||up;$('ihCancel').disabled=!u.canCancel;$('ihRetry').disabled=!u.canRetry||up;$('ihFile').disabled=!!r||up;
 $('ihBar').hidden=!r||p==='cooling'||p==='idle';$('ihBar').value=u.progress||0;
 say('ihPhase',r?(p==='cooling'?'Cooling down'+(typeof u.heaterC==='number'?': heater at '+u.heaterC.toFixed(1)+' °C':''):p==='idle'?'Starting…':p[0].toUpperCase()+p.slice(1)+' ('+(u.progress||0)+'%)'):'');
@@ -803,7 +803,7 @@ say('ihMsg',r?'':u.message||u.hint||'',!r&&u.outcome&&u.outcome!=='none'&&u.outc
 if(!r&&u.detail)$('ihMsg').textContent+=' ('+u.detail+')'}
 function au(){fetch('/api/auth/me',{cache:'no-store'}).then(r=>r.json()).then(d=>d.loggedIn===true,()=>false).then(v=>{$('ih').dataset.auth=v?'in':'out'})}au();
 function post(path,done){const x=new XMLHttpRequest();x.open('POST',I+path);x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status===401||x.status===403)au();if(x.status>=300)say('ihMsg',r.error||'Request failed.',1);else if(r.iheaterUpdate)show(r);if(done)done()};x.onerror=()=>say('ihMsg','Request failed.',1);x.send()}
-$('ihFile').onchange=()=>{const file=$('ihFile').files[0];if(!file)return;up=true;say('ihImg','Uploading…');$('ihGo').disabled=true;const x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST',I+'image');x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}up=false;if(x.status===401||x.status===403)au();if(x.status>=300)say('ihImg',r.error||'Upload failed.',1);else say('ihImg',r.line,r.fallback);$('ihFile').value=''};x.onerror=()=>{up=false;say('ihImg','Upload failed.',1)};x.send(d)};
+$('ihFile').onchange=()=>{const file=$('ihFile').files[0];if(!file)return;up=true;say('ihImg','Uploading…');$('ihGo').disabled=true;const x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST',I+'image');x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}up=false;if(x.status===401||x.status===403)au();if(x.status>=300)say('ihImg',r.error||'Upload failed.',1);else say('ihImg',r.line);$('ihFile').value=''};x.onerror=()=>{up=false;say('ihImg','Upload failed.',1)};x.send(d)};
 $('ihGo').onclick=()=>post('update');$('ihRetry').onclick=()=>post('retry');$('ihCancel').onclick=()=>post('cancel');
 let ws;function conn(){ws=new WebSocket(location.protocol==='https:'?'wss://'+location.host+'/ws':'ws://'+location.hostname+':81/');ws.onmessage=e=>{try{show(JSON.parse(e.data))}catch(_){}};ws.onclose=()=>setTimeout(conn,2000)}conn()})()</script></section>)HTML";
 
@@ -902,7 +902,6 @@ void fillUpdateJson(JsonObject out) {
     image["loaded"] = true;
     image["size"] = s_ihImageLen;
     image["line"] = line;  // copied into the document
-    image["fallback"] = !s_ihInfo.hasMarker;
   } else if (s_ihError.length()) {
     image["error"] = s_ihError;
   } else {
@@ -1538,8 +1537,11 @@ void handleIheaterImageUpload() {
       s_ihInfo = policy::checkImage(s_ihImage, s_ihImageLen);
       if (s_ihInfo.result == policy::ImageCheck::Ok)
         s_ihImageReady = true;
-      else
-        s_ihError = policy::imageCheckMessage(s_ihInfo.result);
+      else {
+        char detail[160];
+        policy::imageCheckDetail(s_ihInfo, detail, sizeof(detail));
+        s_ihError = detail;
+      }
     }
     if (!s_ihImageReady)
       freeIhImage();
@@ -1560,7 +1562,6 @@ void handleIheaterImagePost() {
   StaticJsonDocument<384> doc;
   doc["ok"] = true;
   doc["line"] = line;
-  doc["fallback"] = !s_ihInfo.hasMarker;
   String out;
   serializeJson(doc, out);
   s_server.send(200, "application/json", out);

@@ -28,13 +28,13 @@ inline std::vector<uint8_t> makeImage(size_t size) {
   std::vector<uint8_t> b(size);
   for (size_t i = 0; i < size; i++) b[i] = (uint8_t)((i * 7 + 3) & 0xFF);
   put32(b, 0, 0x20001800);
-  put32(b, 4, 0x08000101);
-  for (size_t v = 2; v < 48; v++) put32(b, v * 4, v == 43 ? 0x08006315 : 0x080065F1);
+  put32(b, 4, 0x08000901);
+  for (size_t v = 2; v < 48; v++) put32(b, v * 4, v == 43 ? 0x08000A15 : 0x080065F1);
   const size_t m = iheaterlink::policy::kMarkerOffset;
   put32(b, m + 0x00, iheaterlink::policy::kMarkerMagic);
   put16(b, m + 0x04, 1);   // record version
   put16(b, m + 0x06, 32);  // record size
-  put16(b, m + 0x08, 1);   // build type: UART
+  put16(b, m + 0x08, 2);   // build type: app
   put16(b, m + 0x0A, 1);   // protocol
   put16(b, m + 0x0C, 5);   // firmware version
   put16(b, m + 0x0E, 0);   // patch
