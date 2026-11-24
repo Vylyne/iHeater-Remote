@@ -432,42 +432,49 @@ open. It is off by default.
 ## Updating the iHeater's firmware
 
 With the output set to UART, the **/fw** page has an **iHeater firmware**
-card that updates the iHeater (STM32) over the link. It does not appear in
-pulse output.
+card that updates the iHeater (STM32) over the link, through the iHeater's own
+link bootloader. It does not appear in pulse output.
 
-1. Choose the iHeater's UART build `.bin`. The Remote checks it before it
-   touches the iHeater. It refuses a file that is under 8 B or over
-   30,720 B, has a bad vector table, or has a marker record with the wrong
-   build type, length or CRC, or an unsupported protocol (a pulse build, a
-   marker image cut short or a changed byte all fail this way). An older image
-   with no marker is accepted with a warning, because it only passes the
-   vector-table check; that check can't tell whether such a file was cut
-   short, beyond refusing one whose reset vector points past its end.
+The iHeater must already hold that bootloader. Install it the first time from
+a PC with `link_flash.py --enter` (or with an ST-Link), not from the Remote.
+
+1. Choose the iHeater's UART app build `.bin`. The Remote checks it before it
+   touches the iHeater. It accepts only `build_type` 2 and refuses a file that
+   is under 8 B or over 28,672 B, has a bad vector table, or has a marker
+   record with the wrong build type, length or CRC, or an unsupported
+   protocol (a pulse build, a marker image cut short or a changed byte all
+   fail this way). It also refuses an older image with no build
+   record, because that file can't be checked.
 2. Press **Update iHeater**. The update refuses to start while heat is
    wanted: Manual on, or a Klipper target above 0.
 3. **Cool-down.** The Remote sets the air target to 0 and waits for the heater
    to read 50 C or lower. It gives up after 30 minutes, and stops if heat
-   becomes wanted. **Cancel** works only during the cool-down.
-4. The Remote then enters the iHeater's bootloader, erases, writes and
-   verifies the image, and starts it. The page shows the phase and a progress
-   bar.
+   becomes wanted.
+4. The Remote then asks the running firmware to enter the bootloader, erases
+   the application, writes the image in 128-byte chunks, and boots it. The
+   page shows the phase and a progress bar. **Cancel** works until the erase
+   is sent; after that the update runs to its end.
 
-From entry until the end, the iHeater's application is erased. Do not power
-off the iHeater or the Remote. Setup, Wi-Fi and integration saves and Remote
-OTA return 409 while an update runs.
+From the erase until the iHeater boots the new firmware, the iHeater has no
+application and its heater and fan stay off. Keep the Remote and the iHeater
+powered. Setup, Wi-Fi and integration saves and Remote OTA return 409 while an
+update runs.
 
-If an update fails, the page says why, and whether the iHeater is still
-running its firmware. **Retry** starts again from the bootloader sync.
+If an update fails, the page says why, and whether the iHeater still has its
+firmware. **Retry** reruns the whole job. The bootloader also says why it
+could not finish (its error code and the application check), and the page
+shows both.
 
-**Recovery.** If the Remote and iHeater lose power or the link during a
-flash, the iHeater stays in its bootloader. Once the link has had no reply
-for 10 s, the Remote probes for the bootloader every 30 s. When it answers,
-the page shows "iHeater is in its bootloader: upload firmware to recover".
-Upload a file and press **Update iHeater** to finish.
-
-If the update finishes but the iHeater is still in its bootloader, the page
-says "The iHeater was updated but is still in its bootloader. Power-cycle the
-iHeater; don't flash it again." Do what it says.
+**Recovery.** A board left in its bootloader, whether by a failed update, a
+power loss or a link loss, shows on the page: "The iHeater is in its
+bootloader with no valid firmware". Upload the app build and press **Update
+iHeater**; the job starts from the bootloader and skips the cool-down. A
+board that was only asked to enter (why 1) and not yet erased returns to its
+firmware by itself within the time the page shows, so wait for that before
+starting. Once an erase has been sent, the bootloader stops that timer and
+waits for firmware for as long as it takes, even if the Remote restarts in
+between; the page then shows the "no valid firmware" text and offers
+**Update iHeater**.
 
 While an update runs, the Remote reports the link as `updating`, and Klipper
 shows it. Update the host's Klipper and Moonraker parts first (run

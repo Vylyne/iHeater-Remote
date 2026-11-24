@@ -54,8 +54,9 @@ Git Bash, so run `pio run` from PowerShell or `cmd`, or from a shell without
 - Use LF line endings (`.gitattributes` enforces it). The vendored
   `lib/modbus-rtu/` copy is left as it came.
 - Put design and plan documents in `docs/design/`.
-- iHeater flashing: never mass erase or erase above page 29, never send
-  write/read-protect or option-byte commands, and send `0xB007` at most once
-  per job.
+- iHeater flashing: only through the link bootloader. Never send ROM (AN3155)
+  commands or switch the link from 8N1. Send `0xB007` only after input 0x16
+  reads non-zero, and resend it only when a try got no usable reply, up to 5
+  tries. Never send a chunk index above 223.
 - Commit messages end with a blank line, then a `Co-Authored-By` trailer
   naming the AI model that wrote the change.

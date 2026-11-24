@@ -1,6 +1,6 @@
 # iHeater firmware update over the link — design
 
-Status: approved (2026-11-23).
+Status: superseded for the update path by `2026-11-24-linkboot-flash-design.md`.
 
 ## Why
 

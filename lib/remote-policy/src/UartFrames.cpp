@@ -51,6 +51,23 @@ size_t buildWriteSingle(uint16_t addr, uint16_t value, uint8_t out[kRequestLen])
   return kRequestLen;
 }
 
+size_t buildWriteMultiple(uint16_t addr, const uint16_t *values, uint8_t count, uint8_t *out,
+                          size_t cap) {
+  if (count == 0 || count > kMaxWriteRegs) return 0;
+  const size_t len = 9 + 2 * (size_t)count;
+  if (len > cap) return 0;
+  out[0] = kSlaveAddr;
+  out[1] = kFcWriteMultiple;
+  put16(out + 2, addr);
+  put16(out + 4, count);
+  out[6] = (uint8_t)(2 * count);
+  for (uint8_t i = 0; i < count; i++) put16(out + 7 + 2 * i, values[i]);
+  const uint16_t crc = modbus_crc16(out, len - 2);
+  out[len - 2] = (uint8_t)(crc & 0xFF);
+  out[len - 1] = (uint8_t)(crc >> 8);
+  return len;
+}
+
 Reply parseReply(const uint8_t req[kRequestLen], const uint8_t *buf, size_t len) {
   const uint8_t fc = req[1];
   const bool isRead = (fc == kFcReadHolding || fc == kFcReadInput);
@@ -88,7 +105,8 @@ Reply parseReply(const uint8_t req[kRequestLen], const uint8_t *buf, size_t len)
     r.kind = ReplyKind::Ok;
     return r;
   }
-  if (memcmp(buf, req, kRequestLen) != 0) return invalid();
+  // FC06 echoes the whole request; FC10 echoes only slave, FC, start and count.
+  if (memcmp(buf, req, fc == kFcWriteMultiple ? 6 : kRequestLen) != 0) return invalid();
   r.kind = ReplyKind::Ok;
   return r;
 }

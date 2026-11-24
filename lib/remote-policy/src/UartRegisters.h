@@ -19,6 +19,24 @@ constexpr uint16_t kRegBootloader = 0x0102, kBootloaderMagic = 0xB007;
 constexpr uint16_t kSupportedProtocol = 1;  // link protocol this Remote speaks
 constexpr int16_t kNoReading = INT16_MIN;  // wire 0x8000
 
+// Link bootloader. While it runs, input 0x00 reads kBootloaderProtocol and the
+// inputs 0x01-0x07 describe it; unused addresses read 0.
+constexpr uint16_t kBootloaderProtocol = 0x8001;
+constexpr uint16_t kRegBootloaderVersion = 0x16;  // app input: bootloader version
+constexpr uint16_t kRegCommand = 0x0300;
+constexpr uint16_t kRegChunk = 0x0310;
+constexpr uint16_t kCmdErase = 1, kCmdBoot = 2;
+constexpr uint16_t kChunkBytes = 128;
+constexpr uint16_t kMaxChunkIndex = 223;
+constexpr uint8_t kLbErrNotBlank = 3;
+constexpr uint8_t kExcDeviceFailure = 4;
+constexpr uint8_t kBlWhy = 0x03, kBlAppCheck = 0x04, kBlLastError = 0x05, kBlTimeoutS = 0x06;
+
+// Inputs 0x01-0x07 of a bootloader read.
+struct BootloaderInfo {
+  uint16_t version, state, why, appCheck, lastError, timeoutS, chunksWritten;
+};
+
 enum class IheaterState : uint8_t { Booting = 0, Idle = 1, Heating = 2, Hold = 3, Fault = 4 };
 
 // "booting", "idle", "heating", "hold", "fault"; anything else "unknown".

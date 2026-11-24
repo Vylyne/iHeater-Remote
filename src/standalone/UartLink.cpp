@@ -4,8 +4,6 @@
 #include <esp_task_wdt.h>
 #include <string.h>
 
-#include <UartFrames.h>
-
 namespace iheaterlink::standalone {
 
 namespace {
@@ -13,16 +11,19 @@ namespace {
 constexpr uart_port_t kPort = UART_NUM_1;
 constexpr int kBaud = 115200;
 constexpr int kRxBufferBytes = 256;  // must exceed the 128-byte hardware FIFO
-// The flash job holds a 258 B write body and a 256 B read buffer on the stack.
+// The flash job holds a 139 B chunk frame, its 65 registers and a few Reply
+// structs on the stack.
 constexpr uint32_t kTaskStackBytes = 6144;
 constexpr UBaseType_t kTaskPriority = 5;
 // The longest reply is 5 + 2 * kMaxReadRegs bytes; leave a little headroom.
 constexpr size_t kReplyBufBytes = 96;
 // Used only if the task watchdog was not already running (see registerWatchdog).
 constexpr uint32_t kFallbackWdtSeconds = 5;
-// The flash job's waits are cut into slices of at most this, with the watchdog
-// fed after each, so a 10 s erase or a 30-minute cool-down never starves it.
+// Long waits (a 2 s erase or boot reply, a 30-minute cool-down) are cut into
+// slices of at most this, with the watchdog fed after each.
 constexpr uint32_t kWaitSliceMs = 500;
+// Covers sending the longest frame (139 B, about 12 ms at 115200 8N1).
+constexpr uint32_t kTxDoneMs = 20;
 
 // Builds the wire frame for a policy request. 0 when the request has no frame.
 size_t buildFrame(const policy::PollRequest &req, uint8_t out[policy::kRequestLen]) {
@@ -116,7 +117,7 @@ UartLinkView UartLink::view() const {
   return copy;
 }
 
-bool UartLink::startFlash(const uint8_t *image, size_t len, policy::FlashStart start) {
+bool UartLink::startFlash(const uint8_t *image, size_t len) {
   if (!initialized_)
     return false;
   portENTER_CRITICAL(&mux_);
@@ -125,7 +126,6 @@ bool UartLink::startFlash(const uint8_t *image, size_t len, policy::FlashStart s
     flashQueued_ = true;
     flashImage_ = image;
     flashLen_ = len;
-    flashStart_ = start;
     flashCancel_ = false;  // a stale cancel must not stop this job
   }
   portEXIT_CRITICAL(&mux_);
@@ -182,11 +182,8 @@ void UartLink::feedWatchdog() {
     esp_task_wdt_reset();
 }
 
-bool UartLink::exchange(const policy::PollRequest &req, policy::Reply &reply) {
-  uint8_t frame[policy::kRequestLen];
-  if (buildFrame(req, frame) != policy::kRequestLen)
-    return false;
-
+bool UartLink::exchangeFrame(const uint8_t *frame, size_t len, policy::Reply &reply,
+                             uint32_t timeoutMs) {
   // Anything still in the buffer belongs to an earlier, abandoned request.
   uart_flush_input(kPort);
   // No gap is needed before the follow-up request. The iHeater turns its
@@ -195,39 +192,45 @@ bool UartLink::exchange(const policy::PollRequest &req, policy::Reply &reply) {
   // cannot act on a reply until the ESP-IDF RX timeout expires, about ten
   // symbol times after the last byte, so the next request always arrives
   // with the iHeater's receiver already on again.
-  uart_write_bytes(kPort, reinterpret_cast<const char *>(frame), sizeof(frame));
-  uart_wait_tx_done(kPort, pdMS_TO_TICKS(10));
+  uart_write_bytes(kPort, reinterpret_cast<const char *>(frame), len);
+  uart_wait_tx_done(kPort, pdMS_TO_TICKS(kTxDoneMs));
 
   uint8_t buf[kReplyBufBytes];
-  size_t len = 0;
+  size_t got = 0;
   const uint32_t startMs = millis();
   for (;;) {
     const uint32_t elapsed = millis() - startMs;
-    if (elapsed >= policy::kReplyTimeoutMs)
+    if (elapsed >= timeoutMs)
       return false;
 
     // Wait for the next byte, then take whatever else has already arrived.
-    const int got = uart_read_bytes(kPort, buf + len, 1,
-                                    pdMS_TO_TICKS(policy::kReplyTimeoutMs - elapsed));
-    if (got <= 0)
+    // uart_read_bytes() applies its timeout to each wait, so a long reply
+    // wait is cut into slices with the watchdog fed after each.
+    uint32_t slice = timeoutMs - elapsed;
+    if (slice > kWaitSliceMs)
+      slice = kWaitSliceMs;
+    const int n = uart_read_bytes(kPort, buf + got, 1, pdMS_TO_TICKS(slice));
+    feedWatchdog();
+    if (n <= 0)
       continue;
-    len += static_cast<size_t>(got);
+    got += static_cast<size_t>(n);
 
     size_t avail = 0;
     if (uart_get_buffered_data_len(kPort, &avail) == ESP_OK && avail > 0) {
-      if (avail > sizeof(buf) - len)
-        avail = sizeof(buf) - len;
+      if (avail > sizeof(buf) - got)
+        avail = sizeof(buf) - got;
       if (avail > 0) {
-        const int more = uart_read_bytes(kPort, buf + len, avail, 0);
+        const int more = uart_read_bytes(kPort, buf + got, avail, 0);
         if (more > 0)
-          len += static_cast<size_t>(more);
+          got += static_cast<size_t>(more);
       }
     }
 
-    reply = policy::parseReply(frame, buf, len);
+    // For FC10, parseReply compares only the first 6 bytes of the echo.
+    reply = policy::parseReply(frame, buf, got);
     if (reply.kind != policy::ReplyKind::Incomplete)
       return true;
-    if (len >= sizeof(buf)) {
+    if (got >= sizeof(buf)) {
       // More bytes than any valid reply: not a reply to us.
       reply = policy::Reply{};
       reply.kind = policy::ReplyKind::Invalid;
@@ -238,7 +241,9 @@ bool UartLink::exchange(const policy::PollRequest &req, policy::Reply &reply) {
 
 void UartLink::runRequest(const policy::PollRequest &req, bool &gotOk) {
   policy::Reply reply;
-  const bool got = exchange(req, reply);
+  uint8_t frame[policy::kRequestLen];
+  const bool got = buildFrame(req, frame) == policy::kRequestLen &&
+                   exchangeFrame(frame, sizeof(frame), reply, policy::kReplyTimeoutMs);
   const uint32_t now = millis();
   if (got) {
     policy_.onReply(req, reply, now);
@@ -246,8 +251,6 @@ void UartLink::runRequest(const policy::PollRequest &req, bool &gotOk) {
     if (gotOk) {
       if (firstOkMs_ == 0)
         firstOkMs_ = now ? now : 1;
-      lastOkMs_ = now;
-      romDetected_ = false;  // the application is answering
     }
     if (reply.kind == policy::ReplyKind::Invalid)
       ++badReplies_;
@@ -276,7 +279,9 @@ void UartLink::publishView(bool holdUpdating) {
   v.firstOkMs = firstOkMs_;
   v.timeouts = timeouts_;
   v.badReplies = badReplies_;
-  v.romDetected = romDetected_;
+  v.inBootloader = policy_.inBootloader();
+  if (v.inBootloader)
+    v.boot = policy_.bootloader();
 
   portENTER_CRITICAL(&mux_);
   v.flash = flashStatus_;
@@ -291,13 +296,11 @@ void UartLink::runQueuedFlash(FlashPort &port) {
   bool queued = false;
   const uint8_t *image = nullptr;
   size_t len = 0;
-  policy::FlashStart start = policy::FlashStart::Normal;
   portENTER_CRITICAL(&mux_);
   if (flashQueued_) {
     queued = true;
     image = flashImage_;
     len = flashLen_;
-    start = flashStart_;
     flashQueued_ = false;
     flashRunning_ = true;
     // Drop the last job's status now, so nobody reads its outcome as this one's.
@@ -310,12 +313,10 @@ void UartLink::runQueuedFlash(FlashPort &port) {
   if (!queued)
     return;
 
-  // Every return path of the job leaves UART1 at 8N1 with its input flushed
-  // (FlashPort::setParity). apply() calls meanwhile stay pending.
-  const policy::FlashStatus result = policy::runFlashJob(port, image, len, start);
+  // The job speaks Modbus at 8N1, as the poll does. apply() calls meanwhile
+  // stay pending.
+  const policy::FlashStatus result = policy::runFlashJob(port, image, len);
   feedWatchdog();
-  if (result.outcome == policy::FlashOutcome::Updated)
-    romDetected_ = false;  // the new application answered
 
   portENTER_CRITICAL(&mux_);
   flashStatus_ = result;
@@ -373,17 +374,6 @@ void UartLink::taskLoop() {
       }
     }
 
-    // 3b. With no Ok reply for a while, look for the iHeater's ROM bootloader,
-    // but never while a job is queued (it would be taken next cycle anyway).
-    if (!gotOk && !flashBusy() && policy::romProbeDue(millis(), lastOkMs_, lastProbeMs_)) {
-      // Sticky: only a Modbus Ok (or a finished update) clears it, so one
-      // unlucky probe can't flip the Recovery start off and on.
-      if (policy::probeRom(port))
-        romDetected_ = true;
-      lastProbeMs_ = millis();
-      feedWatchdog();
-    }
-
     // 4. Publish the results for the main loop.
     publishView();
 
@@ -400,56 +390,9 @@ void UartLink::taskLoop() {
   }
 }
 
-void UartLink::FlashPort::setParity(policy::LinkParity parity) {
-  uart_wait_tx_done(kPort, pdMS_TO_TICKS(20));
-  uart_set_parity(kPort, parity == policy::LinkParity::Even ? UART_PARITY_EVEN
-                                                             : UART_PARITY_DISABLE);
-  uart_flush_input(kPort);
-}
-
-void UartLink::FlashPort::send(const uint8_t *data, size_t len) {
-  uart_write_bytes(kPort, reinterpret_cast<const char *>(data), len);
-  uart_wait_tx_done(kPort, pdMS_TO_TICKS(100));
-}
-
-size_t UartLink::FlashPort::receive(uint8_t *buf, size_t len, uint32_t timeoutMs) {
-  // Wait for one byte at a time, then take whatever else has already arrived,
-  // as exchange() does. uart_read_bytes() applies its timeout to each wait,
-  // not to the whole call, so asking it for many bytes on a line that
-  // trickles could block far past the slice and the deadline.
-  size_t got = 0;
-  const uint32_t startMs = millis();
-  while (got < len) {
-    const uint32_t elapsed = millis() - startMs;
-    if (elapsed >= timeoutMs)
-      break;
-    uint32_t slice = timeoutMs - elapsed;
-    if (slice > kWaitSliceMs)
-      slice = kWaitSliceMs;
-    const int n = uart_read_bytes(kPort, buf + got, 1, pdMS_TO_TICKS(slice));
-    link_.feedWatchdog();
-    if (n <= 0)
-      continue;
-    got += static_cast<size_t>(n);
-
-    size_t avail = 0;
-    if (got < len && uart_get_buffered_data_len(kPort, &avail) == ESP_OK && avail > 0) {
-      if (avail > len - got)
-        avail = len - got;
-      const int more = uart_read_bytes(kPort, buf + got, avail, 0);
-      if (more > 0)
-        got += static_cast<size_t>(more);
-    }
-  }
-  return got;
-}
-
-void UartLink::FlashPort::flushInput() {
-  uart_flush_input(kPort);
-}
-
-bool UartLink::FlashPort::modbus(const policy::PollRequest &req, policy::Reply &reply) {
-  const bool got = link_.exchange(req, reply);
+bool UartLink::FlashPort::exchange(const uint8_t *frame, size_t len, policy::Reply &reply,
+                                   uint32_t timeoutMs) {
+  const bool got = link_.exchangeFrame(frame, len, reply, timeoutMs);
   link_.feedWatchdog();
   return got;
 }

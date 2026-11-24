@@ -153,6 +153,77 @@ void test_parse_write_echo_mismatch() {
   TEST_ASSERT_EQUAL((int)ReplyKind::Invalid, (int)parseReply(req, resp, n).kind);
 }
 
+static void fc10Values(uint16_t v[kMaxWriteRegs]) {
+  for (int i = 0; i < kMaxWriteRegs; i++) v[i] = (uint16_t)(0x1200 + 0x0101 * i);
+}
+
+static void fc10Echo(uint16_t count, uint8_t out[8]) {
+  out[0] = 1;
+  out[1] = 0x10;
+  out[2] = 0x03;
+  out[3] = 0x10;
+  out[4] = (uint8_t)(count >> 8);
+  out[5] = (uint8_t)(count & 0xFF);
+  setCrc(out, 6);
+}
+
+void test_build_write_multiple_layout() {
+  uint16_t v[kMaxWriteRegs];
+  fc10Values(v);
+  uint8_t f[kMaxFrameLen];
+  TEST_ASSERT_EQUAL(139, buildWriteMultiple(0x0310, v, 65, f, sizeof f));
+  const uint8_t head[] = {0x01, 0x10, 0x03, 0x10, 0x00, 0x41, 0x82};
+  TEST_ASSERT_EQUAL_HEX8_ARRAY(head, f, 7);
+  for (int i = 0; i < 65; i++) {
+    TEST_ASSERT_EQUAL_HEX8(v[i] >> 8, f[7 + 2 * i]);
+    TEST_ASSERT_EQUAL_HEX8(v[i] & 0xFF, f[8 + 2 * i]);
+  }
+  uint16_t crc = modbus_crc16(f, 137);
+  TEST_ASSERT_EQUAL_HEX8(crc & 0xFF, f[137]);
+  TEST_ASSERT_EQUAL_HEX8(crc >> 8, f[138]);
+}
+
+void test_build_write_multiple_rejects() {
+  uint16_t v[kMaxWriteRegs + 1] = {};
+  uint8_t f[kMaxFrameLen + 4];
+  TEST_ASSERT_EQUAL(0, buildWriteMultiple(0x0310, v, 0, f, sizeof f));
+  TEST_ASSERT_EQUAL(0, buildWriteMultiple(0x0310, v, 66, f, sizeof f));
+  TEST_ASSERT_EQUAL(0, buildWriteMultiple(0x0310, v, 65, f, 138));
+}
+
+void test_parse_write_multiple_ok() {
+  uint16_t v[kMaxWriteRegs];
+  fc10Values(v);
+  uint8_t f[kMaxFrameLen], resp[8];
+  buildWriteMultiple(0x0310, v, 65, f, sizeof f);
+  fc10Echo(65, resp);
+  Reply r = parseReply(f, resp, 8);
+  TEST_ASSERT_EQUAL((int)ReplyKind::Ok, (int)r.kind);
+  TEST_ASSERT_EQUAL(0, r.count);
+  TEST_ASSERT_EQUAL((int)ReplyKind::Incomplete, (int)parseReply(f, resp, 7).kind);
+}
+
+void test_parse_write_multiple_wrong_count() {
+  uint16_t v[kMaxWriteRegs];
+  fc10Values(v);
+  uint8_t f[kMaxFrameLen], resp[8];
+  buildWriteMultiple(0x0310, v, 65, f, sizeof f);
+  fc10Echo(0x40, resp);
+  TEST_ASSERT_EQUAL((int)ReplyKind::Invalid, (int)parseReply(f, resp, 8).kind);
+}
+
+void test_parse_write_multiple_exception() {
+  uint16_t v[kMaxWriteRegs];
+  fc10Values(v);
+  uint8_t f[kMaxFrameLen];
+  buildWriteMultiple(0x0310, v, 65, f, sizeof f);
+  uint8_t resp[5] = {0x01, 0x90, 0x04, 0, 0};
+  setCrc(resp, 3);
+  Reply r = parseReply(f, resp, 5);
+  TEST_ASSERT_EQUAL((int)ReplyKind::Exception, (int)r.kind);
+  TEST_ASSERT_EQUAL_HEX8(0x04, r.exception);
+}
+
 static void fillInputs(uint16_t r[22]) {
   memset(r, 0, 22 * sizeof(uint16_t));
   r[0] = 1;
@@ -616,8 +687,81 @@ void test_quiet_return_without_result_one_not_ok() {
   TEST_ASSERT_FALSE(p.lastClearOk());
 }
 
+static Reply bootloaderReply() {
+  Reply r;
+  r.kind = ReplyKind::Ok;
+  r.count = kInputCount;
+  for (int i = 0; i < kInputCount; i++) r.regs[i] = 0;
+  r.regs[0] = 0x8001;
+  r.regs[3] = 2;
+  r.regs[4] = 4;
+  r.regs[6] = 30;
+  return r;
+}
+
+void test_bootloader_detected() {
+  UartPollPolicy p;
+  feedInputs(p, bootloaderReply(), 100);
+  TEST_ASSERT_TRUE(p.inBootloader());
+  TEST_ASSERT_EQUAL(2, p.bootloader().why);
+  TEST_ASSERT_EQUAL(4, p.bootloader().appCheck);
+  TEST_ASSERT_EQUAL(30, p.bootloader().timeoutS);
+  TEST_ASSERT_EQUAL(LinkStatus::Updating, p.link(100));
+}
+
+void test_bootloader_drops_snapshot() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply(), 0);
+  TEST_ASSERT_TRUE(p.hasSnapshot());
+  feedInputs(p, bootloaderReply(), 200);
+  TEST_ASSERT_FALSE(p.hasSnapshot());
+  TEST_ASSERT_FALSE(p.protocolSupported());
+}
+
+void test_bootloader_holds_writes() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply(), 0);
+  feedSettings(p, 0);
+  p.setDesired(60.0f, {45, 85});
+  TEST_ASSERT_EQUAL(PollKind::WriteTarget, p.followUp(0).kind);
+  feedInputs(p, bootloaderReply(), 200);
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(200).kind);
+}
+
+void test_bootloader_forgets_limits() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply(), 0);
+  feedSettings(p, 0);
+  TEST_ASSERT_TRUE(p.hasLimits());
+  feedInputs(p, bootloaderReply(), 200);
+  feedInputs(p, inputsReply(), 400);
+  TEST_ASSERT_FALSE(p.hasLimits());
+  TEST_ASSERT_EQUAL(PollKind::ReadSettings, p.followUp(400).kind);
+}
+
+void test_bootloader_left_on_app_read() {
+  UartPollPolicy p;
+  feedInputs(p, bootloaderReply(), 0);
+  feedInputs(p, inputsReply(), 200);
+  TEST_ASSERT_FALSE(p.inBootloader());
+  TEST_ASSERT_EQUAL(LinkStatus::Up, p.link(200));
+}
+
+void test_bootloader_silent_ages_to_no_reply() {
+  UartPollPolicy p;
+  feedInputs(p, bootloaderReply(), 0);
+  p.onNoReply(p.cycleRead(), kNoReplyAfterMs);
+  TEST_ASSERT_EQUAL(LinkStatus::NoReply, p.link(kNoReplyAfterMs));
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_bootloader_detected);
+  RUN_TEST(test_bootloader_drops_snapshot);
+  RUN_TEST(test_bootloader_holds_writes);
+  RUN_TEST(test_bootloader_forgets_limits);
+  RUN_TEST(test_bootloader_left_on_app_read);
+  RUN_TEST(test_bootloader_silent_ages_to_no_reply);
   RUN_TEST(test_build_read_vector);
   RUN_TEST(test_build_read_rejects);
   RUN_TEST(test_loopback_read_inputs);
@@ -629,6 +773,11 @@ int main() {
   RUN_TEST(test_parse_wrong_address_invalid);
   RUN_TEST(test_parse_byte_count_mismatch);
   RUN_TEST(test_parse_write_echo_mismatch);
+  RUN_TEST(test_build_write_multiple_layout);
+  RUN_TEST(test_build_write_multiple_rejects);
+  RUN_TEST(test_parse_write_multiple_ok);
+  RUN_TEST(test_parse_write_multiple_wrong_count);
+  RUN_TEST(test_parse_write_multiple_exception);
   RUN_TEST(test_decode_inputs_fields);
   RUN_TEST(test_decode_negative_and_invalid);
   RUN_TEST(test_decode_wrong_count);
