@@ -1,6 +1,6 @@
 # iHeater update through the link bootloader — design
 
-Status: draft (2026-11-24).
+Status: approved (2026-11-24).
 
 Supersedes the update path in `2026-11-22-iheater-link-flash-design.md`.
 The contract this builds against is iHeater-Standalone-Firmware
