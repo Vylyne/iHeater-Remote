@@ -2,6 +2,7 @@
 #include "standalone/AuthPages.h"
 #include "standalone/AuthScript.h"
 #include "standalone/AuthStore.h"
+#include "standalone/EventFeed.h"
 #include "standalone/MoonrakerLink.h"
 #include "standalone/RemoteDashboard.h"
 #include "standalone/RemoteSettings.h"
@@ -28,6 +29,7 @@
 #include <AuthCrypto.h>
 #include <AuthPolicy.h>
 #include <AuthState.h>
+#include <EventTracker.h>
 #include <FirmwareImage.h>
 #include <KlipperOverride.h>
 #include <RemotePolicy.h>
@@ -242,6 +244,14 @@ bool refuseHeatForOutputSwitch() {
   return true;
 }
 
+// An Action event for a target change, unless the policy says it is not worth
+// one (the boot decision).
+void recordTargetEvent(const char *source, float targetC) {
+  char text[policy::kEventTextMax + 1];
+  if (policy::targetEventText(source, targetC, text))
+    feedRecord(policy::EventKind::Action, "%s", text);
+}
+
 void applyIntegrationTarget(float targetTempC, const char *source,
                             const char *targetSource) {
   // Any target decision supersedes the boot read-back of the iHeater's target.
@@ -249,6 +259,7 @@ void applyIntegrationTarget(float targetTempC, const char *source,
   if (targetTempC > 0.0f && refuseHeatForOutputSwitch())
     targetTempC = 0.0f;
   targetTempC = policy::clampTargetC(targetTempC, s_range);
+  recordTargetEvent(source, targetTempC);
   s_targetSource = targetSource;
   ControllerOutputCommand cmd{};
   if (targetTempC > 0.0f) {
@@ -305,8 +316,8 @@ void applyMode(uint8_t mode, const char *source, bool userPress = true) {
   if (mode != 0 && refuseHeatForOutputSwitch())
     mode = 0;
 
-  if (userPress)
-    s_override.press(klipperSource());
+  if (userPress && s_override.press(klipperSource()))
+    feedRecord(policy::EventKind::Action, "Manual override of Klipper started");
   s_mode = mode;
   if (mode == 0) {
     s_timerOffAtMs = 0;
@@ -324,6 +335,7 @@ void applyMode(uint8_t mode, const char *source, bool userPress = true) {
     cmd.mode = ControllerOutputMode::TargetTemperature;
     cmd.targetTempC = policy::clampTargetC(kModeTempsC[mode], s_range);
   }
+  recordTargetEvent(source, cmd.targetTempC);
   s_targetSource = "manual";
   writeResumeRecord();
   s_output->apply(cmd);
@@ -554,10 +566,17 @@ void logUartFlash(const policy::FlashStatus &flash) {
   }
   if (flash.outcome != s_lastOutcome) {
     s_lastOutcome = flash.outcome;
-    if (flash.outcome != policy::FlashOutcome::None)
+    if (flash.outcome != policy::FlashOutcome::None) {
       Serial.printf("[UART] flash outcome=%s phase=%s retries=%u%s%s\n",
                     policy::flashOutcomeName(flash.outcome), policy::flashPhaseName(flash.failedPhase),
                     static_cast<unsigned>(flash.retries), flash.detail[0] ? " " : "", flash.detail);
+      if (flash.outcome == policy::FlashOutcome::Updated)
+        feedRecord(policy::EventKind::Info, "iHeater updated");
+      else
+        feedRecord(policy::EventKind::Error, "iHeater update failed: %s%s%s",
+                   policy::flashOutcomeName(flash.outcome), flash.detail[0] ? " " : "",
+                   flash.detail);
+    }
   }
 }
 
@@ -1051,11 +1070,12 @@ void pushStatusIfChanged(bool force = false) {
   }
 }
 
-void onStatusSocketEvent(uint8_t client, WStype_t type, uint8_t *, size_t) {
+void onStatusSocketEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t len) {
   if (type == WStype_CONNECTED) {
     String status = statusJson();
     s_statusSocket.sendTXT(client, status);
   }
+  feedOnSocketEvent(client, type, payload, len);
 }
 
 void handleModePost() {
@@ -1094,6 +1114,10 @@ void handleTimerPost() {
   }
 
   writeResumeRecord();
+  if (s_timerMinutes > 0)
+    feedRecord(policy::EventKind::Action, "Timer set to %u min", static_cast<unsigned>(s_timerMinutes));
+  else
+    feedRecord(policy::EventKind::Action, "Timer off");
   Serial.printf("[REMOTE] web timer=%umin\n", s_timerMinutes);
   sendActionStatus();
 }
@@ -1347,6 +1371,7 @@ void handleSetupPost() {
     s_server.send(400, "text/plain", error);
     return;
   }
+  feedRecord(policy::EventKind::Action, "Setup saved");
 
   String ssid = s_server.arg("ssid");
   const String password = s_server.arg("password");
@@ -1413,6 +1438,7 @@ void handleWifiPost() {
   s_stationSsid = ssid;
   s_wifiCredentialSource = "stored";
   scheduleRestart();
+  feedRecord(policy::EventKind::Action, "Wi-Fi settings saved, restarting");
   Serial.printf("[REMOTE] saved WiFi SSID=%s, restarting\n", ssid.c_str());
   sendActionStatus();
 }
@@ -1430,6 +1456,7 @@ void handleWifiClearPost() {
   s_stationSsid = "";
   s_wifiCredentialSource = "none";
   scheduleRestart();
+  feedRecord(policy::EventKind::Action, "Wi-Fi forgotten, restarting");
   Serial.println("[REMOTE] cleared stored WiFi credentials, restarting");
   sendActionStatus();
 }
@@ -1482,12 +1509,14 @@ void handleOtaUpload() {
     // recovery (Klipper read-back, Manual RTC record) picks it up again.
     if (s_outputKind == OutputKind::Pulse)
       applyMode(0, "ota:start", false);
+    feedRecord(policy::EventKind::Action, "Remote update started");
     Serial.printf("[REMOTE] OTA upload start filename=%s\n",
                   upload.filename.c_str());
 
     if (!Update.begin(UPDATE_SIZE_UNKNOWN, U_FLASH)) {
       s_otaError = Update.errorString();
       Serial.printf("[REMOTE] OTA begin failed: %s\n", s_otaError.c_str());
+      feedRecord(policy::EventKind::Error, "Remote update failed: %s", s_otaError.c_str());
     }
   } else if (s_otaRefused) {
     return;
@@ -1498,6 +1527,7 @@ void handleOtaUpload() {
       if (written != upload.currentSize) {
         s_otaError = Update.errorString();
         Serial.printf("[REMOTE] OTA write failed: %s\n", s_otaError.c_str());
+        feedRecord(policy::EventKind::Error, "Remote update failed: %s", s_otaError.c_str());
       }
     }
   } else if (upload.status == UPLOAD_FILE_END) {
@@ -1506,10 +1536,12 @@ void handleOtaUpload() {
       s_otaError = "";
       Serial.printf("[REMOTE] OTA upload complete bytes=%u\n",
                     (unsigned)s_otaBytesWritten);
+      feedRecord(policy::EventKind::Info, "Remote updated, restarting");
     } else {
       s_otaOk = false;
       s_otaError = Update.errorString();
       Serial.printf("[REMOTE] OTA end failed: %s\n", s_otaError.c_str());
+      feedRecord(policy::EventKind::Error, "Remote update failed: %s", s_otaError.c_str());
     }
     s_otaActive = false;
   } else if (upload.status == UPLOAD_FILE_ABORTED) {
@@ -1518,6 +1550,7 @@ void handleOtaUpload() {
     s_otaOk = false;
     s_otaError = "upload aborted";
     Serial.println("[REMOTE] OTA upload aborted");
+    feedRecord(policy::EventKind::Error, "Remote update failed: %s", s_otaError.c_str());
   }
 }
 
@@ -1598,6 +1631,7 @@ void handleIheaterStart(bool retry) {
     return;
   }
   s_ihJobImageSeq = s_ihImageSeq;
+  feedRecord(policy::EventKind::Action, "iHeater update started");
   Serial.printf("[REMOTE] iHeater update queued (%s)\n", retry ? "retry" : "update");
   sendActionStatus();
 }
@@ -2377,6 +2411,114 @@ bool softwareReset() {
   }
 }
 
+// Short name of the reset reason, for the "Remote started" event.
+const char *resetReasonName() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:
+      return "power-on";
+    case ESP_RST_SW:
+      return "software";
+    case ESP_RST_PANIC:
+      return "panic";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:
+      return "watchdog";
+    case ESP_RST_BROWNOUT:
+      return "brownout";
+    default:
+      return "other";
+  }
+}
+
+// Every 250 ms: compares the Wi-Fi, Moonraker and iHeater link state with the
+// last look and records what changed. The raw lastError() never goes in an
+// event (it can carry the pairing token).
+void updateEventTracker() {
+  static policy::EventTracker s_tracker;
+  static uint32_t s_checkedAtMs = 0;
+  static policy::WifiState s_wifi = policy::WifiState::Connecting;
+  // The last snapshot's values. The tracker overwrites its baseline on every
+  // call, so a gap without a snapshot must not read as "fault cleared".
+  static uint8_t s_fault = 0;
+  static uint16_t s_proto = 0;
+  static bool s_protoOk = true;
+  static uint32_t s_ihUptimeS = 0;
+  static uint16_t s_resetCause = 0;
+  const uint32_t now = millis();
+  if (now - s_checkedAtMs < 250)
+    return;
+  s_checkedAtMs = now;
+
+  policy::TrackedState st;
+  if (s_apMode)
+    s_wifi = policy::WifiState::Ap;
+  else if (WiFi.status() == WL_CONNECTED)
+    s_wifi = policy::WifiState::Joined;
+  else if (s_wifi == policy::WifiState::Joined || s_wifi == policy::WifiState::Lost)
+    s_wifi = policy::WifiState::Lost;
+  else
+    s_wifi = policy::WifiState::Connecting;
+  st.wifi = s_wifi;
+
+  if (klipperSource()) {
+    const char *moon = s_moonraker.stateString();
+    if (strcmp(moon, "ready") == 0)
+      st.moon = policy::MoonState::Ready;
+    else if (strcmp(moon, "klippy-not-ready") == 0)
+      st.moon = policy::MoonState::NotReady;
+    else if (strcmp(moon, "connecting") == 0)
+      st.moon = policy::MoonState::Connecting;
+    else
+      st.moon = policy::MoonState::Disconnected;
+    st.paired = s_moonraker.heaterObject().length() > 0;
+  }
+
+  if (s_outputKind == OutputKind::Uart && s_uart.isEnabled()) {
+    const UartLinkView view = s_uart.view();
+    st.uart = true;
+    st.link = view.link;
+    st.hasSnapshot = view.hasSnapshot;
+    if (view.hasSnapshot) {
+      s_fault = view.snap.activeFault;
+      s_proto = view.snap.proto;
+      s_protoOk = view.protocolSupported;
+      s_ihUptimeS = view.snap.uptimeS;
+      s_resetCause = view.snap.resetCause;
+    }
+    st.fault = s_fault;
+    st.proto = s_proto;
+    st.protocolSupported = s_protoOk;
+    st.ihUptimeS = s_ihUptimeS;
+    st.resetCause = s_resetCause;
+    st.clear = view.clear;
+    st.lastClearOk = view.lastClearOk;
+  }
+
+  policy::TrackedEvent events[8];
+  const size_t n = s_tracker.update(st, events, 8);
+  for (size_t i = 0; i < n; i++)
+    feedRecord(events[i].kind, "%s", events[i].text);
+}
+
+// The newest graph sample: the iHeater's air and heater readings while the UART
+// link is up, and the target the Remote is asking for. Pulse output has no
+// readings and no data.
+policy::HistSample currentHistSample() {
+  policy::HistSample sample;
+  if (s_outputKind != OutputKind::Uart || !s_uart.isEnabled())
+    return sample;
+  const UartLinkView view = s_uart.view();
+  if (view.hasSnapshot && view.link == policy::LinkStatus::Up) {
+    sample.airT10 = view.snap.airT10;
+    sample.heaterT10 = view.snap.heaterT10;
+  }
+  const auto last = s_uart.getLastCommand();
+  if (last.mode == ControllerOutputMode::TargetTemperature)
+    sample.targetT10 = static_cast<int16_t>(lroundf(last.targetTempC * 10.0f));
+  return sample;
+}
+
 // After loadRemoteSettings(): decide what the output does at boot.
 void bootDecision() {
   s_resumeLocked = false;
@@ -2445,6 +2587,9 @@ void setup() {
   delay(100);
   Serial.println();
   Serial.println("[REMOTE] iHeater Remote firmware starting");
+  // First, so the events of the boot decision below are in the log too.
+  feedBegin(s_statusSocket);
+  feedRecord(policy::EventKind::Info, "Remote started (%s)", resetReasonName());
 
   if (ledEnabled()) {
     pinMode(IHEATER_STATUS_LED_PIN, OUTPUT);
@@ -2484,7 +2629,12 @@ void setup() {
     s_hours.begin(storedHours, millis());
   }
   s_moonraker.onTarget(onKlipperTarget);
-  s_moonraker.onUnpaired([]() { s_override.reset(); });
+  s_moonraker.onUnpaired([]() {
+    s_override.reset();
+    // A fixed text: lastError() can carry the pairing token.
+    feedRecord(policy::EventKind::Warn, "%s",
+               policy::unpairReasonText(s_moonraker.lastError().c_str()));
+  });
   if (klipperSource())
     s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
   configureRoutes();
@@ -2507,6 +2657,7 @@ void loop() {
   if (s_hours.tick(millis()))
     saveRunningHours(s_hours.hours());
   s_statusSocket.loop();
+  feedLoop(millis(), currentHistSample());
   updateButton();
   updateHeatTimer();
   updateResumeRefresh();
@@ -2520,6 +2671,7 @@ void loop() {
   s_moonraker.loop();
   updateKlipperReport();
   updateUartLinkLog();
+  updateEventTracker();
   updateIheaterImageHousekeeping();
   updateHeapLog();
   pushStatusIfChanged();
