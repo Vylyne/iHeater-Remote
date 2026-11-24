@@ -1640,7 +1640,7 @@ String ipText(uint32_t ip) {
 
 struct RequestAuth {
   policy::RequestClass cls;
-  policy::AuthVerdict verdict;
+  policy::AuthVerdict verdict = policy::AuthVerdict::NeedLogin;  // refuse until computed
   policy::AuthMethod method;
   bool viaHttpsProxy;
   uint32_t client;

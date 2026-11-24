@@ -371,7 +371,8 @@ AuthVerdict decideRequest(const RequestFacts &f) {
     case RequestClass::Public:
       break;
   }
-  return AuthVerdict::Allow;
+  // Not reached today. A class added later without its own case is refused.
+  return AuthVerdict::NeedLogin;
 }
 
 ProxyOnlySave checkProxyOnlySave(bool proxyOnly, bool apMode,

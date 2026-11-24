@@ -43,7 +43,9 @@ bool validHeaderName(const char *name);
 enum class AuthMethod : uint8_t { None, Password, Header };
 AuthMethod authMethod(bool cookieValid, bool headerOk);  // the cookie wins
 
-enum class AuthVerdict : uint8_t { Allow, NeedLogin, BadOrigin, ProxyOnly };
+// NeedLogin comes first so a verdict that was never computed (AuthVerdict{})
+// refuses rather than allows.
+enum class AuthVerdict : uint8_t { NeedLogin, Allow, BadOrigin, ProxyOnly };
 struct RequestFacts {
   RequestClass cls;
   bool apMode;

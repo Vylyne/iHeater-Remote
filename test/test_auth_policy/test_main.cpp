@@ -361,6 +361,19 @@ void test_decide_public_always_allowed() {
   TEST_ASSERT_EQUAL_INT((int)AuthVerdict::Allow, (int)decideRequest(f));
 }
 
+// A request class added later without its own case must be refused, not let
+// through.
+void test_decide_unknown_class_fails_closed() {
+  RequestFacts f = facts(static_cast<RequestClass>(99));
+  f.loggedIn = true;
+  TEST_ASSERT_EQUAL_INT((int)AuthVerdict::NeedLogin, (int)decideRequest(f));
+}
+
+// A verdict that was never computed (a value-initialized one) must not allow.
+void test_default_verdict_fails_closed() {
+  TEST_ASSERT_EQUAL_INT((int)AuthVerdict::NeedLogin, (int)AuthVerdict{});
+}
+
 void test_decide_login_endpoint() {
   RequestFacts f = facts(RequestClass::LoginEndpoint);
   TEST_ASSERT_EQUAL_INT((int)AuthVerdict::Allow, (int)decideRequest(f));
@@ -584,6 +597,8 @@ int main(int, char **) {
   RUN_TEST(test_decide_protected_page);
   RUN_TEST(test_decide_action);
   RUN_TEST(test_decide_proxy_only);
+  RUN_TEST(test_decide_unknown_class_fails_closed);
+  RUN_TEST(test_default_verdict_fails_closed);
   RUN_TEST(test_proxy_only_save_off_or_ap_always_allowed);
   RUN_TEST(test_proxy_only_save_listed_https_peer_allowed);
   RUN_TEST(test_proxy_only_save_unlisted_peer_refused);
