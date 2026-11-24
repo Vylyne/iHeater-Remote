@@ -153,6 +153,77 @@ void test_parse_write_echo_mismatch() {
   TEST_ASSERT_EQUAL((int)ReplyKind::Invalid, (int)parseReply(req, resp, n).kind);
 }
 
+static void fc10Values(uint16_t v[kMaxWriteRegs]) {
+  for (int i = 0; i < kMaxWriteRegs; i++) v[i] = (uint16_t)(0x1200 + 0x0101 * i);
+}
+
+static void fc10Echo(uint16_t count, uint8_t out[8]) {
+  out[0] = 1;
+  out[1] = 0x10;
+  out[2] = 0x03;
+  out[3] = 0x10;
+  out[4] = (uint8_t)(count >> 8);
+  out[5] = (uint8_t)(count & 0xFF);
+  setCrc(out, 6);
+}
+
+void test_build_write_multiple_layout() {
+  uint16_t v[kMaxWriteRegs];
+  fc10Values(v);
+  uint8_t f[kMaxFrameLen];
+  TEST_ASSERT_EQUAL(139, buildWriteMultiple(0x0310, v, 65, f, sizeof f));
+  const uint8_t head[] = {0x01, 0x10, 0x03, 0x10, 0x00, 0x41, 0x82};
+  TEST_ASSERT_EQUAL_HEX8_ARRAY(head, f, 7);
+  for (int i = 0; i < 65; i++) {
+    TEST_ASSERT_EQUAL_HEX8(v[i] >> 8, f[7 + 2 * i]);
+    TEST_ASSERT_EQUAL_HEX8(v[i] & 0xFF, f[8 + 2 * i]);
+  }
+  uint16_t crc = modbus_crc16(f, 137);
+  TEST_ASSERT_EQUAL_HEX8(crc & 0xFF, f[137]);
+  TEST_ASSERT_EQUAL_HEX8(crc >> 8, f[138]);
+}
+
+void test_build_write_multiple_rejects() {
+  uint16_t v[kMaxWriteRegs + 1] = {};
+  uint8_t f[kMaxFrameLen + 4];
+  TEST_ASSERT_EQUAL(0, buildWriteMultiple(0x0310, v, 0, f, sizeof f));
+  TEST_ASSERT_EQUAL(0, buildWriteMultiple(0x0310, v, 66, f, sizeof f));
+  TEST_ASSERT_EQUAL(0, buildWriteMultiple(0x0310, v, 65, f, 138));
+}
+
+void test_parse_write_multiple_ok() {
+  uint16_t v[kMaxWriteRegs];
+  fc10Values(v);
+  uint8_t f[kMaxFrameLen], resp[8];
+  buildWriteMultiple(0x0310, v, 65, f, sizeof f);
+  fc10Echo(65, resp);
+  Reply r = parseReply(f, resp, 8);
+  TEST_ASSERT_EQUAL((int)ReplyKind::Ok, (int)r.kind);
+  TEST_ASSERT_EQUAL(0, r.count);
+  TEST_ASSERT_EQUAL((int)ReplyKind::Incomplete, (int)parseReply(f, resp, 7).kind);
+}
+
+void test_parse_write_multiple_wrong_count() {
+  uint16_t v[kMaxWriteRegs];
+  fc10Values(v);
+  uint8_t f[kMaxFrameLen], resp[8];
+  buildWriteMultiple(0x0310, v, 65, f, sizeof f);
+  fc10Echo(0x40, resp);
+  TEST_ASSERT_EQUAL((int)ReplyKind::Invalid, (int)parseReply(f, resp, 8).kind);
+}
+
+void test_parse_write_multiple_exception() {
+  uint16_t v[kMaxWriteRegs];
+  fc10Values(v);
+  uint8_t f[kMaxFrameLen];
+  buildWriteMultiple(0x0310, v, 65, f, sizeof f);
+  uint8_t resp[5] = {0x01, 0x90, 0x04, 0, 0};
+  setCrc(resp, 3);
+  Reply r = parseReply(f, resp, 5);
+  TEST_ASSERT_EQUAL((int)ReplyKind::Exception, (int)r.kind);
+  TEST_ASSERT_EQUAL_HEX8(0x04, r.exception);
+}
+
 static void fillInputs(uint16_t r[22]) {
   memset(r, 0, 22 * sizeof(uint16_t));
   r[0] = 1;
@@ -629,6 +700,11 @@ int main() {
   RUN_TEST(test_parse_wrong_address_invalid);
   RUN_TEST(test_parse_byte_count_mismatch);
   RUN_TEST(test_parse_write_echo_mismatch);
+  RUN_TEST(test_build_write_multiple_layout);
+  RUN_TEST(test_build_write_multiple_rejects);
+  RUN_TEST(test_parse_write_multiple_ok);
+  RUN_TEST(test_parse_write_multiple_wrong_count);
+  RUN_TEST(test_parse_write_multiple_exception);
   RUN_TEST(test_decode_inputs_fields);
   RUN_TEST(test_decode_negative_and_invalid);
   RUN_TEST(test_decode_wrong_count);
