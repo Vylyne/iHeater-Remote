@@ -40,6 +40,16 @@ ImageInfo checkImage(const uint8_t *data, size_t len) {
     info.result = ImageCheck::TooLarge;
     return info;
   }
+  // A ROM build links at 0x08000000, so its vectors would fail the range checks
+  // below; when the record parses, name the wrong build type first.
+  if (len >= kMarkerOffset + kMarkerBytes && rd32(data + kMarkerOffset) == kMarkerMagic) {
+    const uint8_t *r = data + kMarkerOffset;
+    if (rd16(r + 0x04) == kMarkerVersion && rd16(r + 0x06) == kMarkerBytes && rd16(r + 0x08) != kBuildTypeApp) {
+      info.buildType = rd16(r + 0x08);
+      info.result = ImageCheck::WrongBuildType;
+      return info;
+    }
+  }
   uint32_t sp = rd32(data);
   if (sp < kRamBase || sp > kRamEnd) {
     info.result = ImageCheck::BadStackPointer;

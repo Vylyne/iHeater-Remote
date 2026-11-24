@@ -110,6 +110,18 @@ void test_rejects_rom_build_naming_type() {
   TEST_ASSERT_EQUAL_UINT(0, small[7]);
 }
 
+void test_rom_build_with_rom_vectors_names_type() {
+  std::vector<uint8_t> b = makeImage(1024);
+  put32(b, 4, 0x08000101);
+  put16(b, kRec + 8, 1);
+  patchImage(b, 1024, 0x1A2B3C4D, 0);
+  ImageInfo info = checkImage(b.data(), b.size());
+  TEST_ASSERT_EQUAL((int)ImageCheck::WrongBuildType, (int)info.result);
+  char out[160];
+  imageCheckDetail(info, out, sizeof out);
+  TEST_ASSERT_NOT_NULL(strstr(out, "build_type 1"));
+}
+
 void test_rejects_bootloader_build() {
   std::vector<uint8_t> b = makeImage(1024);
   put16(b, kRec + 8, 3);
@@ -236,6 +248,7 @@ int main(int, char **) {
   RUN_TEST(test_max_image_bytes);
   RUN_TEST(test_accepts_app_build);
   RUN_TEST(test_rejects_rom_build_naming_type);
+  RUN_TEST(test_rom_build_with_rom_vectors_names_type);
   RUN_TEST(test_rejects_bootloader_build);
   RUN_TEST(test_no_record_refused);
   RUN_TEST(test_reset_vector_below_app_base);
