@@ -447,6 +447,7 @@ void test_boot_reply_lost_polls_for_app() {
 
 void test_boot_resend_lands_in_app() {
   FakeIheater f;
+  f.appBootMs = 1000;  // an app up before the 2 s resend, so the resend lands in it
   f.inject(Frame::Boot, Fault::DropReply);
   const FlashStatus st = updated(f, testImage());
   const auto boots = f.frames(Frame::Boot);
@@ -468,7 +469,23 @@ void test_app_never_answers() {
   TEST_ASSERT_TRUE(waited < kAppWaitMs + kJobReplyMs + kEntryPollMs);
   TEST_ASSERT_FALSE(applicationIntact(st));
   TEST_ASSERT_TRUE(retryAllowed(st.outcome));
-  TEST_ASSERT_EQUAL_STRING("no reply 5 s after boot", st.detail);
+  TEST_ASSERT_EQUAL_STRING("no reply 15 s after boot", st.detail);
+}
+
+// The real app is silent for about 5 s after the boot command (reset_LEDs(10),
+// init, then a flush of the link), so the job must keep polling past that.
+void test_app_silent_while_booting_still_updates() {
+  FakeIheater f;
+  f.appBootMs = 5500;
+  updated(f, testImage());
+  const auto boots = f.frames(Frame::Boot);
+  TEST_ASSERT_EQUAL(1, boots.size());
+  const uint32_t bootAt = boots[0]->clockAtSend;
+  size_t unanswered = 0;
+  for (const auto *l : f.frames(Frame::ReadState))
+    if (l->clockAtSend >= bootAt && l->clockAtSend < bootAt + f.appBootMs) unanswered++;
+  TEST_ASSERT_TRUE(unanswered >= 9);  // one poll every 600 ms through the silence
+  TEST_ASSERT_TRUE(f.frames(Frame::ReadState).back()->clockAtSend >= bootAt + f.appBootMs);
 }
 
 void test_no_reply_gives_up_after_5() {
@@ -850,6 +867,7 @@ int main(int, char **) {
   RUN_TEST(test_boot_reply_lost_polls_for_app);
   RUN_TEST(test_boot_resend_lands_in_app);
   RUN_TEST(test_app_never_answers);
+  RUN_TEST(test_app_silent_while_booting_still_updates);
   RUN_TEST(test_no_reply_gives_up_after_5);
   RUN_TEST(test_largest_image_ends_at_chunk_223);
   RUN_TEST(test_oversize_sends_nothing);

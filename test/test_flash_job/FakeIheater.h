@@ -77,6 +77,9 @@ class FakeIheater : public FlashLink {
   std::vector<bool> bootOk;            // scripted boot results, used in order; then true
   uint16_t refusedAppCheck = 4;        // app_check after a scripted boot refusal
   bool appSilentAfterBoot = false;     // the new app never answers
+  // After the boot command the app answers nothing for this long: the real
+  // one runs reset_LEDs(10) (5 s) plus its init, then flushes the link.
+  uint32_t appBootMs = 5500;
   int resetAfterBlockReads = 0;        // non-zero: the app resets into the bootloader after this many
   std::vector<int16_t> heaterSeq;
   int16_t heaterT10 = 250, airT10 = 200, airTargetT10 = 0;
@@ -297,7 +300,7 @@ class FakeIheater : public FlashLink {
 
   void handle(const uint8_t *f, size_t len) {
     if (state == State::App) {
-      if (appSilent_) return;
+      if (appSilent_ || clock < appReadyAt_) return;
       handleApp(f);
     } else {
       handleBootloader(f, len);
@@ -305,6 +308,7 @@ class FakeIheater : public FlashLink {
   }
 
   bool appSilent_ = false;
+  uint32_t appReadyAt_ = 0;  // the booting app ignores every request before this
 
   void handleApp(const uint8_t *f) {
     const uint16_t addr = get16(f + 2), value = get16(f + 4);
@@ -394,9 +398,10 @@ class FakeIheater : public FlashLink {
           lastError = 5;
           return exception(f, 0x04);
         }
-        echo(f);  // reply, then reset into the app
+        echo(f);  // reply, then reset into the app, which is silent while it boots
         state = State::App;
         appSilent_ = appSilentAfterBoot;
+        appReadyAt_ = clock + appBootMs;
         return;
       }
       return exception(f, 0x03);

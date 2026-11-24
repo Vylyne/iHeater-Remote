@@ -381,9 +381,11 @@ class Job {
   FlashStatus awaitApp() {
     phase(FlashPhase::Restarting);
     if (waitForState(kAppProtocol, kAppWaitMs, false) == Wait::Reached) return finish(FlashOutcome::Updated);
+    const unsigned waitS = (unsigned)(kAppWaitMs / 1000u);
     if (lastAnswered_)
-      return failf(FlashOutcome::NoAppAfterUpdate, "input 0x00 reads 0x%04X 5 s after boot", (unsigned)lastState_);
-    return failf(FlashOutcome::NoAppAfterUpdate, "no reply 5 s after boot");
+      return failf(FlashOutcome::NoAppAfterUpdate, "input 0x00 reads 0x%04X %u s after boot", (unsigned)lastState_,
+                   waitS);
+    return failf(FlashOutcome::NoAppAfterUpdate, "no reply %u s after boot", waitS);
   }
 };
 

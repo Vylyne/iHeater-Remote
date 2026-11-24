@@ -36,7 +36,9 @@ constexpr uint32_t kJobReplyMs = 500;    // reply wait for every frame but these
 constexpr uint32_t kLongReplyMs = 2000;  // erase and boot
 constexpr uint32_t kEntryPollMs = 100;   // input 0x00 poll period, after 0xB007 and after boot
 constexpr uint32_t kEntryWaitMs = 3000;  // for 0x8001 after 0xB007
-constexpr uint32_t kAppWaitMs = 5000;    // for 1 after the boot command
+// For 1 after the boot command. The app is silent for about 5 s while it
+// boots (reset_LEDs(10), init), then flushes every request that came in.
+constexpr uint32_t kAppWaitMs = 15000;
 constexpr uint8_t kRestarts = 1;         // shared by not-blank and boot-refused
 
 struct FlashStatus {

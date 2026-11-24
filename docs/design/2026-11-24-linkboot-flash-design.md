@@ -100,7 +100,9 @@ what it means.
      `app_check` (input 0x04) and restart from step 4.
    - Any other exception means a resend landed in the running app. Go on to
      step 7.
-7. **Restarting.** Poll input 0x00 for up to 5 s until it reads 1. Done.
+7. **Restarting.** Poll input 0x00 for up to 15 s until it reads 1. Done.
+   The app is silent for about 5 s while it boots, then flushes every
+   request that came in meanwhile, so 5 s would never see it.
 
 One restart is shared between steps 5 and 6. A second refusal of either kind
 stops the job.
