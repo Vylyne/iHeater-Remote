@@ -687,8 +687,66 @@ void test_quiet_return_without_result_one_not_ok() {
   TEST_ASSERT_FALSE(p.lastClearOk());
 }
 
+static Reply bootloaderReply() {
+  Reply r;
+  r.kind = ReplyKind::Ok;
+  r.count = kInputCount;
+  for (int i = 0; i < kInputCount; i++) r.regs[i] = 0;
+  r.regs[0] = 0x8001;
+  r.regs[3] = 2;
+  r.regs[4] = 4;
+  r.regs[6] = 30;
+  return r;
+}
+
+void test_bootloader_detected() {
+  UartPollPolicy p;
+  feedInputs(p, bootloaderReply(), 100);
+  TEST_ASSERT_TRUE(p.inBootloader());
+  TEST_ASSERT_EQUAL(2, p.bootloader().why);
+  TEST_ASSERT_EQUAL(4, p.bootloader().appCheck);
+  TEST_ASSERT_EQUAL(30, p.bootloader().timeoutS);
+  TEST_ASSERT_EQUAL(LinkStatus::Updating, p.link(100));
+}
+
+void test_bootloader_drops_snapshot() {
+  UartPollPolicy p;
+  feedInputs(p, inputsReply(), 0);
+  TEST_ASSERT_TRUE(p.hasSnapshot());
+  feedInputs(p, bootloaderReply(), 200);
+  TEST_ASSERT_FALSE(p.hasSnapshot());
+  TEST_ASSERT_FALSE(p.protocolSupported());
+}
+
+void test_bootloader_holds_writes() {
+  UartPollPolicy p;
+  p.setDesired(60.0f, {11, 90});
+  feedInputs(p, bootloaderReply(), 0);
+  TEST_ASSERT_EQUAL(PollKind::None, p.followUp(0).kind);
+}
+
+void test_bootloader_left_on_app_read() {
+  UartPollPolicy p;
+  feedInputs(p, bootloaderReply(), 0);
+  feedInputs(p, inputsReply(), 200);
+  TEST_ASSERT_FALSE(p.inBootloader());
+  TEST_ASSERT_EQUAL(LinkStatus::Up, p.link(200));
+}
+
+void test_bootloader_silent_ages_to_no_reply() {
+  UartPollPolicy p;
+  feedInputs(p, bootloaderReply(), 0);
+  p.onNoReply(p.cycleRead(), kNoReplyAfterMs);
+  TEST_ASSERT_EQUAL(LinkStatus::NoReply, p.link(kNoReplyAfterMs));
+}
+
 int main() {
   UNITY_BEGIN();
+  RUN_TEST(test_bootloader_detected);
+  RUN_TEST(test_bootloader_drops_snapshot);
+  RUN_TEST(test_bootloader_holds_writes);
+  RUN_TEST(test_bootloader_left_on_app_read);
+  RUN_TEST(test_bootloader_silent_ages_to_no_reply);
   RUN_TEST(test_build_read_vector);
   RUN_TEST(test_build_read_rejects);
   RUN_TEST(test_loopback_read_inputs);

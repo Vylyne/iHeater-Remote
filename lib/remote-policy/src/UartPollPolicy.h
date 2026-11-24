@@ -47,6 +47,11 @@ class UartPollPolicy {
   uint16_t desiredT10() const { return desiredT10_; }
   bool rangeEmpty() const { return rangeEmpty_; }
 
+  // True while the last Ok input read had 0x00 = 0x8001 (the link bootloader).
+  // Then there is no snapshot and no write is offered.
+  bool inBootloader() const { return inBootloader_; }
+  const BootloaderInfo &bootloader() const { return bootloader_; }
+
   // Automatic fault clearing. A clear is sent when the iHeater says it is safe
   // and its budget allows; success shows as a restart with last_clear_result 1.
   ClearPhase clearPhase() const { return clearPhase_; }
@@ -73,6 +78,9 @@ class UartPollPolicy {
   bool refusalKnown_ = false;
   uint16_t refusedT10_ = 0;
   IheaterState refusedState_ = IheaterState::Booting;
+
+  bool inBootloader_ = false;
+  BootloaderInfo bootloader_{};
 
   bool haveOk_ = false;
   uint32_t lastOkMs_ = 0;

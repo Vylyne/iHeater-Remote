@@ -69,6 +69,21 @@ void UartPollPolicy::onReply(const PollRequest &req, const Reply &reply, uint32_
 
   switch (req.kind) {
     case PollKind::ReadInputs: {
+      if (reply.kind == ReplyKind::Ok && reply.count >= 8 &&
+          reply.regs[0] == kBootloaderProtocol) {
+        // The bootloader answers with zeros elsewhere; keep them out of the
+        // snapshot and hold every write. The app may be replaced, so reread
+        // its settings afterwards.
+        inBootloader_ = true;
+        bootloader_ = {reply.regs[1], reply.regs[2], reply.regs[3], reply.regs[4],
+                       reply.regs[5], reply.regs[6], reply.regs[7]};
+        hasSnapshot_ = false;
+        lastInputsOk_ = false;
+        hasLimits_ = false;
+        refusalKnown_ = false;
+        break;
+      }
+      if (reply.kind == ReplyKind::Ok) inBootloader_ = false;
       IheaterSnapshot s{};
       if (reply.kind == ReplyKind::Ok && decodeInputs(reply.regs, reply.count, s)) {
         if (hasSnapshot_ && s.uptimeS < snapshot_.uptimeS) {
@@ -169,7 +184,9 @@ const char *linkStatusName(LinkStatus s) {
 
 LinkStatus UartPollPolicy::link(uint32_t nowMs) const {
   if (!haveOk_) return LinkStatus::Waiting;
-  if (!intervalElapsed(nowMs, lastOkMs_, kNoReplyAfterMs)) return LinkStatus::Up;
+  if (!intervalElapsed(nowMs, lastOkMs_, kNoReplyAfterMs)) {
+    return inBootloader_ ? LinkStatus::Updating : LinkStatus::Up;
+  }
   if (clearPhase_ == ClearPhase::AwaitRestart &&
       !intervalElapsed(nowMs, clearSentMs_, kRestartWindowMs)) {
     return LinkStatus::Restarting;
