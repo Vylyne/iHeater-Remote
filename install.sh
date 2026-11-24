@@ -346,15 +346,8 @@ function ask_nginx_value {
 # Offers an HTTPS nginx site for the Remote. Only the iheater-remote site and
 # its link are written or removed; other sites and nginx.conf are never touched.
 function step_nginx_site {
-    # /usr/sbin is often not on a normal user's PATH, but sudo finds nginx there.
-    local nginx_bin=nginx
-    if ! command -v nginx >/dev/null 2>&1; then
-        if [ -x "${NGINX_SBIN:-/usr/sbin}/nginx" ]; then
-            nginx_bin="${NGINX_SBIN:-/usr/sbin}/nginx"
-        else
-            return 0
-        fi
-    fi
+    local nginx_bin
+    nginx_bin="$(find_nginx)" || return 0
     local base="${NGINX_DIR:-/etc/nginx}"
     local avail="${base}/sites-available/iheater-remote"
     local enabled="${base}/sites-enabled/iheater-remote"

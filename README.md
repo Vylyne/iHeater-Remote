@@ -320,7 +320,9 @@ and the Remote's IP address or name, fills them into
 [`scripts/nginx-site.conf`](scripts/nginx-site.conf), writes
 `sites-available/iheater-remote` and its link in `sites-enabled`, runs
 `nginx -t` and reloads nginx. If the test fails, it rolls the site back. It
-never edits `nginx.conf` or other sites. It skips the step when the host has
+never edits `nginx.conf` or other sites. `./uninstall.sh` offers to remove
+that site and its link, keeping a backup, and puts them back if `nginx -t`
+fails without them. A site it didn't write is left alone. It skips the step when the host has
 no `sites-available` or `sites-enabled` directory; those hosts can use the
 template by hand, replacing `@SERVER_NAME@`, `@CERT@`, `@KEY@` and
 `@REMOTE@`. Its server block:

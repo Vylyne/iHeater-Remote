@@ -1,6 +1,7 @@
 #!/bin/bash
 # Removes what install.sh added: the moonraker.conf sections, the include, the
-# two module links and, only if you say so, the config file.
+# two module links, the nginx site it wrote and, only if you say so, the config
+# file.
 #
 # Idempotent: safe to re-run. It never edits a file without a backup, never
 # deletes the config file without asking, and never restarts Klipper during a
@@ -135,6 +136,72 @@ function step_links {
     unlink_module "${MOONRAKER_PATH}/moonraker/components/iheater_remote.py"
 }
 
+# Removes the iheater-remote nginx site install.sh wrote, and its link. A site
+# that doesn't start with install.sh's first line, or a regular file in
+# sites-enabled, is left alone. If nginx -t fails afterwards, both are put back.
+function step_nginx_site {
+    local base="${NGINX_DIR:-/etc/nginx}"
+    local avail="${base}/sites-available/iheater-remote"
+    local enabled="${base}/sites-enabled/iheater-remote"
+    if [ ! -e "${avail}" ] && [ ! -e "${enabled}" ] && [ ! -L "${enabled}" ]; then
+        return 0
+    fi
+    section "nginx"
+    if [ -e "${avail}" ] && [ "$(head -n 1 "${avail}")" != "${NGINX_SITE_MARK}" ]; then
+        warn "${avail} wasn't written by install.sh; left it"
+        note "Remove it and its sites-enabled link yourself if you want it gone."
+        return 0
+    fi
+    if [ -e "${enabled}" ] && [ ! -L "${enabled}" ]; then
+        warn "${enabled} is a regular file, not a link; left the nginx site"
+        note "Remove it yourself if you want it gone."
+        return 0
+    fi
+    if ! ask "Remove the iheater-remote nginx site?" y; then
+        skip "kept the nginx site"
+        return 0
+    fi
+
+    local bak="${avail}.bak-${STAMP}" had_site=0 link_to=""
+    if [ -e "${avail}" ]; then
+        if ! sudo cp -p "${avail}" "${bak}"; then
+            warn "could not back up ${avail}; left the nginx site"
+            return 0
+        fi
+        had_site=1
+        note "backup: ${bak}"
+    fi
+    if [ -L "${enabled}" ]; then
+        link_to="$(readlink "${enabled}")"
+        sudo rm -f "${enabled}" || true
+    fi
+    if [ "${had_site}" = 1 ]; then
+        sudo rm -f "${avail}" || true
+    fi
+    ok "removed the iheater-remote nginx site"
+
+    local nginx_bin
+    if ! nginx_bin="$(find_nginx)"; then
+        note "nginx isn't installed here; if it runs elsewhere, reload nginx there."
+        return 0
+    fi
+    if sudo "${nginx_bin}" -t; then
+        if sudo systemctl reload nginx; then
+            ok "nginx reloaded"
+        else
+            warn "could not reload nginx; run: sudo systemctl reload nginx"
+        fi
+    else
+        if [ "${had_site}" = 1 ]; then
+            sudo cp -p "${bak}" "${avail}" || true
+        fi
+        if [ -n "${link_to}" ]; then
+            sudo ln -s "${link_to}" "${enabled}" || true
+        fi
+        warn "nginx -t failed without the site; it was put back and nginx was not reloaded."
+    fi
+}
+
 section "iHeater Remote"
 note "Removing what ${INSTALL_PATH} installed"
 preflight
@@ -143,4 +210,5 @@ step_printer_cfg
 step_config_file
 step_still_loaded
 step_links
+step_nginx_site
 restart_services

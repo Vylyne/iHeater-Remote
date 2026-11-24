@@ -152,6 +152,23 @@ function backup {
     note "backup: ${file}.bak-${STAMP}"
 }
 
+# find_nginx: print the nginx command to run, or fail when nginx isn't
+# installed. /usr/sbin is often not on a normal user's PATH, but sudo finds
+# nginx there.
+function find_nginx {
+    if command -v nginx >/dev/null 2>&1; then
+        printf 'nginx\n'
+    elif [ -x "${NGINX_SBIN:-/usr/sbin}/nginx" ]; then
+        printf '%s\n' "${NGINX_SBIN:-/usr/sbin}/nginx"
+    else
+        return 1
+    fi
+}
+
+# The first line of the site install.sh writes. uninstall.sh removes a site
+# only when it starts with this line.
+NGINX_SITE_MARK="# HTTPS front for the iHeater Remote, written by install.sh."
+
 # link_target LINK: print where an existing symlink finally points.
 function link_target {
     readlink -f "$1"
