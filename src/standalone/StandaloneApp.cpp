@@ -2,6 +2,7 @@
 #include "standalone/AuthPages.h"
 #include "standalone/AuthScript.h"
 #include "standalone/AuthStore.h"
+#include "standalone/DiagPage.h"
 #include "standalone/EventFeed.h"
 #include "standalone/MoonrakerLink.h"
 #include "standalone/RemoteDashboard.h"
@@ -947,6 +948,59 @@ void fillUpdateJson(JsonObject out) {
   }
 }
 
+// The raw register fields for the /diag register table, each keyed by its
+// C++ field name: the input snapshot, the settings once read, and the link
+// bootloader's own fields while it runs. The bootloader replaces the
+// snapshot, so "regs" appears when any of the three is known. Keys are
+// string literals, stored by pointer.
+void fillRegsJson(JsonObject iheater, const UartLinkView &view) {
+  if (!view.hasSnapshot && !view.hasLimits && !view.inBootloader)
+    return;
+  JsonObject r = iheater.createNestedObject("regs");
+  if (view.hasSnapshot) {
+    const policy::IheaterSnapshot &s = view.snap;
+    r["proto"] = s.proto;
+    r["fwVersion"] = s.fwVersion;
+    r["fwPatch"] = s.fwPatch;
+    r["state"] = static_cast<int>(s.state);
+    r["activeFault"] = s.activeFault;
+    r["clearableNow"] = s.clearableNow ? 1 : 0;
+    r["clearAllowMask"] = s.clearAllowMask;
+    r["clearsLeft"] = s.clearsLeft;
+    r["lastClearResult"] = s.lastClearResult;
+    r["airT10"] = s.airT10;
+    r["heaterT10"] = s.heaterT10;
+    r["auxT10"] = s.auxT10;
+    r["airTargetT10"] = s.airTargetT10;
+    r["heaterSetT10"] = s.heaterSetT10;
+    r["pwmPermille"] = s.pwmPermille;
+    r["fanOn"] = s.fanOn ? 1 : 0;
+    r["uptimeS"] = s.uptimeS;
+    r["linkLossCount"] = s.linkLossCount;
+    r["holdRemainingS"] = s.holdRemainingS;
+    r["resetCause"] = s.resetCause;
+    r["lastFault"] = s.lastFault;
+  }
+  if (view.hasLimits) {
+    const policy::IheaterLimits &l = view.limits;
+    r["maxHeaterT10"] = l.maxHeaterT10;
+    r["maxAirT10"] = l.maxAirT10;
+    r["minTargetT10"] = l.minTargetT10;
+    r["maxAirTargetT10"] = l.maxAirTargetT10;
+    r["linkHoldS"] = l.linkHoldS;
+    r["deltaT10"] = l.deltaT10;
+    r["fanOnT10"] = l.fanOnT10;
+    r["fanOffT10"] = l.fanOffT10;
+    r["fanOnActiveT10"] = l.fanOnActiveT10;
+    r["clearMarginT10"] = l.clearMarginT10;
+  }
+  if (view.inBootloader) {
+    r["why"] = view.boot.why;
+    r["appCheck"] = view.boot.appCheck;
+    r["timeoutS"] = view.boot.timeoutS;
+  }
+}
+
 // The iHeater's live state for the dashboard. The state fields appear once a
 // snapshot exists and the range fields once the settings have been read.
 void fillIheaterJson(JsonObject out) {
@@ -995,14 +1049,15 @@ void fillIheaterJson(JsonObject out) {
     setTempC(out, "maxC", view.limits.maxAirTargetT10);
     out["rangeEmpty"] = view.rangeEmpty;
   }
+  fillRegsJson(out, view);
 }
 
 String statusJson() {
   updateHeatTimer();
 
-  // Static so the 3 KB document stays off the 8 KB loopTask stack; every
+  // Static so the 4 KB document stays off the 8 KB loopTask stack; every
   // caller (HTTP handlers, the WebSocket push) runs on that one task.
-  static StaticJsonDocument<3072> doc;
+  static StaticJsonDocument<4096> doc;
   doc.clear();
   doc["mode"] = s_mode;
   const auto output = s_output->getLastCommand();
@@ -1044,6 +1099,11 @@ String statusJson() {
   if (s_outputKind == OutputKind::Uart) {
     fillIheaterJson(doc.createNestedObject("iheater"));
     fillUpdateJson(doc.createNestedObject("iheaterUpdate"));
+  }
+  static bool overflowLogged = false;
+  if (doc.overflowed() && !overflowLogged) {
+    overflowLogged = true;
+    Serial.println("[REMOTE] status JSON overflowed its document; some fields are missing");
   }
 
   String out;
@@ -2178,6 +2238,24 @@ void handleRoot() {
   s_server.send_P(200, "text/html", kRemoteDashboardHtml);
 }
 
+void handleDiagPage() {
+  if (captiveRedirectIfNeeded())
+    return;
+  s_server.sendHeader("Cache-Control", "no-store");
+  s_server.send_P(200, "text/html", kDiagHtml);
+}
+
+// A one-time ticket that lets this logged-in page subscribe to the console
+// over the socket, which carries no session of its own. The ticket goes only
+// into this reply: never print it.
+void handleDiagTicket() {
+  char hex[2 * policy::kTicketLen + 1];
+  feedIssueTicket(hex);
+  String body = String("{\"ticket\":\"") + hex + "\"}";
+  memset(hex, 0, sizeof(hex));
+  sendAuthJson(200, body);
+}
+
 void configureRoutes() {
   s_server.serveStatic("/logo.png", LittleFS, "/logo.png");
   s_server.on("/", HTTP_GET, guarded(handleRoot));
@@ -2191,6 +2269,8 @@ void configureRoutes() {
   s_server.on("/api/auth/settings", HTTP_POST, guarded(handleAuthSettingsPost));
   s_server.on("/setup", HTTP_GET, guarded(handleSetupPage));
   s_server.on("/fw", HTTP_GET, guarded(handleFirmwarePage));
+  s_server.on("/diag", HTTP_GET, guarded(handleDiagPage));
+  s_server.on("/api/diag/ticket", HTTP_POST, guarded(handleDiagTicket));
   s_server.on("/api/mode", HTTP_POST, guarded(handleModePost));
   s_server.on("/api/override/end", HTTP_POST, guarded(handleOverrideEnd));
   s_server.on("/api/timer", HTTP_POST, guarded(handleTimerPost));
@@ -2598,6 +2678,7 @@ void setup() {
   pinMode(IHEATER_BOOT_BUTTON_PIN, INPUT_PULLUP);
 
   s_outputKind = loadOutputKind();
+  feedBeginConsole(s_outputKind == OutputKind::Uart ? &s_uart : nullptr);
   if (s_outputKind == OutputKind::Uart) {
     s_output = &s_uart;
     s_output->begin();

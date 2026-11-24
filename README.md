@@ -265,10 +265,27 @@ LED:
 
 [![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/wildtang3nt)
 
+## Event log and diagnostics
+
+The dashboard shows an **Events** list, newest first: the Remote starting,
+Wi-Fi and Moonraker changes, the iHeater link, faults and clears, target
+changes and who made them, timers, overrides and updates. With UART output
+it also draws the air, heater and target temperatures for the last hour.
+Both are kept in RAM only, so a restart of the Remote clears them. Both are
+public, like the status.
+
+The **Diagnostics** page (**/diag**, from the dashboard's side bar) needs
+a login. It shows the iHeater's raw registers and a live UART console: one
+line for every Modbus exchange with the iHeater, iHeater updates included,
+with **Pause**, **Show bytes** and **Clear** (Pause and Clear change only
+your view). The Remote records console lines only while a /diag page is
+open and frees that memory when the last one closes; if the Remote is short
+of memory, the page says so instead. The console needs UART output.
+
 ## Login and security
 
-The Setup and firmware pages, and every action (changing a mode, saving
-settings, OTA), need a login. The dashboard page and its live status
+The Setup, firmware and diagnostics pages, and every action (changing a
+mode, saving settings, OTA), need a login. The dashboard page and its live status
 WebSocket stay readable without one.
 
 ### Set a password straight away

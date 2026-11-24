@@ -4,6 +4,8 @@
 #include <esp_task_wdt.h>
 #include <string.h>
 
+#include <new>
+
 namespace iheaterlink::standalone {
 
 namespace {
@@ -24,6 +26,19 @@ constexpr uint32_t kFallbackWdtSeconds = 5;
 constexpr uint32_t kWaitSliceMs = 500;
 // Covers sending the longest frame (139 B, about 12 ms at 115200 8N1).
 constexpr uint32_t kTxDoneMs = 20;
+
+// The console's name for a judged reply. Invalid covers every bad reply; the
+// console decoder tells them apart from the bytes.
+policy::ConsoleResult consoleResult(const policy::Reply &reply) {
+  switch (reply.kind) {
+    case policy::ReplyKind::Ok:
+      return policy::ConsoleResult::Ok;
+    case policy::ReplyKind::Exception:
+      return policy::ConsoleResult::Exception;
+    default:
+      return policy::ConsoleResult::BadReply;
+  }
+}
 
 // Builds the wire frame for a policy request. 0 when the request has no frame.
 size_t buildFrame(const policy::PollRequest &req, uint8_t out[policy::kRequestLen]) {
@@ -145,6 +160,54 @@ bool UartLink::flashBusy() const {
   return busy;
 }
 
+// The ring is allocated and zeroed outside the lock, then published under it.
+bool UartLink::consoleStart() {
+  if (consoleStorage_)  // only this (main loop) code writes it
+    return true;
+  constexpr size_t kBytes = sizeof(policy::ConsoleRecord) * policy::kConsoleLines;
+  if (!policy::consoleHeapOk(ESP.getFreeHeap(), kBytes))
+    return false;
+  policy::ConsoleRecord *storage = new (std::nothrow) policy::ConsoleRecord[policy::kConsoleLines];
+  if (!storage)
+    return false;
+  portENTER_CRITICAL(&mux_);
+  consoleRing_ = policy::ConsoleRing(storage, policy::kConsoleLines);
+  consoleStorage_ = storage;
+  console_ = &consoleRing_;
+  portEXIT_CRITICAL(&mux_);
+  consoleOn_ = true;
+  return true;
+}
+
+// Unpublished under the lock first, so the task can no longer reach the
+// storage, then freed outside it.
+void UartLink::consoleStop() {
+  consoleOn_ = false;
+  portENTER_CRITICAL(&mux_);
+  policy::ConsoleRecord *storage = consoleStorage_;
+  console_ = nullptr;
+  consoleStorage_ = nullptr;
+  consoleRing_ = policy::ConsoleRing(nullptr, 0);
+  portEXIT_CRITICAL(&mux_);
+  delete[] storage;
+}
+
+size_t UartLink::consoleDrain(policy::ConsoleRecord *out, size_t max, uint32_t &dropped) {
+  dropped = 0;
+  // ConsoleRing::drain with max 0 would skip the dropped records and lose
+  // their count, so it is never called that way.
+  if (!out || max == 0)
+    return 0;
+  if (max > kConsoleDrainMax)
+    max = kConsoleDrainMax;
+  size_t n = 0;
+  portENTER_CRITICAL(&mux_);
+  if (console_)
+    n = console_->drain(out, max, dropped);
+  portEXIT_CRITICAL(&mux_);
+  return n;
+}
+
 uint32_t UartLink::stackHighWaterBytes() const {
   if (!task_)
     return 0;
@@ -200,8 +263,11 @@ bool UartLink::exchangeFrame(const uint8_t *frame, size_t len, policy::Reply &re
   const uint32_t startMs = millis();
   for (;;) {
     const uint32_t elapsed = millis() - startMs;
-    if (elapsed >= timeoutMs)
+    if (elapsed >= timeoutMs) {
+      if (consoleOn_)  // with whatever partial reply arrived
+        consoleCapture(frame, len, buf, got, policy::ConsoleResult::Timeout, 0);
       return false;
+    }
 
     // Wait for the next byte, then take whatever else has already arrived.
     // uart_read_bytes() applies its timeout to each wait, so a long reply
@@ -228,15 +294,30 @@ bool UartLink::exchangeFrame(const uint8_t *frame, size_t len, policy::Reply &re
 
     // For FC10, parseReply compares only the first 6 bytes of the echo.
     reply = policy::parseReply(frame, buf, got);
-    if (reply.kind != policy::ReplyKind::Incomplete)
+    if (reply.kind != policy::ReplyKind::Incomplete) {
+      if (consoleOn_)
+        consoleCapture(frame, len, buf, got, consoleResult(reply), reply.exception);
       return true;
+    }
     if (got >= sizeof(buf)) {
       // More bytes than any valid reply: not a reply to us.
       reply = policy::Reply{};
       reply.kind = policy::ReplyKind::Invalid;
+      if (consoleOn_)
+        consoleCapture(frame, len, buf, got, policy::ConsoleResult::BadReply, 0);
       return true;
     }
   }
+}
+
+void UartLink::consoleCapture(const uint8_t *frame, size_t len, const uint8_t *reply,
+                              size_t replyLen, policy::ConsoleResult result, uint8_t code) {
+  policy::ConsoleRecord r;
+  policy::makeConsoleRecord(r, frame, len, reply, replyLen, result, code, millis());
+  portENTER_CRITICAL(&mux_);
+  if (console_)
+    console_->push(r);
+  portEXIT_CRITICAL(&mux_);
 }
 
 void UartLink::runRequest(const policy::PollRequest &req, bool &gotOk) {
