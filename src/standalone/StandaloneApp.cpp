@@ -828,7 +828,7 @@ function au(){fetch('/api/auth/me',{cache:'no-store'}).then(r=>r.json()).then(d=
 function post(path,done){const x=new XMLHttpRequest();x.open('POST',I+path);x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status===401||x.status===403)au();if(x.status>=300)say('ihMsg',r.error||'Request failed.',1);else if(r.iheaterUpdate)show(r);if(done)done()};x.onerror=()=>say('ihMsg','Request failed.',1);x.send()}
 $('ihFile').onchange=()=>{const file=$('ihFile').files[0];if(!file)return;up=true;say('ihImg','Uploading…');$('ihGo').disabled=true;const x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST',I+'image');x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}up=false;if(x.status===401||x.status===403)au();if(x.status>=300)say('ihImg',r.error||'Upload failed.',1);else say('ihImg',r.line);$('ihFile').value=''};x.onerror=()=>{up=false;say('ihImg','Upload failed.',1)};x.send(d)};
 $('ihGo').onclick=()=>post('update');$('ihRetry').onclick=()=>post('retry');$('ihCancel').onclick=()=>post('cancel');
-let ws;function conn(){ws=new WebSocket(location.protocol==='https:'?'wss://'+location.host+'/ws':'ws://'+location.hostname+':81/');ws.onmessage=e=>{try{show(JSON.parse(e.data))}catch(_){}};ws.onclose=()=>setTimeout(conn,2000)}conn()})()</script></section>)HTML";
+let ws;function conn(){ws=new WebSocket(location.protocol==='https:'?'wss://'+location.host+'/ws':'ws://'+location.hostname+':81/');ws.onmessage=e=>{try{const m=JSON.parse(e.data);if(m&&typeof m==='object'&&m.t===undefined)show(m)}catch(_){}};ws.onclose=()=>setTimeout(conn,2000)}conn()})()</script></section>)HTML";
 
 void handleFirmwarePage() {
   if (captiveRedirectIfNeeded())
