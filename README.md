@@ -185,6 +185,8 @@ BOOT button:
 - 1 to 7 quick presses selects `MODE_TEMP_1` through `MODE_TEMP_7`.
 - Two quick presses selects `MODE_TEMP_2` / 60 C.
 - Holding BOOT for about 2 seconds selects `MODE_TEMP_0` / Off.
+- Holding BOOT for 10 seconds while the Remote is running also resets the web
+  login (see [Login and security](#login-and-security)).
 
 Web UI:
 
@@ -214,8 +216,21 @@ Web UI:
   (ISRG Root X1, X2, YE and YR) with a host-name check. There is no
   skip-verify option. A server using another CA needs that root added in
   `src/standalone/MoonrakerCa.h`.
-- **Source switching:** a manual press (web UI or BOOT button) switches the
-  source to Manual. Boot, the timer and OTA do not.
+- **Manual override:** while Klipper is the source, a manual press (web UI
+  or BOOT button, Off included) overrides Klipper's target instead of
+  switching the source. The Remote notes Klipper's target at that moment.
+  - Klipper re-sending that same target, as Moonraker does on every
+    reconnect, is ignored. Any other target ends the override and applies at
+    once, `0` included.
+  - The dashboard shows "Manual override, Klipper wants N °C" and a **Back to
+    Klipper** button, which ends the override and applies Klipper's current
+    target.
+  - If the manual timer runs out during an override, the override ends and
+    Klipper's current target applies; it does not just turn off.
+  - A restart ends the override, and so does a lost pairing. The 10 minute
+    link-loss cut still applies.
+  - Boot, the timer and OTA never switch the source. To heat without the
+    printer host, choose **Manual controls only** on the Setup page.
 - **iHeater target range** (Setup page, default Min 45 / Max 85): records
   the range your iHeater firmware accepts. It does not change any setting
   on the iHeater. Every target the Remote sends (Klipper or manual modes)
@@ -249,6 +264,170 @@ LED:
 - Active modes flash the mode number, pause, then repeat.
 
 [![Buy Me A Coffee](https://www.buymeacoffee.com/assets/img/custom_images/orange_img.png)](https://www.buymeacoffee.com/wildtang3nt)
+
+## Login and security
+
+The Setup and firmware pages, and every action (changing a mode, saving
+settings, OTA), need a login. The dashboard page and its live status
+WebSocket stay readable without one.
+
+### Set a password straight away
+
+A new Remote has no password. Until one is set, whoever reaches the Remote
+first can set it, and a malicious web page that rebinds a DNS name to the
+Remote could do the same. Open the Remote after installing or updating and
+set a password at once on `/login`. If someone else got there first, hold
+BOOT for 10 seconds (below) and start again.
+
+### Plain HTTP
+
+The login never sends the password. The page sends a proof that depends on a
+single-use challenge, so a listener can't replay a login. But the first
+password (or a change) sends a value that is equivalent to the password for
+this Remote, so someone on the network can capture enough to log in. Use
+HTTPS through nginx (below), or the Remote's own access point. An access
+point whose password is shorter than 8 characters is open, and anyone nearby
+can read what you send.
+
+Sessions last 30 days of the Remote's running time, up to four at once (a
+fifth login replaces the oldest), and they survive a restart. They count
+running hours, not wall-clock time, because the Remote has no clock. Time
+while it's unplugged doesn't count, and a Remote that restarts more often
+than hourly never ages its sessions. The cookie's own 30 day limit still
+applies in the browser.
+
+Five wrong passwords in a row lock that client out for 30 s. The Remote
+tracks up to eight clients.
+
+### BOOT reset
+
+Hold BOOT for 10 seconds while the Remote is running. Heat still goes off at
+2 seconds, as before. The reset clears:
+
+- the password and all sessions;
+- header login and proxy-only mode.
+
+It keeps Wi-Fi, the Klipper pairing, the trusted proxies and the automatic
+Moonraker entry. The LED stays on for 3 seconds to confirm. No restart is
+needed, and releasing the button afterwards does nothing more.
+
+### HTTPS with nginx
+
+The Remote doesn't speak HTTPS itself. Put nginx in front of it. On a printer
+host with nginx, `./install.sh` offers an HTTPS site for the Remote as its
+last step. It asks for the server name, the TLS certificate and key paths,
+and the Remote's IP address or name, fills them into
+[`scripts/nginx-site.conf`](scripts/nginx-site.conf), writes
+`sites-available/iheater-remote` and its link in `sites-enabled`, runs
+`nginx -t` and reloads nginx. If the test fails, it rolls the site back. It
+never edits `nginx.conf` or other sites. `./uninstall.sh` offers to remove
+that site and its link, keeping a backup, and puts them back if `nginx -t`
+fails without them. A site it didn't write is left alone. It skips the step when the host has
+no `sites-available` or `sites-enabled` directory; those hosts can use the
+template by hand, replacing `@SERVER_NAME@`, `@CERT@`, `@KEY@` and
+`@REMOTE@`. Its server block:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name @SERVER_NAME@;
+
+    ssl_certificate @CERT@;
+    ssl_certificate_key @KEY@;
+
+    client_max_body_size 4m;   # the OTA image is about 1.4 MB
+
+    location / {
+        proxy_pass http://@REMOTE@;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-authentik-username "";
+        proxy_set_header X-authentik-groups "";
+    }
+
+    location /ws {
+        proxy_pass http://@REMOTE@:81/;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-Host $http_host;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-authentik-username "";
+        proxy_set_header X-authentik-groups "";
+    }
+}
+```
+
+Each location repeats the whole header list because nginx drops inherited
+`proxy_set_header` lines once a location sets its own. The two authentik
+headers are blanked, so a client can never send them itself.
+
+### Trusted proxies
+
+The Remote believes `X-Forwarded-*` headers, and header login, only from a
+trusted proxy, judged by the TCP peer address alone. The **Security** card on
+the Setup page holds up to four IPv4 addresses. Add nginx's address there.
+
+- **Automatic Moonraker entry:** while the source is Klipper, the address of
+  the Remote's latest successful Moonraker connection is trusted too, so
+  nginx on the printer host works with no setup. It is on by default, and a
+  checkbox turns it off. It is trusted only while the source is Klipper, and
+  the Remote clears it if it can't resolve the Moonraker host. Proxy-only
+  mode doesn't count this entry: type the proxy's address into the trusted
+  list for that.
+- **nginx in Docker:** the peer is then the Docker bridge's gateway address,
+  not the container's. Add that address as a trusted proxy.
+- **IPv6 clients:** behind a proxy, a client whose `X-Forwarded-For` entry is
+  IPv6 is counted by the proxy's address. All such clients then share one
+  lockout slot, so five wrong passwords from one lock them all out for 30 s.
+  The same holds for clients that reach the Remote directly over IPv6: the
+  Remote reads IPv4 peer addresses only, so an IPv6 peer is never trusted as
+  a proxy and shares that one slot.
+
+Trust covers the whole host: anything on a trusted address can send forwarded
+headers and, with header login on, log in.
+
+### Header login (authentik)
+
+Header login lets a trusted proxy log a user in from a header, such as the
+one authentik sets. It is off by default. Turn it on in the Security card,
+and set the user header (default `X-authentik-username`), an optional list of
+allowed users, the groups header (default `X-authentik-groups`) and an
+optional list of allowed groups. An empty list means no check.
+
+**Warning:** anyone who can reach a trusted proxy can be logged in by it, the
+automatic Moonraker entry included. Turn it on only if every trusted proxy
+sits behind your sign-in. It sets no cookie, so logging out is authentik's
+job. A valid session cookie works either way.
+
+The template blanks both headers by default. To use authentik, uncomment its
+`auth_request` block and lines in both locations, and give the two headers
+the `$authentik_*` variables instead of `""`. The commented block has no
+sign-in redirect (`error_page 401`). The
+[authentik proxy provider docs](https://docs.goauthentik.io/add-secure-apps/providers/proxy/)
+cover the redirect.
+
+### Proxy-only mode
+
+**Only allow actions through the HTTPS proxy** refuses protected pages, login
+endpoints and actions unless the peer is a trusted proxy that sent
+`X-Forwarded-Proto: https`. The dashboard page and the status WebSocket stay
+open. It is off by default.
+
+- You can turn it on only from the HTTPS address, so you know it works.
+- A save that leaves it on must have the address of the proxy you're using in
+  the trusted proxy list. The automatic Moonraker entry doesn't count,
+  because it disappears when the source switches to Manual, when Moonraker is
+  down at boot or when the host can't be resolved, and that would lock you
+  out. The Remote refuses the save otherwise.
+- The Remote's own access point ignores this setting, as if it were off. It
+  opens only when the Remote can't join Wi-Fi at start-up, so it isn't a
+  dependable way back in while Wi-Fi works. If a proxy breaks, hold BOOT for
+  10 s to turn proxy-only off again. That reset also clears the password.
 
 ## Updating the iHeater's firmware
 

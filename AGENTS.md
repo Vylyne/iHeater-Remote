@@ -39,7 +39,7 @@ Git Bash, so run `pio run` from PowerShell or `cmd`, or from a shell without
 - `klipper/`: the `heater_iheater_remote` module, its config and unit tests.
 - `moonraker/`: the iheater_remote Moonraker component and its unit tests.
 - `install.sh`, `uninstall.sh` (repo root): install and remove the Klipper and
-  Moonraker parts on a printer host.
+  Moonraker parts and the optional nginx site on a printer host.
 - `scripts/`: the installer's Python config helper and its tests.
 - `tools/fake_moonraker/`: fake Moonraker server for bench testing.
 - `docs/design/`: design and plan documents.
@@ -48,6 +48,8 @@ Git Bash, so run `pio run` from PowerShell or `cmd`, or from a shell without
 
 - Write Canadian English in code comments and documentation.
 - Put pure decisions in `lib/remote-policy/` and cover them with tests.
+- Never log or return the login verifier, a proof or a session token, and
+  check login before writing any upload data.
 - Never flash or upload to a device without asking first.
 - Use LF line endings (`.gitattributes` enforces it). The vendored
   `lib/modbus-rtu/` copy is left as it came.

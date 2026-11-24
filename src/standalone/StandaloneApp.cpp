@@ -1,4 +1,7 @@
 #include "standalone/StandaloneApp.h"
+#include "standalone/AuthPages.h"
+#include "standalone/AuthScript.h"
+#include "standalone/AuthStore.h"
 #include "standalone/MoonrakerLink.h"
 #include "standalone/RemoteDashboard.h"
 #include "standalone/RemoteSettings.h"
@@ -14,6 +17,7 @@
 #include <WebServer.h>
 #include <WebSocketsServer.h>
 #include <WiFi.h>
+#include <esp_system.h>
 #include <string.h>
 
 #if __has_include("secrets.h")
@@ -21,7 +25,11 @@
 #endif
 
 #include "controller/RmtOutputAdapter.h"
+#include <AuthCrypto.h>
+#include <AuthPolicy.h>
+#include <AuthState.h>
 #include <FirmwareImage.h>
+#include <KlipperOverride.h>
 #include <RemotePolicy.h>
 #include "version.h"
 
@@ -51,7 +59,6 @@ constexpr uint32_t kWifiConnectTimeoutMs = 15000;
 constexpr uint32_t kRestartDelayMs = 800;
 constexpr uint32_t kButtonDebounceMs = 30;
 constexpr uint32_t kMultiClickWindowMs = 650;
-constexpr uint32_t kLongPressMs = 2000;
 constexpr uint32_t kLedOnMs = 80;
 constexpr uint32_t kLedOffMs = 120;
 constexpr uint32_t kLedPauseMs = 1600;
@@ -100,7 +107,14 @@ UartLink s_uart;
 OutputPort *s_output = &s_rmt;  // setup() points this at s_uart for OutputKind::Uart
 OutputKind s_outputKind = OutputKind::Pulse;
 RemoteSettings s_settings;
+policy::KlipperOverride s_override;
 MoonrakerLink s_moonraker;
+// The web login. These tables aren't locked: WebServer handlers run in loop().
+AuthSettings s_auth;
+policy::SessionTable s_sessions;
+policy::NonceTable s_nonces;
+policy::LoginLockout s_lockout;
+policy::RunningHours s_hours;
 
 uint8_t s_mode = 0;
 bool s_apMode = false;
@@ -165,7 +179,8 @@ bool s_klipperRecoveryPending = false;
 
 bool s_buttonStableDown = false;
 bool s_buttonLastRawDown = false;
-bool s_longPressHandled = false;
+bool s_longPressHandled = false;  // heat-off step done for this press
+bool s_authResetDone = false;
 uint8_t s_pendingClicks = 0;
 uint32_t s_buttonLastRawChangeMs = 0;
 uint32_t s_buttonDownAtMs = 0;
@@ -174,6 +189,8 @@ uint32_t s_clickDeadlineMs = 0;
 bool s_ledOn = false;
 uint8_t s_ledFlashesDone = 0;
 uint32_t s_ledNextAtMs = 0;
+bool s_ledSolid = false;
+uint32_t s_ledSolidUntilMs = 0;
 
 void applyTxPower(const char *context) {
   const bool ok = WiFi.setTxPower(static_cast<wifi_power_t>(s_txPower));
@@ -257,7 +274,7 @@ void applyIntegrationTarget(float targetTempC, const char *source,
 // link holds the last target through outages; updateLinkSafety() cuts heat
 // if the link stays down.
 void onKlipperTarget(float targetC) {
-  if (klipperSource())
+  if (klipperSource() && s_override.target(targetC))
     applyIntegrationTarget(targetC, "klipper", "klipper");
 }
 
@@ -278,21 +295,18 @@ void resetLedPattern() {
   writeLed(false);
 }
 
-// Only user actions (web and button) pass releasePrinter: a manual press
-// unbinds the printer. Boot, the timer and OTA leave the binding alone.
-void applyMode(uint8_t mode, const char *source, bool releasePrinter = true) {
+// Only user actions (web and button) pass userPress: a manual press while
+// following Klipper starts an override and keeps the pairing. Boot, the timer
+// and OTA are not presses.
+void applyMode(uint8_t mode, const char *source, bool userPress = true) {
   if (mode > kMaxMode)
     mode = kMaxMode;
   s_klipperRecoveryPending = false;
   if (mode != 0 && refuseHeatForOutputSwitch())
     mode = 0;
 
-  if (releasePrinter && klipperSource()) {
-    s_settings.source = ControlSource::Manual;
-    if (!saveSourceAndMoonraker(s_settings))
-      Serial.println("[REMOTE] could not save manual source");
-    s_moonraker.stop();
-  }
+  if (userPress)
+    s_override.press(klipperSource());
   s_mode = mode;
   if (mode == 0) {
     s_timerOffAtMs = 0;
@@ -330,7 +344,11 @@ void updateHeatTimer() {
     return;
 
   if ((int32_t)(millis() - s_timerOffAtMs) >= 0) {
-    applyMode(0, "timer", false);
+    if (s_override.active())
+      applyIntegrationTarget(s_override.end(), "timer: back to klipper",
+                             "klipper");
+    else
+      applyMode(0, "timer", false);
   }
 }
 
@@ -499,11 +517,13 @@ void updateLinkSafety() {
   }
   const bool heatingFromPrinter =
       s_output->getLastCommand().mode == ControllerOutputMode::TargetTemperature &&
-      s_targetSource == "klipper";
+      (s_targetSource == "klipper" || s_override.active());
   if (policy::cutHeatForLinkLoss(printerSource, heatingFromPrinter, healthy,
                                  now, s_linkHealthyAtMs,
-                                 policy::kLinkLossGraceMs))
+                                 policy::kLinkLossGraceMs)) {
+    s_override.end();
     applyIntegrationTarget(0.0f, "printer link lost 10 min", "link-lost");
+  }
 }
 
 const char *uartLinkName(policy::LinkStatus status) {
@@ -678,12 +698,22 @@ String tenthsText(int16_t t10) {
   return text;
 }
 
+// The Security card on /setup. It sits in its own form, outside the main setup
+// form, and posts to /api/auth/settings and /api/auth/password with fetch.
+const char kSecurityCard[] = R"HTML(<form id=sec onsubmit="return false"><section class=card><h2>Security</h2><p class=note id=secMsg role=status></p><h2>Change password</h2><label>New password<input id=secPw type=password minlength=8 maxlength=64 autocomplete=new-password></label><label>Confirm password<input id=secPw2 type=password minlength=8 maxlength=64 autocomplete=new-password></label><button type=button id=secPwGo>Change password</button><p class=note>At least 8 characters. Changing it logs every other device out.</p><h2>Trusted proxies</h2><label class=check><input id=secAuto type=checkbox __AUTO_CHK__>Trust the Moonraker host automatically</label><p class=note>Moonraker host: __AUTO_ADDR__</p><label>Trusted proxy addresses<input id=secProxies value="__SEC_PROXIES__" maxlength=80 placeholder="192.168.1.10, 192.168.1.11" autocomplete=off></label><p class=note>Up to four IPv4 addresses, separated by commas. If nginx runs in Docker, add the bridge gateway address.</p><h2>Header login</h2><label class=check><input id=secHdr type=checkbox __HDR_CHK__>Log in from a proxy header</label><label>User header<input id=secUserH value="__HDR_USER__" maxlength=40 autocomplete=off></label><label>Allowed users (comma separated, blank allows any)<input id=secUsers value="__HDR_USERS__" maxlength=128 autocomplete=off></label><label>Groups header<input id=secGroupH value="__HDR_GRPH__" maxlength=40 autocomplete=off></label><label>Allowed groups (comma separated, blank allows any)<input id=secGroups value="__HDR_GROUPS__" maxlength=128 autocomplete=off></label><p class=note style="color:#ffb347">Every trusted proxy, the automatic Moonraker entry included, can then log anyone in.</p><h2>Proxy-only</h2><label class=check><input id=secOnly type=checkbox __PO_CHK__>Only allow actions through the HTTPS proxy</label><p class=note>Hold BOOT for 10 s to turn this off again. The Remote's own access point, which opens when it can't join Wi-Fi, ignores this setting.</p><button type=button id=secGo>Save security settings</button></section></form><script src="/auth.js"></script><script>(()=>{const $=i=>document.getElementById(i),say=t=>{$('secMsg').textContent=t};
+$('secPwGo').onclick=()=>{const a=$('secPw').value;if(a.length<8){say('Use at least 8 characters.');return}if(a!==$('secPw2').value){say("The passwords don't match.");return}
+const b=$('secPwGo');b.disabled=true;say('Working...');setTimeout(()=>{IHA.setPassword(a).then(()=>{$('secPw').value='';$('secPw2').value='';say('Password changed. Every other device is logged out.')},e=>say(e.message)).then(()=>{b.disabled=false})},30)};
+$('secGo').onclick=()=>{const f=new URLSearchParams();f.set('proxies',$('secProxies').value);if($('secAuto').checked)f.set('autoProxy','1');if($('secHdr').checked)f.set('headerLogin','1');if($('secOnly').checked)f.set('proxyOnly','1');
+f.set('userHeader',$('secUserH').value);f.set('allowedUsers',$('secUsers').value);f.set('groupsHeader',$('secGroupH').value);f.set('allowedGroups',$('secGroups').value);
+const b=$('secGo');b.disabled=true;say('Saving...');
+fetch('/api/auth/settings',{method:'POST',credentials:'same-origin',body:f}).then(r=>r.json().catch(()=>({error:'Unexpected reply ('+r.status+').'})).then(j=>say(j.error?j.error:'Security settings saved.')),()=>say("Couldn't reach the Remote.")).then(()=>{b.disabled=false})}})()</script>)HTML";
+
 void handleSetupPage() {
   if (captiveRedirectIfNeeded())
     return;
-  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:15px;font-weight:650;margin:0 0 4px}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.check{display:flex;align-items:center;gap:10px}.check input{min-height:0;width:18px;height:18px;margin:0;padding:0}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>Blank password and API key fields keep their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label><label>Transmit power<select name=txPower><option value=34 __TXP_34__>8.5 dBm (default)</option><option value=44 __TXP_44__>11 dBm</option><option value=52 __TXP_52__>13 dBm</option><option value=60 __TXP_60__>15 dBm</option><option value=68 __TXP_68__>17 dBm</option><option value=78 __TXP_78__>19.5 dBm</option></select></label><p class=note>Higher power can help a weak signal; some C3 Super Mini boards fail to connect above 8.5 dBm. Changing it restarts the device.</p><p class=note>Signal: __RSSI__</p></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port id=port type=number value="__MOON_PORT__" min=1 max=65535></label><label class=check><input name=tls id=tls type=checkbox value=1 __MOON_TLS__>Use TLS (wss://, e.g. through Mainsail on 443)</label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div></section><section class=card><h2>Pairing</h2><label>Pairing token<input name=pairToken value="__PAIR_TOKEN__" maxlength=16 autocomplete=off autocapitalize=characters spellcheck=false></label><label class=check><input name=regenToken type=checkbox value=1>Generate a new token on save</label><p class=note>Put this in your [heater_iheater_remote] section as remote_token: __PAIR_TOKEN__. After a wipe, type your old token here to keep your printer.cfg unchanged.</p></section><section class=card><h2>Output</h2><label>iHeater output<select name=output><option value=pulse __OUT_PULSE__>Pulse on __PULSE_PIN__</option><option value=uart __OUT_UART__>UART on __UART_PINS__</option></select></label><p class=note>Switching restarts the Remote. The iHeater must run the matching build (pulse or UART).</p></section><section class=card><h2>iHeater target range</h2>__RANGE_NOTES__<label>Min target (C)<input name=minTargetC type=number value="__MIN_TARGET__" min=11 max=90></label><label>Max target (C)<input name=maxTargetC type=number value="__MAX_TARGET__" min=11 max=90></label></section><button>Save local setup</button></form></main><script>function showSource(){document.getElementById('moon').style.display=document.getElementById('source').value==='moonraker'?'block':'none'}showSource();document.getElementById('tls').onchange=e=>{let p=document.getElementById('port');if(e.target.checked&&p.value==='7125')p.value='443';else if(!e.target.checked&&p.value==='443')p.value='7125'}</script></html>)HTML";
+  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=referrer content=same-origin><title>iHeater setup</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:620px;margin:auto;padding:24px 15px}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:16px;margin:14px 0}h1{font-size:23px}h2{font-size:15px;font-weight:650;margin:0 0 4px}label{display:grid;gap:6px;margin:12px 0;color:var(--m);font-size:13px}input,select,button{min-height:43px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:0 10px}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;width:100%;margin-top:8px}.check{display:flex;align-items:center;gap:10px}.check input{min-height:0;width:18px;height:18px;margin:0;padding:0}.note{font-size:13px;line-height:1.45;color:var(--m)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><h1>Wi-Fi &amp; printer setup</h1><p class=note>Blank password and API key fields keep their stored values.</p><form method=post action="/api/setup"><section class=card><h2>Wi-Fi</h2><label>Network name<input name=ssid value="__SSID__" maxlength=32></label><label>Password <input name=password type=password placeholder="(unchanged)" maxlength=64></label><label>Transmit power<select name=txPower><option value=34 __TXP_34__>8.5 dBm (default)</option><option value=44 __TXP_44__>11 dBm</option><option value=52 __TXP_52__>13 dBm</option><option value=60 __TXP_60__>15 dBm</option><option value=68 __TXP_68__>17 dBm</option><option value=78 __TXP_78__>19.5 dBm</option></select></label><p class=note>Higher power can help a weak signal; some C3 Super Mini boards fail to connect above 8.5 dBm. Changing it restarts the device.</p><p class=note>Signal: __RSSI__</p></section><section class=card><h2>Control source</h2><label>Bind this heater to<select name=type id=source onchange=showSource()><option value=manual __MANUAL__>Manual controls only</option><option value=moonraker __MOON__>Klipper (Moonraker)</option></select></label><div id=moon><label>Host / IP<input name=host value="__MOON_HOST__" maxlength=63></label><label>Port<input name=port id=port type=number value="__MOON_PORT__" min=1 max=65535></label><label class=check><input name=tls id=tls type=checkbox value=1 __MOON_TLS__>Use TLS (wss://, e.g. through Mainsail on 443)</label><label>API key <input name=apiKey type=password placeholder="(unchanged)" maxlength=64></label></div></section><section class=card><h2>Pairing</h2><label>Pairing token<input name=pairToken value="__PAIR_TOKEN__" maxlength=16 autocomplete=off autocapitalize=characters spellcheck=false></label><label class=check><input name=regenToken type=checkbox value=1>Generate a new token on save</label><p class=note>Put this in your [heater_iheater_remote] section as remote_token: __PAIR_TOKEN__. After a wipe, type your old token here to keep your printer.cfg unchanged.</p></section><section class=card><h2>Output</h2><label>iHeater output<select name=output><option value=pulse __OUT_PULSE__>Pulse on __PULSE_PIN__</option><option value=uart __OUT_UART__>UART on __UART_PINS__</option></select></label><p class=note>Switching restarts the Remote. The iHeater must run the matching build (pulse or UART).</p></section><section class=card><h2>iHeater target range</h2>__RANGE_NOTES__<label>Min target (C)<input name=minTargetC type=number value="__MIN_TARGET__" min=11 max=90></label><label>Max target (C)<input name=maxTargetC type=number value="__MAX_TARGET__" min=11 max=90></label></section><button>Save local setup</button></form></main><script>function showSource(){document.getElementById('moon').style.display=document.getElementById('source').value==='moonraker'?'block':'none'}showSource();document.getElementById('tls').onchange=e=>{let p=document.getElementById('port');if(e.target.checked&&p.value==='7125')p.value='443';else if(!e.target.checked&&p.value==='443')p.value='7125'}</script></html>)HTML";
   page.replace("</form></main>",
-               String("</form><p class=note><a href='/fw'>Firmware update</a> · iHeater Remote v") + VERSION_STR + "</p></main>");
+               String("</form>") + kSecurityCard + String("<p class=note><a href='/fw'>Firmware update</a> · iHeater Remote v") + VERSION_STR + "</p></main>");
   for (const int txp : {34, 44, 52, 60, 68, 78})
     page.replace(String("__TXP_") + txp + "__", s_txPower == txp ? "selected" : "");
   page.replace("__OUT_PULSE__", s_outputKind == OutputKind::Pulse ? "selected" : "");
@@ -723,6 +753,31 @@ void handleSetupPage() {
   page.replace("__PAIR_TOKEN__", token);
   page.replace("__MOON_HOST__", htmlEscape(s_settings.moon.host.c_str()));
   page.replace("__SSID__", htmlEscape(s_stationSsid.c_str()));
+  // The Security card: its stored values are escaped and go in last too.
+  page.replace("__AUTO_CHK__", s_auth.autoProxy ? "checked" : "");
+  page.replace("__HDR_CHK__", s_auth.headerLogin ? "checked" : "");
+  page.replace("__PO_CHK__", s_auth.proxyOnly ? "checked" : "");
+  String autoText = "none yet";
+  if (!klipper) {
+    autoText = "not used in Manual mode";
+  } else if (s_moonraker.connectedAddress() != 0) {
+    char addr[16];
+    policy::formatIpv4(s_moonraker.connectedAddress(), addr);
+    autoText = addr;
+  }
+  String proxies;
+  for (size_t i = 0; i < s_auth.proxyCount; ++i) {
+    char addr[16];
+    policy::formatIpv4(s_auth.proxies[i], addr);
+    if (i) proxies += ", ";
+    proxies += addr;
+  }
+  page.replace("__AUTO_ADDR__", autoText);
+  page.replace("__SEC_PROXIES__", htmlEscape(proxies.c_str()));
+  page.replace("__HDR_USER__", htmlEscape(s_auth.userHeader.c_str()));
+  page.replace("__HDR_USERS__", htmlEscape(s_auth.allowedUsers.c_str()));
+  page.replace("__HDR_GRPH__", htmlEscape(s_auth.groupsHeader.c_str()));
+  page.replace("__HDR_GROUPS__", htmlEscape(s_auth.allowedGroups.c_str()));
   if (s_setupNotice.length()) {
     page.replace("<h1>Wi-Fi &amp; printer setup</h1>",
                  "<h1>Wi-Fi &amp; printer setup</h1><p class=note style='color:#ffb347'>" +
@@ -734,7 +789,7 @@ void handleSetupPage() {
 
 // The iHeater update card for /fw (UART output only). It follows the status
 // WebSocket and posts the image as multipart field "firmware".
-const char kIheaterCard[] = R"HTML(<section class=card id=ih><style>#ih h2{font-size:16px;margin:0 0 6px}#ih button:disabled{opacity:.45;cursor:default}#ih .row{display:flex;gap:8px}#ih progress{width:100%}</style><h2>iHeater firmware</h2><p class=note id=ihVer>Running: not read yet</p><p class="note warning" id=ihRom hidden>iHeater is in its bootloader: upload firmware to recover</p><input id=ihFile accept=".bin,application/octet-stream" type=file><p class=note id=ihImg>Choose the iHeater UART build .bin.</p><div class=row><button id=ihGo disabled>Update iHeater</button><button id=ihCancel disabled>Cancel</button><button id=ihRetry disabled>Retry</button></div><progress id=ihBar max=100 value=0 hidden></progress><p class=note id=ihPhase></p><p class="note warning" id=ihErase hidden>The iHeater's application is erased. Do not power off the iHeater or the Remote.</p><p class="note warning" id=ihWarn hidden></p><p class=note id=ihMsg></p><script>(()=>{const $=i=>document.getElementById(i),I='/api/iheater/',busyP=['entering','syncing','erasing','writing','starting','restarting'];let u={},up=false;function say(id,t,w){$(id).textContent=t||'';$(id).classList.toggle('warning',!!w)}
+const char kIheaterCard[] = R"HTML(<section class=card id=ih data-auth=out><style>#ih[data-auth=out] .ctl{display:none}#ih h2{font-size:16px;margin:0 0 6px}#ih button:disabled{opacity:.45;cursor:default}#ih .row{display:flex;gap:8px}#ih progress{width:100%}</style><h2>iHeater firmware</h2><p class=note id=ihVer>Running: not read yet</p><p class="note warning" id=ihRom hidden>iHeater is in its bootloader: upload firmware to recover</p><input class=ctl id=ihFile accept=".bin,application/octet-stream" type=file><p class=note id=ihImg>Choose the iHeater UART build .bin.</p><div class="row ctl"><button id=ihGo disabled>Update iHeater</button><button id=ihCancel disabled>Cancel</button><button id=ihRetry disabled>Retry</button></div><progress id=ihBar max=100 value=0 hidden></progress><p class=note id=ihPhase></p><p class="note warning" id=ihErase hidden>The iHeater's application is erased. Do not power off the iHeater or the Remote.</p><p class="note warning" id=ihWarn hidden></p><p class=note id=ihMsg></p><script>(()=>{const $=i=>document.getElementById(i),I='/api/iheater/',busyP=['entering','syncing','erasing','writing','starting','restarting'];let u={},up=false;function say(id,t,w){$(id).textContent=t||'';$(id).classList.toggle('warning',!!w)}
 function show(s){const i=s.iheater||{};u=s.iheaterUpdate||{};if(!s.iheaterUpdate)return;const im=u.image||{},r=u.running,p=u.phase;
 say('ihVer',i.fw?'Running: v'+i.fw+', protocol '+i.proto:'Running: not read yet');
 $('ihRom').hidden=!(u.romDetected&&u.outcome!=='power-cycle'&&!r);
@@ -746,15 +801,16 @@ $('ihErase').hidden=!(r&&busyP.includes(p));
 {const w=[];if(u.unexpectedPid)w.push("Unexpected chip ID "+(u.pid?"0x"+u.pid.toString(16).toUpperCase():"(unknown)")+"; expected 0x445.");if(u.entryUnconfirmed)w.push("The iHeater didn't confirm the bootloader request.");$('ihWarn').textContent=w.join(' ');$('ihWarn').hidden=!w.length}
 say('ihMsg',r?'':u.message||u.hint||'',!r&&u.outcome&&u.outcome!=='none'&&u.outcome!=='updated'&&u.outcome!=='cancelled');
 if(!r&&u.detail)$('ihMsg').textContent+=' ('+u.detail+')'}
-function post(path,done){const x=new XMLHttpRequest();x.open('POST',I+path);x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=300)say('ihMsg',r.error||'Request failed.',1);else if(r.iheaterUpdate)show(r);if(done)done()};x.onerror=()=>say('ihMsg','Request failed.',1);x.send()}
-$('ihFile').onchange=()=>{const file=$('ihFile').files[0];if(!file)return;up=true;say('ihImg','Uploading…');$('ihGo').disabled=true;const x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST',I+'image');x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}up=false;if(x.status>=300)say('ihImg',r.error||'Upload failed.',1);else say('ihImg',r.line,r.fallback);$('ihFile').value=''};x.onerror=()=>{up=false;say('ihImg','Upload failed.',1)};x.send(d)};
+function au(){fetch('/api/auth/me',{cache:'no-store'}).then(r=>r.json()).then(d=>d.loggedIn===true,()=>false).then(v=>{$('ih').dataset.auth=v?'in':'out'})}au();
+function post(path,done){const x=new XMLHttpRequest();x.open('POST',I+path);x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status===401||x.status===403)au();if(x.status>=300)say('ihMsg',r.error||'Request failed.',1);else if(r.iheaterUpdate)show(r);if(done)done()};x.onerror=()=>say('ihMsg','Request failed.',1);x.send()}
+$('ihFile').onchange=()=>{const file=$('ihFile').files[0];if(!file)return;up=true;say('ihImg','Uploading…');$('ihGo').disabled=true;const x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST',I+'image');x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}up=false;if(x.status===401||x.status===403)au();if(x.status>=300)say('ihImg',r.error||'Upload failed.',1);else say('ihImg',r.line,r.fallback);$('ihFile').value=''};x.onerror=()=>{up=false;say('ihImg','Upload failed.',1)};x.send(d)};
 $('ihGo').onclick=()=>post('update');$('ihRetry').onclick=()=>post('retry');$('ihCancel').onclick=()=>post('cancel');
-let ws;function conn(){ws=new WebSocket((location.protocol==='https:'?'wss':'ws')+'://'+location.hostname+':81/');ws.onmessage=e=>{try{show(JSON.parse(e.data))}catch(_){}};ws.onclose=()=>setTimeout(conn,2000)}conn()})()</script></section>)HTML";
+let ws;function conn(){ws=new WebSocket(location.protocol==='https:'?'wss://'+location.host+'/ws':'ws://'+location.hostname+':81/');ws.onmessage=e=>{try{show(JSON.parse(e.data))}catch(_){}};ws.onclose=()=>setTimeout(conn,2000)}conn()})()</script></section>)HTML";
 
 void handleFirmwarePage() {
   if (captiveRedirectIfNeeded())
     return;
-  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>iHeater firmware update</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;--bad:#ff8893;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:560px;margin:auto;padding:36px 15px}.logo{font-size:24px;font-weight:800;letter-spacing:-1px}.logo i{font-style:normal;color:var(--a)}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:18px;margin:16px 0}h1{font-size:22px;margin:14px 0 7px}.note{color:var(--m);font-size:13px;line-height:1.5}input,button{box-sizing:border-box;width:100%;min-height:45px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:8px;margin:8px 0}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;cursor:pointer}.warning{color:var(--bad)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><div class=logo><i>i</i>Heater</div><h1>Firmware update</h1><p class=note>Installed: iHeater Remote v__VERSION__</p><section class=card><p class="note warning"><strong>__HEATNOTE__</strong> Do not disconnect power while the upload is in progress.</p><input id=file accept=".bin,application/octet-stream" type=file><button id=install>Install update</button><p class=note id=msg></p></section>__IHCARD__</main><script>const f=document.getElementById('file'),m=document.getElementById('msg');document.getElementById('install').onclick=()=>{let file=f.files[0];if(!file){m.textContent='Choose a firmware .bin first.';return}let x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST','/api/ota');x.upload.onprogress=e=>m.textContent=e.lengthComputable?'Uploading '+Math.round(e.loaded/e.total*100)+'%':'Uploading…';x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=200&&x.status<300){m.textContent='Update written. Rebooting…';setTimeout(waitForDevice,1500)}else m.textContent=r.error||'Update failed.'};x.onerror=()=>m.textContent='Update failed.';x.send(d)};function waitForDevice(){let end=Date.now()+120000,t=setInterval(async()=>{try{let r=await fetch('/',{cache:'no-store'});if(r.ok){clearInterval(t);location.href='/'}}catch(_){}if(Date.now()>end){clearInterval(t);m.textContent='The device is restarting. Reopen the dashboard when it is back online.'}},1000)}</script></main>)HTML";
+  String page = R"HTML(<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><meta name=referrer content=same-origin><title>iHeater firmware update</title><style>:root{color-scheme:dark;--bg:#090d14;--p:#101722;--l:#29384b;--t:#eaf1fa;--m:#91a2b8;--a:#5ba9ff;--bad:#ff8893;font-family:system-ui,sans-serif}body{margin:0;background:var(--bg);color:var(--t)}main{max-width:560px;margin:auto;padding:36px 15px}.logo{font-size:24px;font-weight:800;letter-spacing:-1px}.logo i{font-style:normal;color:var(--a)}.card{background:var(--p);border:1px solid var(--l);border-radius:12px;padding:18px;margin:16px 0}h1{font-size:22px;margin:14px 0 7px}.note{color:var(--m);font-size:13px;line-height:1.5}input,button{box-sizing:border-box;width:100%;min-height:45px;border-radius:8px;border:1px solid #38506b;background:#0c131d;color:var(--t);font:inherit;padding:8px;margin:8px 0}button{background:#1d5d99;border-color:#69b4ff;font-weight:700;cursor:pointer}.warning{color:var(--bad)}a{color:var(--a)}</style><main><p><a href="/">← Dashboard</a></p><div class=logo><i>i</i>Heater</div><h1>Firmware update</h1><p class=note>Installed: iHeater Remote v__VERSION__</p><section class=card><p class="note warning"><strong>__HEATNOTE__</strong> Do not disconnect power while the upload is in progress.</p><input id=file accept=".bin,application/octet-stream" type=file><button id=install>Install update</button><p class=note id=msg></p></section>__IHCARD__</main><script>const f=document.getElementById('file'),m=document.getElementById('msg');document.getElementById('install').onclick=()=>{let file=f.files[0];if(!file){m.textContent='Choose a firmware .bin first.';return}let x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST','/api/ota');x.upload.onprogress=e=>m.textContent=e.lengthComputable?'Uploading '+Math.round(e.loaded/e.total*100)+'%':'Uploading…';x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status>=200&&x.status<300){m.textContent='Update written. Rebooting…';setTimeout(waitForDevice,1500)}else m.textContent=r.error||'Update failed.'};x.onerror=()=>m.textContent='Update failed.';x.send(d)};function waitForDevice(){let end=Date.now()+120000,t=setInterval(async()=>{try{let r=await fetch('/',{cache:'no-store'});if(r.ok){clearInterval(t);location.href='/'}}catch(_){}if(Date.now()>end){clearInterval(t);m.textContent='The device is restarting. Reopen the dashboard when it is back online.'}},1000)}</script></main>)HTML";
   page.replace("__VERSION__", VERSION_STR);
   page.replace("__IHCARD__", s_outputKind == OutputKind::Uart ? kIheaterCard : "");
   page.replace("__HEATNOTE__",
@@ -943,6 +999,11 @@ String statusJson() {
   doc["moonrakerState"] = s_moonraker.stateString();
   doc["heaterObject"] = s_moonraker.heaterObject();
   doc["moonrakerError"] = klipper ? s_moonraker.lastError() : String();
+  doc["override"] = s_override.active();
+  if (s_override.hasKlipperTarget())
+    doc["klipperTargetC"] = s_override.klipperTargetC();
+  else
+    doc["klipperTargetC"] = nullptr;
   if (s_outputKind == OutputKind::Uart) {
     fillIheaterJson(doc.createNestedObject("iheater"));
     fillUpdateJson(doc.createNestedObject("iheaterUpdate"));
@@ -1158,6 +1219,10 @@ bool applySetupForm(String &error) {
   const bool stopHeat = policy::setupSaveStopsHeat(
       s_outputKind == OutputKind::Uart, wasKlipper, klipperSource(),
       bindingChanged, nextOutput != s_outputKind);
+  // An override survives a save that changes neither the source nor the
+  // binding; otherwise Klipper's target must not be held against the new one.
+  if (stopHeat || bindingChanged || wasKlipper != klipperSource())
+    s_override.reset();
   if (klipperSource()) {
     // Heat from before the change (manual, or another printer or pairing)
     // must not be held: Klipper's own target replaces it once subscribed.
@@ -1218,6 +1283,12 @@ bool applySetupForm(String &error) {
     scheduleRestart();
   }
   return true;
+}
+
+void handleOverrideEnd() {
+  if (s_override.active())
+    applyIntegrationTarget(s_override.end(), "back to klipper", "klipper");
+  sendActionStatus();
 }
 
 void handleIntegrationPost() {
@@ -1546,6 +1617,507 @@ void updateIheaterImageHousekeeping() {
   s_wasBusy = busy;
 }
 
+// ---- Web login: the request gate, the login endpoints and the pages ----
+
+constexpr const char *kSessionCookie = "iheater_session";
+constexpr const char *kSessionCookieAttrs = "; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000";
+
+// IPv4 only. A v4-mapped peer already arrives as IPv4 from remoteIP(). Any
+// other IPv6 peer is 0, which isTrustedProxy() never trusts; reading its first
+// four bytes instead would let a crafted IPv6 address equal a trusted proxy.
+uint32_t ipValue(const IPAddress &ip) {
+  if (ip.type() != IPv4)
+    return 0;
+  return (static_cast<uint32_t>(ip[0]) << 24) | (static_cast<uint32_t>(ip[1]) << 16) |
+         (static_cast<uint32_t>(ip[2]) << 8) | static_cast<uint32_t>(ip[3]);
+}
+
+String ipText(uint32_t ip) {
+  char text[16];
+  policy::formatIpv4(ip, text);
+  return String(text);
+}
+
+struct RequestAuth {
+  policy::RequestClass cls;
+  policy::AuthVerdict verdict = policy::AuthVerdict::NeedLogin;  // refuse until computed
+  policy::AuthMethod method;
+  bool viaHttpsProxy;
+  uint32_t client;
+  String user;
+};
+
+// The request the gate last let through; the login handlers read it.
+RequestAuth s_req{};
+// The upload routes decide once, at UPLOAD_FILE_START. s_uploadRoute names the
+// route that computed s_uploadAuth, and is null when no upload is pending.
+RequestAuth s_uploadAuth{};
+const char *s_uploadRoute = nullptr;
+
+RequestAuth checkRequest() {
+  RequestAuth a{};
+  const uint32_t peer = ipValue(s_server.client().remoteIP());
+  // The automatic entry is the Moonraker host, and only while following Klipper.
+  const uint32_t automatic =
+      (klipperSource() && s_auth.autoProxy) ? s_moonraker.connectedAddress() : 0;
+  const bool trusted = policy::isTrustedProxy(peer, s_auth.proxies, s_auth.proxyCount, automatic);
+
+  // Forwarded values count only from a trusted peer.
+  String fwdProto, fwdHost, fwdFor;
+  if (trusted) {
+    fwdProto = s_server.header("X-Forwarded-Proto");
+    fwdHost = s_server.header("X-Forwarded-Host");
+    fwdFor = s_server.header("X-Forwarded-For");
+  }
+  a.client = policy::clientAddress(peer, trusted, fwdFor.c_str());
+  a.viaHttpsProxy = policy::viaHttpsProxy(trusted, fwdProto.c_str());
+
+  const String uri = s_server.uri();
+  const bool isPost = s_server.method() == HTTP_POST;
+  a.cls = policy::classifyRequest(uri.c_str(), isPost, s_auth.passwordSet);
+
+  bool cookieValid = false;
+  uint8_t token[policy::kSessionTokenLen];
+  const String cookie = s_server.header("Cookie");
+  if (policy::sessionTokenFromCookie(cookie.c_str(), token)) {
+    const policy::SessionTable::Check check = s_sessions.check(token, s_hours.hours());
+    if (check == policy::SessionTable::Check::Valid)
+      cookieValid = true;
+    else if (check == policy::SessionTable::Check::Expired)
+      saveSessions(s_sessions);
+  }
+
+  String user;
+  bool headerOk = false;
+  if (trusted && s_auth.headerLogin) {
+    user = s_server.header(s_auth.userHeader);
+    user.trim();
+    headerOk = policy::headerLoginOk(s_auth.headerLogin, trusted, user.c_str(),
+                                     s_auth.allowedUsers.c_str(),
+                                     s_server.header(s_auth.groupsHeader).c_str(),
+                                     s_auth.allowedGroups.c_str());
+  }
+  a.method = policy::authMethod(cookieValid, headerOk);
+  if (a.method == policy::AuthMethod::Header) {
+    a.user = user;
+    static String s_lastHeaderUser;
+    if (user != s_lastHeaderUser) {
+      s_lastHeaderUser = user;
+      Serial.printf("[AUTH] header login user=%s client=%s\n", user.c_str(),
+                    ipText(a.client).c_str());
+    }
+  }
+
+  policy::RequestFacts facts{};
+  facts.cls = a.cls;
+  facts.apMode = s_apMode;
+  facts.proxyOnly = s_auth.proxyOnly;
+  facts.viaHttpsProxy = a.viaHttpsProxy;
+  facts.loggedIn = a.method != policy::AuthMethod::None;
+  facts.originOk = a.cls == policy::RequestClass::Public ||
+                   policy::originAllowed(s_server.header("Origin").c_str(),
+                                         s_server.header("Referer").c_str(),
+                                         s_server.hostHeader().c_str(), trusted,
+                                         fwdProto.c_str(), fwdHost.c_str());
+  a.verdict = policy::decideRequest(facts);
+  return a;
+}
+
+// Keeps control characters out of the Serial log.
+String logSafe(const String &raw) {
+  String out = raw;
+  for (size_t i = 0; i < out.length(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(out[i]);
+    if (c < 0x20 || c == 0x7F)
+      out.setCharAt(i, '?');
+  }
+  return out;
+}
+
+// Everything except letters, digits, "-_.~" and "/" becomes %XX.
+String percentEncode(const String &raw) {
+  static const char kHex[] = "0123456789ABCDEF";
+  String out;
+  for (size_t i = 0; i < raw.length(); ++i) {
+    const unsigned char c = static_cast<unsigned char>(raw[i]);
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+        c == '-' || c == '_' || c == '.' || c == '~' || c == '/') {
+      out += static_cast<char>(c);
+    } else {
+      out += '%';
+      out += kHex[c >> 4];
+      out += kHex[c & 15];
+    }
+  }
+  return out;
+}
+
+void sendAuthJson(int code, const String &body) {
+  s_server.sendHeader("Cache-Control", "no-store");
+  s_server.send(code, "application/json", body);
+}
+
+void sendAuthError(int code, const char *message) {
+  StaticJsonDocument<192> doc;
+  doc["error"] = message;
+  String out;
+  serializeJson(doc, out);
+  sendAuthJson(code, out);
+}
+
+void sendRefusal(const RequestAuth &a) {
+  const char *why = "login";
+  if (a.verdict == policy::AuthVerdict::BadOrigin)
+    why = "origin";
+  else if (a.verdict == policy::AuthVerdict::ProxyOnly)
+    why = "proxy-only";
+  const String uri = s_server.uri();
+  Serial.printf("[AUTH] refused %s %s: %s client=%s\n",
+                s_server.method() == HTTP_POST ? "POST" : "GET", logSafe(uri).c_str(), why,
+                ipText(a.client).c_str());
+
+  const bool page = a.cls == policy::RequestClass::ProtectedPage;
+  if (a.verdict == policy::AuthVerdict::NeedLogin) {
+    if (page) {
+      s_server.sendHeader("Location", String("/login?next=") + percentEncode(uri));
+      s_server.sendHeader("Cache-Control", "no-store");
+      s_server.send(302, "text/plain", "");
+    } else {
+      // The text is fixed, so the body is written out whole.
+      sendAuthJson(401, String("{\"error\":\"") +
+                            (s_auth.passwordSet ? "Log in first." : "Set a password first.") +
+                            "\",\"login\":\"/login\"}");
+    }
+    return;
+  }
+  const char *message = a.verdict == policy::AuthVerdict::ProxyOnly
+                            ? "This Remote only takes changes through its HTTPS proxy."
+                            : "Refused: the request did not come from this Remote's page.";
+  if (a.verdict == policy::AuthVerdict::ProxyOnly && page) {
+    s_server.sendHeader("Cache-Control", "no-store");
+    s_server.send(403, "text/html",
+                  String("<!doctype html><title>Refused</title><p>") + message + "</p>");
+    return;
+  }
+  sendAuthError(403, message);
+}
+
+// Every route goes through this, public ones included: the policy classifies
+// by path, so a route added later is protected by default.
+std::function<void()> guarded(std::function<void()> handler) {
+  return [handler]() {
+    const RequestAuth a = checkRequest();
+    if (a.verdict == policy::AuthVerdict::Allow) {
+      s_req = a;
+      handler();
+    } else {
+      sendRefusal(a);
+    }
+  };
+}
+
+// The upload function runs only while the verdict taken at UPLOAD_FILE_START
+// is Allow, for every upload status, so a refused upload never reaches
+// Update.begin, applyMode or the image buffer.
+std::function<void()> guardedUpload(const char *route, std::function<void()> upload) {
+  return [route, upload]() {
+    if (s_server.upload().status == UPLOAD_FILE_START) {
+      s_uploadAuth = checkRequest();
+      s_uploadRoute = route;
+    }
+    if (s_uploadRoute == route && s_uploadAuth.verdict == policy::AuthVerdict::Allow)
+      upload();
+    if (s_server.upload().status == UPLOAD_FILE_ABORTED && s_uploadRoute == route)
+      s_uploadRoute = nullptr;  // no final handler follows an abort
+  };
+}
+
+// The final handler uses the verdict the upload took and never recomputes it,
+// so a stale s_otaOk from an earlier upload can't restart the Remote. A
+// request that carried no upload at all (no START) has no verdict yet and is
+// checked here, once.
+std::function<void()> guardedAfterUpload(const char *route, std::function<void()> handler) {
+  return [route, handler]() {
+    if (s_uploadRoute != route)
+      s_uploadAuth = checkRequest();
+    const RequestAuth a = s_uploadAuth;
+    s_uploadRoute = nullptr;
+    if (a.verdict == policy::AuthVerdict::Allow) {
+      s_req = a;
+      handler();
+    } else {
+      sendRefusal(a);
+    }
+  };
+}
+
+// 16 random bytes in a cookie that lasts for 30 real days; the table keeps
+// only the hash. Secure is added when the request came through the HTTPS proxy.
+void startSession(const RequestAuth &a) {
+  uint8_t token[policy::kSessionTokenLen];
+  esp_fill_random(token, sizeof(token));
+  s_sessions.add(token, s_hours.hours());
+  if (!saveSessions(s_sessions))
+    Serial.println("[AUTH] could not save the sessions; this one ends at a restart");
+  char hex[policy::kSessionTokenLen * 2 + 1];
+  policy::toHex(token, sizeof(token), hex);
+  String cookie = String(kSessionCookie) + "=" + hex + kSessionCookieAttrs;
+  if (a.viaHttpsProxy)
+    cookie += "; Secure";
+  s_server.sendHeader("Set-Cookie", cookie);
+}
+
+void handleLoginPage() {
+  s_server.sendHeader("Cache-Control", "no-store");
+  s_server.send_P(200, "text/html", kLoginHtml);
+}
+
+void handleAuthScript() { s_server.send_P(200, "application/javascript", kAuthJs); }
+
+void handleAuthChallenge() {
+  uint8_t nonce[policy::kNonceLen];
+  uint8_t newSalt[policy::kSaltLen];
+  esp_fill_random(nonce, sizeof(nonce));
+  esp_fill_random(newSalt, sizeof(newSalt));
+  s_nonces.add(nonce, millis());
+
+  char nonceHex[policy::kNonceLen * 2 + 1];
+  char newSaltHex[policy::kSaltLen * 2 + 1];
+  char saltHex[policy::kSaltLen * 2 + 1];
+  policy::toHex(nonce, sizeof(nonce), nonceHex);
+  policy::toHex(newSalt, sizeof(newSalt), newSaltHex);
+
+  StaticJsonDocument<512> doc;
+  doc["passwordSet"] = s_auth.passwordSet;
+  if (s_auth.passwordSet) {
+    policy::toHex(s_auth.salt, sizeof(s_auth.salt), saltHex);
+    doc["salt"] = saltHex;
+    doc["iterations"] = s_auth.iterations;
+  }
+  doc["nonce"] = nonceHex;
+  doc["newSalt"] = newSaltHex;
+  doc["newIterations"] = policy::kDefaultIterations;
+  String out;
+  serializeJson(doc, out);
+  sendAuthJson(200, out);
+}
+
+void handleAuthLogin() {
+  const uint32_t now = millis();
+  const uint32_t client = s_req.client;
+
+  // A locked client is refused before anything else is touched.
+  const uint32_t waitMs = s_lockout.retryAfterMs(client, now);
+  if (waitMs != 0) {
+    const uint32_t waitS = (waitMs + 999) / 1000;
+    StaticJsonDocument<192> doc;
+    doc["error"] = String("Too many tries. Wait ") + waitS + " s and try again.";
+    doc["retryAfterS"] = waitS;
+    String out;
+    serializeJson(doc, out);
+    sendAuthJson(429, out);
+    return;
+  }
+
+  uint8_t nonce[policy::kNonceLen];
+  uint8_t proof[policy::kSha256Len];
+  if (!policy::fromHex(s_server.arg("nonce").c_str(), nonce, sizeof(nonce)) ||
+      !policy::fromHex(s_server.arg("proof").c_str(), proof, sizeof(proof))) {
+    sendAuthError(400, "Bad request.");
+    return;
+  }
+  if (!s_auth.passwordSet) {
+    sendAuthError(400, "No password is set yet.");
+    return;
+  }
+  // The nonce is burned whether or not the proof is right.
+  if (!s_nonces.take(nonce, now)) {
+    sendAuthError(401, "The login expired. Try again.");
+    return;
+  }
+  if (!policy::proofMatches(s_auth.verifier, nonce, proof)) {
+    s_lockout.failure(client, now);
+    Serial.printf("[AUTH] login failed client=%s (%u/%u)\n", ipText(client).c_str(),
+                  static_cast<unsigned>(s_lockout.failureCount(client)),
+                  static_cast<unsigned>(policy::kLockoutFailures));
+    if (s_lockout.retryAfterMs(client, now) != 0)
+      Serial.printf("[AUTH] locked out client=%s for %u s\n", ipText(client).c_str(),
+                    static_cast<unsigned>(policy::kLockoutMs / 1000));
+    sendAuthError(401, "Wrong password.");
+    return;
+  }
+  s_lockout.success(client);
+  startSession(s_req);
+  Serial.printf("[AUTH] login ok client=%s\n", ipText(client).c_str());
+  sendAuthJson(200, "{\"ok\":true}");
+}
+
+// Setting the first password (no login needed, once) and changing it (needs a
+// login): the gate has already told the two apart. Either way every session
+// ends and this request gets a new one.
+void handleAuthPassword() {
+  uint8_t salt[policy::kSaltLen];
+  uint8_t verifier[policy::kVerifierLen];
+  const String iterText = s_server.arg("iterations");
+  bool digits = iterText.length() > 0 && iterText.length() <= 6;
+  for (size_t i = 0; digits && i < iterText.length(); ++i)
+    digits = iterText[i] >= '0' && iterText[i] <= '9';
+  const uint32_t iterations = digits ? static_cast<uint32_t>(iterText.toInt()) : 0;
+  if (!policy::fromHex(s_server.arg("salt").c_str(), salt, sizeof(salt)) ||
+      !policy::fromHex(s_server.arg("verifier").c_str(), verifier, sizeof(verifier)) ||
+      !digits || !policy::validIterations(iterations)) {
+    sendAuthError(400, "Bad request.");
+    return;
+  }
+
+  const bool changing = s_auth.passwordSet;
+  AuthSettings next = s_auth;
+  memcpy(next.salt, salt, sizeof(salt));
+  memcpy(next.verifier, verifier, sizeof(verifier));
+  next.iterations = iterations;
+  next.passwordSet = true;
+  if (!savePassword(next)) {
+    sendAuthError(500, "The password could not be saved.");
+    return;
+  }
+  s_auth = next;
+  s_sessions.clear();
+  s_nonces.clear();
+  startSession(s_req);  // adds the new session and saves the table
+  Serial.println(changing ? "[AUTH] password changed, sessions ended" : "[AUTH] password set");
+  sendAuthJson(200, "{\"ok\":true}");
+}
+
+void handleAuthLogout() {
+  uint8_t token[policy::kSessionTokenLen];
+  const String cookie = s_server.header("Cookie");
+  if (policy::sessionTokenFromCookie(cookie.c_str(), token) && s_sessions.remove(token))
+    saveSessions(s_sessions);
+  Serial.printf("[AUTH] logout client=%s\n", ipText(s_req.client).c_str());
+  s_server.sendHeader("Set-Cookie", String(kSessionCookie) + "=; Path=/; Max-Age=0");
+  sendAuthJson(200, "{\"ok\":true}");
+}
+
+void handleAuthMe() {
+  const policy::AuthMethod method = s_req.method;
+  StaticJsonDocument<384> doc;
+  doc["loggedIn"] = method != policy::AuthMethod::None;
+  doc["method"] = method == policy::AuthMethod::Password ? "password"
+                  : method == policy::AuthMethod::Header ? "header"
+                                                         : "none";
+  doc["user"] = s_req.user;
+  doc["passwordSet"] = s_auth.passwordSet;
+  // softAP() is called without a password unless it has at least 8 characters.
+  doc["apOpen"] = s_apMode && strlen(IHEATER_AP_PASSWORD) < 8;
+  String out;
+  serializeJson(doc, out);
+  sendAuthJson(200, out);
+}
+
+// Set when a save changes a header name; loop() re-registers the headers,
+// because collectHeaders() clears the current request's headers.
+bool s_headersDirty = false;
+
+// Security settings: every field is checked before anything changes, so a 400
+// leaves memory and NVS as they were.
+void handleAuthSettingsPost() {
+  uint32_t proxies[policy::kMaxTrustedProxies] = {};
+  size_t proxyCount = 0;
+  if (!policy::parseProxyList(s_server.arg("proxies").c_str(), proxies, proxyCount)) {
+    sendAuthError(400, "Trusted proxies: up to four IPv4 addresses, separated by commas.");
+    return;
+  }
+  String userHeader = s_server.arg("userHeader");
+  String groupsHeader = s_server.arg("groupsHeader");
+  userHeader.trim();
+  groupsHeader.trim();
+  if (!policy::validHeaderName(userHeader.c_str()) ||
+      !policy::validHeaderName(groupsHeader.c_str())) {
+    sendAuthError(400, "Header names may use letters, digits and dashes only.");
+    return;
+  }
+  const String allowedUsers = s_server.arg("allowedUsers");
+  const String allowedGroups = s_server.arg("allowedGroups");
+  if (allowedUsers.length() > 128 || allowedGroups.length() > 128) {
+    sendAuthError(400, "The allowed lists can be at most 128 characters each.");
+    return;
+  }
+  const bool proxyOnly = s_server.arg("proxyOnly") == "1";
+  const bool autoProxy = s_server.arg("autoProxy") == "1";
+  // Proxy-only must hold under the new MANUAL proxy list alone. The automatic
+  // Moonraker entry can vanish and would lock the owner out. The access point
+  // ignores proxy-only, so a save made there skips the check.
+  switch (policy::checkProxyOnlySave(proxyOnly, s_apMode, s_req.viaHttpsProxy,
+                                     ipValue(s_server.client().remoteIP()), proxies,
+                                     proxyCount)) {
+    case policy::ProxyOnlySave::Allowed:
+      break;
+    case policy::ProxyOnlySave::NeedListedProxy:
+      sendAuthError(400,
+                    "Proxy-only mode needs the HTTPS proxy's address in the trusted proxy list. "
+                    "The automatic Moonraker entry isn't enough.");
+      return;
+    case policy::ProxyOnlySave::NeedHttps:
+      sendAuthError(400, "Turn on proxy-only mode from the HTTPS address, so you know it works.");
+      return;
+  }
+
+  // Nothing is committed to s_auth until the save succeeds.
+  AuthSettings next = s_auth;
+  memcpy(next.proxies, proxies, sizeof(proxies));
+  next.proxyCount = proxyCount;
+  next.autoProxy = autoProxy;
+  next.headerLogin = s_server.arg("headerLogin") == "1";
+  next.proxyOnly = proxyOnly;
+  next.userHeader = userHeader;
+  next.allowedUsers = allowedUsers;
+  next.groupsHeader = groupsHeader;
+  next.allowedGroups = allowedGroups;
+  if (!saveAuthOptions(next)) {
+    saveAuthOptions(s_auth);  // put back anything a partial write changed
+    sendAuthError(500, "Could not save the security settings.");
+    return;
+  }
+  const bool namesChanged =
+      s_auth.userHeader != next.userHeader || s_auth.groupsHeader != next.groupsHeader;
+  s_auth = next;
+  if (namesChanged)
+    s_headersDirty = true;
+  Serial.println("[AUTH] security settings saved");
+  sendAuthJson(200, "{\"ok\":true}");
+}
+
+// Registers the request headers the login gate reads, and no others: the
+// framework heap-allocates every header it collects, so collecting them all
+// would let any client exhaust the heap. Host is read by the framework itself.
+// Call it before s_server.begin(), and again when Setup changes the user or
+// groups header names. It clears the current request's headers, so it must
+// not run inside a request handler.
+void registerAuthHeaders() {
+  const String userHeader = s_auth.userHeader;
+  const String groupsHeader = s_auth.groupsHeader;
+  const char *keys[8];
+  size_t count = 0;
+  const auto add = [&](const char *name) {
+    if (!name || !*name)
+      return;
+    for (size_t i = 0; i < count; ++i) {
+      if (strcasecmp(keys[i], name) == 0)
+        return;
+    }
+    keys[count++] = name;
+  };
+  add("Origin");
+  add("Referer");
+  add("Cookie");
+  add("X-Forwarded-Proto");
+  add("X-Forwarded-Host");
+  add("X-Forwarded-For");
+  add(userHeader.c_str());
+  add(groupsHeader.c_str());
+  s_server.collectHeaders(keys, count);
+}
+
 void handleRoot() {
   if (captiveRedirectIfNeeded())
     return;
@@ -1555,32 +2127,44 @@ void handleRoot() {
 
 void configureRoutes() {
   s_server.serveStatic("/logo.png", LittleFS, "/logo.png");
-  s_server.on("/", HTTP_GET, handleRoot);
-  s_server.on("/setup", HTTP_GET, handleSetupPage);
-  s_server.on("/fw", HTTP_GET, handleFirmwarePage);
-  s_server.on("/api/mode", HTTP_POST, handleModePost);
-  s_server.on("/api/timer", HTTP_POST, handleTimerPost);
-  s_server.on("/api/integration", HTTP_POST, handleIntegrationPost);
-  s_server.on("/api/setup", HTTP_POST, handleSetupPost);
-  s_server.on("/api/wifi", HTTP_POST, handleWifiPost);
-  s_server.on("/api/wifi/clear", HTTP_POST, handleWifiClearPost);
-  s_server.on("/api/ota", HTTP_POST, handleOtaPost, handleOtaUpload);
-  s_server.on("/api/iheater/image", HTTP_POST, handleIheaterImagePost, handleIheaterImageUpload);
-  s_server.on("/api/iheater/update", HTTP_POST, []() { handleIheaterStart(false); });
-  s_server.on("/api/iheater/retry", HTTP_POST, []() { handleIheaterStart(true); });
-  s_server.on("/api/iheater/cancel", HTTP_POST, handleIheaterCancel);
-  s_server.on("/api/iheater/image/discard", HTTP_POST, handleIheaterDiscard);
-  s_server.on("/api/off", HTTP_POST, []() {
+  s_server.on("/", HTTP_GET, guarded(handleRoot));
+  s_server.on("/login", HTTP_GET, guarded(handleLoginPage));
+  s_server.on("/auth.js", HTTP_GET, guarded(handleAuthScript));
+  s_server.on("/api/auth/challenge", HTTP_GET, guarded(handleAuthChallenge));
+  s_server.on("/api/auth/me", HTTP_GET, guarded(handleAuthMe));
+  s_server.on("/api/auth/login", HTTP_POST, guarded(handleAuthLogin));
+  s_server.on("/api/auth/password", HTTP_POST, guarded(handleAuthPassword));
+  s_server.on("/api/auth/logout", HTTP_POST, guarded(handleAuthLogout));
+  s_server.on("/api/auth/settings", HTTP_POST, guarded(handleAuthSettingsPost));
+  s_server.on("/setup", HTTP_GET, guarded(handleSetupPage));
+  s_server.on("/fw", HTTP_GET, guarded(handleFirmwarePage));
+  s_server.on("/api/mode", HTTP_POST, guarded(handleModePost));
+  s_server.on("/api/override/end", HTTP_POST, guarded(handleOverrideEnd));
+  s_server.on("/api/timer", HTTP_POST, guarded(handleTimerPost));
+  s_server.on("/api/integration", HTTP_POST, guarded(handleIntegrationPost));
+  s_server.on("/api/setup", HTTP_POST, guarded(handleSetupPost));
+  s_server.on("/api/wifi", HTTP_POST, guarded(handleWifiPost));
+  s_server.on("/api/wifi/clear", HTTP_POST, guarded(handleWifiClearPost));
+  s_server.on("/api/ota", HTTP_POST, guardedAfterUpload("ota", handleOtaPost),
+              guardedUpload("ota", handleOtaUpload));
+  s_server.on("/api/iheater/image", HTTP_POST,
+              guardedAfterUpload("iheater-image", handleIheaterImagePost),
+              guardedUpload("iheater-image", handleIheaterImageUpload));
+  s_server.on("/api/iheater/update", HTTP_POST, guarded([]() { handleIheaterStart(false); }));
+  s_server.on("/api/iheater/retry", HTTP_POST, guarded([]() { handleIheaterStart(true); }));
+  s_server.on("/api/iheater/cancel", HTTP_POST, guarded(handleIheaterCancel));
+  s_server.on("/api/iheater/image/discard", HTTP_POST, guarded(handleIheaterDiscard));
+  s_server.on("/api/off", HTTP_POST, guarded([]() {
     applyMode(0, "web");
     sendActionStatus();
-  });
-  s_server.on("/generate_204", HTTP_GET, handleRoot);
-  s_server.on("/gen_204", HTTP_GET, handleRoot);
-  s_server.on("/hotspot-detect.html", HTTP_GET, handleRoot);
-  s_server.on("/library/test/success.html", HTTP_GET, handleRoot);
-  s_server.on("/ncsi.txt", HTTP_GET, handleRoot);
-  s_server.on("/connecttest.txt", HTTP_GET, handleRoot);
-  s_server.on("/redirect", HTTP_GET, handleRoot);
+  }));
+  s_server.on("/generate_204", HTTP_GET, guarded(handleRoot));
+  s_server.on("/gen_204", HTTP_GET, guarded(handleRoot));
+  s_server.on("/hotspot-detect.html", HTTP_GET, guarded(handleRoot));
+  s_server.on("/library/test/success.html", HTTP_GET, guarded(handleRoot));
+  s_server.on("/ncsi.txt", HTTP_GET, guarded(handleRoot));
+  s_server.on("/connecttest.txt", HTTP_GET, guarded(handleRoot));
+  s_server.on("/redirect", HTTP_GET, guarded(handleRoot));
   s_server.onNotFound([]() {
     if (s_apMode) {
       handleRoot();
@@ -1669,6 +2253,7 @@ void updateButton() {
     if (s_buttonStableDown) {
       s_buttonDownAtMs = now;
       s_longPressHandled = false;
+      s_authResetDone = false;
     } else if (!s_longPressHandled) {
       if (s_pendingClicks < 255)
         ++s_pendingClicks;
@@ -1676,11 +2261,23 @@ void updateButton() {
     }
   }
 
-  if (s_buttonStableDown && !s_longPressHandled &&
-      (uint32_t)(now - s_buttonDownAtMs) >= kLongPressMs) {
-    s_pendingClicks = 0;
-    s_longPressHandled = true;
-    applyMode(0, "button:long");
+  if (s_buttonStableDown) {
+    const policy::HoldStep step = policy::holdStep(
+        (uint32_t)(now - s_buttonDownAtMs), s_longPressHandled, s_authResetDone);
+    if (step == policy::HoldStep::HeatOff) {
+      s_pendingClicks = 0;
+      s_longPressHandled = true;
+      applyMode(0, "button:long");
+    } else if (step == policy::HoldStep::AuthReset) {
+      s_authResetDone = true;
+      if (!resetAuth(s_auth, s_sessions))
+        Serial.println("[AUTH] BOOT reset: could not clear the saved login; it will return at a restart");
+      s_nonces.clear();
+      s_lockout.clear();
+      Serial.println("[AUTH] BOOT reset: password, sessions, header login and proxy-only cleared");
+      s_ledSolid = true;
+      s_ledSolidUntilMs = now + 3000;
+    }
   }
 
   if (s_pendingClicks && !s_buttonStableDown &&
@@ -1696,6 +2293,15 @@ void updateLed() {
     return;
 
   const uint32_t now = millis();
+  if (s_ledSolid) {
+    if ((int32_t)(s_ledSolidUntilMs - now) > 0) {
+      if (!s_ledOn)
+        writeLed(true);
+      return;
+    }
+    s_ledSolid = false;
+    resetLedPattern();
+  }
   if (s_mode == 0) {
     if (s_ledOn)
       writeLed(false);
@@ -1853,10 +2459,17 @@ void setup() {
   // After Wi-Fi: a first-boot pairing token needs esp_random() with RF entropy.
   loadRemoteSettings(s_settings);
   bootDecision();
+  {
+    uint32_t storedHours = 0;
+    loadAuth(s_auth, s_sessions, storedHours);
+    s_hours.begin(storedHours, millis());
+  }
   s_moonraker.onTarget(onKlipperTarget);
+  s_moonraker.onUnpaired([]() { s_override.reset(); });
   if (klipperSource())
     s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
   configureRoutes();
+  registerAuthHeaders();
   s_server.begin();
   s_statusSocket.begin();
   s_statusSocket.onEvent(onStatusSocketEvent);
@@ -1868,6 +2481,12 @@ void loop() {
   if (s_apMode)
     s_dnsServer.processNextRequest();
   s_server.handleClient();
+  if (s_headersDirty) {
+    s_headersDirty = false;
+    registerAuthHeaders();
+  }
+  if (s_hours.tick(millis()))
+    saveRunningHours(s_hours.hours());
   s_statusSocket.loop();
   updateButton();
   updateHeatTimer();

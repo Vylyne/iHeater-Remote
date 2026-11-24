@@ -37,7 +37,18 @@ STUBS = {
         "  restart)\n"
         '    echo "restart $2" >> "$STUB_LOG"\n'
         "    ;;\n"
+        "  reload)\n"
+        '    echo "reload $2" >> "$STUB_LOG"\n'
+        "    ;;\n"
         "esac\n"
+    ),
+    # Not installed by default: tests that want nginx present add it.
+    "nginx": (
+        "#!/bin/sh\n"
+        'echo "nginx $*" >> "$STUB_LOG"\n'
+        'if [ "$1" = "-t" ] && [ -n "${STUB_NGINX_FAIL:-}" ]; then\n'
+        "  exit 1\n"
+        "fi\n"
     ),
     "sudo": '#!/bin/sh\nexec "$@"\n',
     "curl": (
@@ -106,6 +117,10 @@ class Fixture:
         self.addon_cfg = self.config_dir / "addons" / "iheater_remote.cfg"
         self.printer_cfg = self.config_dir / "printer.cfg"
         self.moonraker_conf = self.config_dir / "moonraker.conf"
+        self.nginx = self.root / "nginx"
+        self.sbin = self.root / "sbin"  # empty, so no real /usr/sbin/nginx
+        self.sbin.mkdir()
+        self.extra_env = {}
 
         self.extras.mkdir(parents=True)
         self.components.mkdir(parents=True)
@@ -115,7 +130,8 @@ class Fixture:
         write_lf(self.moonraker_conf, "[server]\nhost: 0.0.0.0\n")
         write_lf(self.log, "")
         for name, body in STUBS.items():
-            self.add_stub(name, body)
+            if name != "nginx":
+                self.add_stub(name, body)
 
     def add_stub(self, name, body):
         path = self.bin / name
@@ -125,6 +141,7 @@ class Fixture:
     def env(self, state):
         env = dict(os.environ)
         env.pop("STUB_PRINT_JSON", None)
+        env.pop("STUB_NGINX_FAIL", None)
         env.update({
             "KLIPPER_PATH": self.klipper.as_posix(),
             "MOONRAKER_PATH": self.moonraker.as_posix(),
@@ -135,7 +152,10 @@ class Fixture:
             "MSYS": "winsymlinks:nativestrict",
             "NO_COLOR": "1",
             "STUB_LOG": self.log.as_posix(),
+            "NGINX_DIR": self.nginx.as_posix(),
+            "NGINX_SBIN": self.sbin.as_posix(),
         })
+        env.update(self.extra_env)
         if state is not None:
             env["STUB_PRINT_JSON"] = state
         return env
@@ -387,6 +407,239 @@ class InstallSmokeTests(ScriptTestBase):
         self.assertEqual(read_text(backups[0]), "# somebody's copy\n")
 
 
+class NginxStepTests(ScriptTestBase):
+    ANSWERS = ("y\nheater.example.com\n/etc/ssl/h.pem\n/etc/ssl/h.key\n"
+               "192.168.1.5\n")
+
+    def setUp(self):
+        super().setUp()
+        fx = self.fx
+        # A first run does the Klipper work (nginx is not on PATH yet), so the
+        # runs under test ask only the nginx questions.
+        self.run_ok("install.sh")
+        fx.add_stub("nginx", STUBS["nginx"])
+        (fx.nginx / "sites-available").mkdir(parents=True)
+        (fx.nginx / "sites-enabled").mkdir()
+        self.site = fx.nginx / "sites-available" / "iheater-remote"
+        self.link = fx.nginx / "sites-enabled" / "iheater-remote"
+        self.other = fx.nginx / "sites-available" / "mainsail"
+        write_lf(self.other, "server { listen 80; }\n")
+        write_lf(fx.log, "")
+
+    def nginx_files(self):
+        return sorted(p.relative_to(self.fx.nginx).as_posix()
+                      for p in self.fx.nginx.rglob("*"))
+
+    def test_nginx_absent_skips_quietly(self):
+        (self.fx.bin / "nginx").unlink()
+        result = self.run_ok("install.sh", self.ANSWERS)
+        self.assertNotIn("nginx", result.stdout + result.stderr)
+        self.assertFalse(self.site.exists())
+        self.assertFalse(os.path.lexists(str(self.link)))
+
+    def test_nginx_found_in_sbin_off_path(self):
+        (self.fx.bin / "nginx").unlink()
+        stub = self.fx.sbin / "nginx"
+        write_lf(stub, STUBS["nginx"])
+        stub.chmod(0o755)
+        result = self.run_ok("install.sh", self.ANSWERS)
+        self.assertIn("HTTPS nginx site", result.stderr)
+        self.assertIn("heater.example.com", read_text(self.site))
+        self.assertTrue(os.path.lexists(str(self.link)))
+        self.assertEqual(self.fx.log_text(), "nginx -t\nreload nginx\n")
+
+    def test_nginx_declined(self):
+        self.run_ok("install.sh", "n\n")
+        self.assertFalse(self.site.exists())
+        self.assertFalse(os.path.lexists(str(self.link)))
+        self.assertEqual(self.fx.log_text(), "")
+
+    def test_nginx_blank_answer_skips(self):
+        self.run_ok("install.sh", "")
+        self.assertFalse(self.site.exists())
+
+    def test_nginx_blank_value_skips(self):
+        result = self.run_ok("install.sh", "y\nheater\n\n")
+        self.assertFalse(self.site.exists())
+        self.assertIn("left blank", result.stdout)
+
+    def test_nginx_site_written_and_reloaded(self):
+        self.run_ok("install.sh", self.ANSWERS)
+        text = read_text(self.site)
+        for value in ("server_name heater.example.com;",
+                      "ssl_certificate /etc/ssl/h.pem;",
+                      "ssl_certificate_key /etc/ssl/h.key;",
+                      "proxy_pass http://192.168.1.5;",
+                      "proxy_pass http://192.168.1.5:81/;"):
+            self.assertIn(value, text)
+        for placeholder in ("@SERVER_NAME@", "@CERT@", "@KEY@", "@REMOTE@"):
+            self.assertNotIn(placeholder, text)
+        self.assertIn("client_max_body_size 4m;", text)
+        self.assertTrue(os.path.lexists(str(self.link)))
+        self.assertEqual(self.fx.log_text(), "nginx -t\nreload nginx\n")
+
+    def test_nginx_values_are_substituted_literally(self):
+        self.run_ok("install.sh",
+                    "y\nh.example\n/a&b/c|d.pem\n/k/REMOTE.key\nrem\n")
+        text = read_text(self.site)
+        self.assertIn("ssl_certificate /a&b/c|d.pem;", text)
+        self.assertIn("ssl_certificate_key /k/REMOTE.key;", text)
+        self.assertIn("proxy_pass http://rem;", text)
+
+    def test_nginx_unsafe_value_is_asked_again(self):
+        result = self.run_ok(
+            "install.sh", "y\nbad name\nx;y\nheater\n/c.pem\n/k.key\nrem\n")
+        text = read_text(self.site)
+        self.assertIn("server_name heater;", text)
+        self.assertNotIn("bad name", text)
+        self.assertNotIn("x;y", text)
+        self.assertIn("try again", result.stdout)
+
+    def test_nginx_every_unsafe_character_is_refused(self):
+        for value in ("a b", "a;b", "a{b", "a}b", 'a"b', "a'b", "a$b", "a#b",
+                      "a\\b", "a\tb"):
+            with self.subTest(value=value):
+                # The unsafe value, then a blank answer to give up.
+                self.run_ok("install.sh", "y\n%s\n\n" % value)
+                self.assertFalse(self.site.exists())
+
+    def test_nginx_existing_site_backed_up(self):
+        write_lf(self.site, "old\n")
+        self.run_ok("install.sh", self.ANSWERS)
+        backups = glob.glob(str(self.site) + ".bak-*")
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(read_text(backups[0]), "old\n")
+        self.assertIn("heater.example.com", read_text(self.site))
+
+    def test_nginx_test_failure_rolls_back(self):
+        self.fx.extra_env["STUB_NGINX_FAIL"] = "1"
+        result = self.run_ok("install.sh", self.ANSWERS)
+        self.assertEqual(self.fx.log_text(), "nginx -t\n")
+        self.assertIn("rolled back", result.stdout)
+        self.assertEqual(self.nginx_files(),
+                         ["sites-available", "sites-available/mainsail",
+                          "sites-enabled"])
+
+    def test_nginx_test_failure_restores_old_site(self):
+        write_lf(self.site, "old\n")
+        self.fx.extra_env["STUB_NGINX_FAIL"] = "1"
+        self.run_ok("install.sh", self.ANSWERS)
+        self.assertEqual(read_text(self.site), "old\n")
+        self.assertFalse(os.path.lexists(str(self.link)))
+        self.assertNotIn("reload", self.fx.log_text())
+
+    def test_nginx_test_failure_keeps_existing_link(self):
+        write_lf(self.site, "old\n")
+        os.symlink(str(self.site), str(self.link))
+        self.fx.extra_env["STUB_NGINX_FAIL"] = "1"
+        self.run_ok("install.sh", self.ANSWERS)
+        self.assertTrue(os.path.islink(str(self.link)))
+        self.assertEqual(read_text(self.site), "old\n")
+
+    def test_nginx_never_touches_other_sites(self):
+        before = self.other.read_bytes()
+        self.run_ok("install.sh", self.ANSWERS)
+        self.assertEqual(self.other.read_bytes(), before)
+        self.assertEqual(self.nginx_files(),
+                         ["sites-available", "sites-available/iheater-remote",
+                          "sites-available/mainsail", "sites-enabled",
+                          "sites-enabled/iheater-remote"])
+
+
+class UninstallNginxTests(ScriptTestBase):
+    """uninstall.sh removes the site install.sh wrote, and nothing else."""
+
+    # Uninstall asks: remove the include (y), delete the config (n), then the
+    # nginx site. Two empty lines take the first two defaults.
+    KEEP_DEFAULTS = "\n\n"
+
+    def setUp(self):
+        super().setUp()
+        fx = self.fx
+        self.run_ok("install.sh")
+        fx.add_stub("nginx", STUBS["nginx"])
+        (fx.nginx / "sites-available").mkdir(parents=True)
+        (fx.nginx / "sites-enabled").mkdir()
+        self.site = fx.nginx / "sites-available" / "iheater-remote"
+        self.link = fx.nginx / "sites-enabled" / "iheater-remote"
+        self.other = fx.nginx / "sites-available" / "mainsail"
+        write_lf(self.other, "server { listen 80; }\n")
+        self.run_ok("install.sh", NginxStepTests.ANSWERS)
+        self.assertTrue(os.path.lexists(str(self.link)))
+        write_lf(fx.log, "")
+
+    def nginx_files(self):
+        return sorted(p.relative_to(self.fx.nginx).as_posix()
+                      for p in self.fx.nginx.rglob("*")
+                      if ".bak-" not in p.name)
+
+    def test_site_and_link_removed_and_nginx_reloaded(self):
+        site_text = read_text(self.site)
+        result = self.run_ok("uninstall.sh", self.KEEP_DEFAULTS + "\n")
+        self.assertFalse(self.site.exists())
+        self.assertFalse(os.path.lexists(str(self.link)))
+        self.assertEqual(self.nginx_files(),
+                         ["sites-available", "sites-available/mainsail",
+                          "sites-enabled"])
+        backups = glob.glob(str(self.site) + ".bak-*")
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(read_text(backups[0]), site_text)
+        self.assertTrue(self.fx.log_text().startswith(
+            "nginx -t\nreload nginx\n"))
+        self.assertIn("removed the iheater-remote nginx site", result.stdout)
+
+    def test_declined_keeps_site(self):
+        self.run_ok("uninstall.sh", self.KEEP_DEFAULTS + "n\n")
+        self.assertTrue(self.site.exists())
+        self.assertTrue(os.path.islink(str(self.link)))
+        self.assertNotIn("nginx", self.fx.log_text())
+
+    def test_site_not_written_by_install_is_left(self):
+        write_lf(self.site, "server { listen 443; }\n")
+        result = self.run_ok("uninstall.sh", self.KEEP_DEFAULTS + "\n")
+        self.assertEqual(read_text(self.site), "server { listen 443; }\n")
+        self.assertTrue(os.path.islink(str(self.link)))
+        self.assertIn("left it", result.stdout)
+        self.assertNotIn("nginx", self.fx.log_text())
+
+    def test_regular_file_in_sites_enabled_is_left(self):
+        self.link.unlink()
+        write_lf(self.link, "server { listen 443; }\n")
+        result = self.run_ok("uninstall.sh", self.KEEP_DEFAULTS + "\n")
+        self.assertTrue(self.site.exists())
+        self.assertTrue(self.link.is_file())
+        self.assertIn("left", result.stdout)
+
+    def test_nginx_test_failure_puts_site_back(self):
+        site_text = read_text(self.site)
+        self.fx.extra_env["STUB_NGINX_FAIL"] = "1"
+        result = self.run_ok("uninstall.sh", self.KEEP_DEFAULTS + "\n")
+        self.assertEqual(read_text(self.site), site_text)
+        self.assertTrue(os.path.islink(str(self.link)))
+        self.assertNotIn("reload nginx", self.fx.log_text())
+        self.assertIn("put back", result.stdout)
+
+    def test_dangling_link_alone_is_removed(self):
+        self.site.unlink()
+        self.run_ok("uninstall.sh", self.KEEP_DEFAULTS + "\n")
+        self.assertFalse(os.path.lexists(str(self.link)))
+        self.assertTrue(self.fx.log_text().startswith(
+            "nginx -t\nreload nginx\n"))
+
+    def test_nginx_not_installed_still_removes_site(self):
+        (self.fx.bin / "nginx").unlink()
+        result = self.run_ok("uninstall.sh", self.KEEP_DEFAULTS + "\n")
+        self.assertFalse(self.site.exists())
+        self.assertFalse(os.path.lexists(str(self.link)))
+        self.assertNotIn("nginx", self.fx.log_text())
+        self.assertIn("reload nginx", result.stdout)
+
+    def test_other_sites_untouched(self):
+        before = self.other.read_bytes()
+        self.run_ok("uninstall.sh", self.KEEP_DEFAULTS + "\n")
+        self.assertEqual(self.other.read_bytes(), before)
+
+
 class UninstallSmokeTests(ScriptTestBase):
     def install(self, answers="", state=STATE_STANDBY):
         return self.run_ok("install.sh", answers, state)
@@ -498,6 +751,15 @@ class UninstallSmokeTests(ScriptTestBase):
         self.assertIn("left it", result.stdout)
         self.assertTrue(self.fx.log_text().endswith(
             "restart moonraker\nrestart klipper\n"))
+
+    def test_uninstall_without_nginx_site_is_quiet(self):
+        (self.fx.nginx / "sites-available").mkdir(parents=True)
+        (self.fx.nginx / "sites-enabled").mkdir()
+        self.fx.add_stub("nginx", STUBS["nginx"])
+        self.install()
+        result = self.uninstall()
+        self.assertNotIn("nginx", result.stdout + result.stderr)
+        self.assertNotIn("nginx", self.fx.log_text())
 
     def test_uninstall_twice(self):
         self.install()
