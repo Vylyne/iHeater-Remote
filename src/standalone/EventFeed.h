@@ -29,7 +29,7 @@ void feedBeginConsole(UartLink *uart);
 // logged-in request that asked for it; never log it.
 void feedIssueTicket(char hexOut[2 * policy::kTicketLen + 1]);
 
-// Formats (vsnprintf into kEventTextMax + 1 bytes), adds to the ring and
+// Formats (vsnprintf into 160 bytes; the ring cuts to kEventTextMax on a UTF-8 boundary), adds to the ring and
 // broadcasts the stored entry as a one-event "ev" message. Never pass a
 // secret: the text goes to every connected page.
 void feedRecord(policy::EventKind kind, const char *fmt, ...)

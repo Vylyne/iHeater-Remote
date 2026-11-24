@@ -351,7 +351,9 @@ void feedIssueTicket(char hexOut[2 * policy::kTicketLen + 1]) {
 }
 
 void feedRecord(policy::EventKind kind, const char *fmt, ...) {
-  char text[policy::kEventTextMax + 1];
+  // Wider than the event text: EventLog::add cuts to kEventTextMax on a
+  // UTF-8 boundary, which a vsnprintf cut at 64 bytes could split.
+  char text[160];
   va_list args;
   va_start(args, fmt);
   vsnprintf(text, sizeof text, fmt, args);

@@ -286,8 +286,23 @@ void applyIntegrationTarget(float targetTempC, const char *source,
 // link holds the last target through outages; updateLinkSafety() cuts heat
 // if the link stays down.
 void onKlipperTarget(float targetC) {
-  if (klipperSource() && s_override.target(targetC))
+  if (!klipperSource())
+    return;
+  const bool wasActive = s_override.active();
+  if (s_override.target(targetC)) {
+    if (wasActive && !s_override.active())
+      feedRecord(policy::EventKind::Action,
+                 "Manual override ended (Klipper changed its target)");
     applyIntegrationTarget(targetC, "klipper", "klipper");
+  }
+}
+
+// Clears the override, logging its end when one was active.
+void resetOverride(const char *reason) {
+  const bool wasActive = s_override.active();
+  s_override.reset();
+  if (wasActive)
+    feedRecord(policy::EventKind::Action, "Manual override ended (%s)", reason);
 }
 
 void writeLed(bool on) {
@@ -317,8 +332,11 @@ void applyMode(uint8_t mode, const char *source, bool userPress = true) {
   if (mode != 0 && refuseHeatForOutputSwitch())
     mode = 0;
 
-  if (userPress && s_override.press(klipperSource()))
-    feedRecord(policy::EventKind::Action, "Manual override of Klipper started");
+  if (userPress) {
+    const bool wasActive = s_override.active();
+    if (s_override.press(klipperSource()) && !wasActive)
+      feedRecord(policy::EventKind::Action, "Manual override of Klipper started");
+  }
   s_mode = mode;
   if (mode == 0) {
     s_timerOffAtMs = 0;
@@ -1324,7 +1342,7 @@ bool applySetupForm(String &error) {
   // An override survives a save that changes neither the source nor the
   // binding; otherwise Klipper's target must not be held against the new one.
   if (stopHeat || bindingChanged || wasKlipper != klipperSource())
-    s_override.reset();
+    resetOverride("setup changed");
   if (klipperSource()) {
     // Heat from before the change (manual, or another printer or pairing)
     // must not be held: Klipper's own target replaces it once subscribed.
@@ -2711,7 +2729,7 @@ void setup() {
   }
   s_moonraker.onTarget(onKlipperTarget);
   s_moonraker.onUnpaired([]() {
-    s_override.reset();
+    resetOverride("unpaired");
     // A fixed text: lastError() can carry the pairing token.
     feedRecord(policy::EventKind::Warn, "%s",
                policy::unpairReasonText(s_moonraker.lastError().c_str()));
