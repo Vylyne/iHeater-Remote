@@ -7,6 +7,7 @@
 
 #include <FlashJob.h>
 #include <RemotePolicy.h>
+#include <UartFrames.h>
 #include <UartPollPolicy.h>
 #include <UartRegisters.h>
 
@@ -39,8 +40,10 @@ struct UartLinkView {
   // The running flash job's status, or the last job's once it has finished.
   policy::FlashStatus flash;
   bool flashRunning = false;
-  // The last ROM probe got an answer and no Modbus reply has come since.
-  bool romDetected = false;
+  // The last Ok input read came from the iHeater's link bootloader (input
+  // 0x00 = 0x8001), and what it said about itself.
+  bool inBootloader = false;
+  policy::BootloaderInfo boot{};
 };
 
 // The Remote as Modbus RTU master to the iHeater on UART1. A FreeRTOS task
@@ -66,21 +69,16 @@ class UartLink : public OutputPort {
   // Main loop -> task. False when a job is already queued or running, or the
   // link is disabled. The caller keeps `image` alive and unchanged until
   // flashBusy() turns false.
-  bool startFlash(const uint8_t *image, size_t len, policy::FlashStart start);
-  void cancelFlash();      // only takes effect while cooling
+  bool startFlash(const uint8_t *image, size_t len);
+  void cancelFlash();      // only takes effect until the job sends the erase
   bool flashBusy() const;  // queued or running
 
  private:
-  // policy::FlashLink on UART1, for the flash job and the ROM probe. Used only
-  // from the task.
+  // policy::FlashLink on UART1, for the flash job. Used only from the task.
   class FlashPort final : public policy::FlashLink {
    public:
     explicit FlashPort(UartLink &link) : link_(link) {}
-    void setParity(policy::LinkParity parity) override;
-    void send(const uint8_t *data, size_t len) override;
-    size_t receive(uint8_t *buf, size_t len, uint32_t timeoutMs) override;
-    void flushInput() override;
-    bool modbus(const policy::PollRequest &req, policy::Reply &reply) override;
+    bool exchange(const uint8_t *frame, size_t len, policy::Reply &reply, uint32_t timeoutMs) override;
     void sleepMs(uint32_t ms) override;
     uint32_t nowMs() override;
     bool heatWanted() override;
@@ -95,9 +93,10 @@ class UartLink : public OutputPort {
   void taskLoop();
   void registerWatchdog();
   void feedWatchdog();
-  // One request/reply exchange. True when a complete reply arrived (Ok,
-  // Exception or Invalid); false when nothing usable arrived in time.
-  bool exchange(const policy::PollRequest &req, policy::Reply &reply);
+  // Sends one whole frame and judges the reply with parseReply(frame, ...).
+  // True when a complete reply arrived (Ok, Exception or Invalid); false when
+  // nothing usable arrived within timeoutMs. Feeds the watchdog while it waits.
+  bool exchangeFrame(const uint8_t *frame, size_t len, policy::Reply &reply, uint32_t timeoutMs);
   void runRequest(const policy::PollRequest &req, bool &gotOk);
   // Runs a queued flash job, if there is one, to its end.
   void runQueuedFlash(FlashPort &port);
@@ -113,9 +112,6 @@ class UartLink : public OutputPort {
   policy::UartPollPolicy policy_;
   bool watchdogOn_ = false;
   uint32_t firstOkMs_ = 0, timeouts_ = 0, badReplies_ = 0;
-  // millis() at the last Ok reply and the last ROM probe (0 = none yet).
-  uint32_t lastOkMs_ = 0, lastProbeMs_ = 0;
-  bool romDetected_ = false;
 
   mutable portMUX_TYPE mux_ = portMUX_INITIALIZER_UNLOCKED;
   // Everything below is guarded by mux_.
@@ -125,12 +121,11 @@ class UartLink : public OutputPort {
   float pendingTargetC_ = 0.0f;
   policy::TargetRange pendingRange_{policy::kDefaultMinC, policy::kDefaultMaxC};
   UartLinkView view_{};
-  // The flash job hand-off. image/len/start are set with flashQueued_ and
-  // read by the task when it takes the job.
+  // The flash job hand-off. image/len are set with flashQueued_ and read by
+  // the task when it takes the job.
   bool flashQueued_ = false, flashRunning_ = false, flashCancel_ = false;
   const uint8_t *flashImage_ = nullptr;
   size_t flashLen_ = 0;
-  policy::FlashStart flashStart_ = policy::FlashStart::Normal;
   policy::FlashStatus flashStatus_{};  // the running job's, or the last one's
 };
 
