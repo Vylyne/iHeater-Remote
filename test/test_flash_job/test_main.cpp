@@ -183,7 +183,7 @@ void test_entry_refused_on_first_try() {
   assertEnded(f, st, FlashOutcome::EntryRefused, FlashPhase::Entering);
   TEST_ASSERT_EQUAL(1, f.count(Frame::Entry));
   TEST_ASSERT_EQUAL(0, f.count(Frame::Erase));
-  TEST_ASSERT_EQUAL_STRING("0xB007 refused: exception 0x04", st.detail);
+  TEST_ASSERT_EQUAL_STRING("0xB007 refused: exception 0x02", st.detail);
   TEST_ASSERT_TRUE(applicationIntact(st));
   TEST_ASSERT_TRUE(f.state == State::App);
 }
@@ -263,6 +263,7 @@ void test_cancel_while_polling_for_bootloader() {
   TEST_ASSERT_TRUE(applicationIntact(st));
 }
 
+// Started in a bootloader with no valid app (why 2): the cancel leaves it there.
 void test_cancel_in_bootloader_before_erase() {
   FakeIheater f;
   f.state = State::Bootloader;
@@ -270,6 +271,95 @@ void test_cancel_in_bootloader_before_erase() {
   const FlashStatus st = run(f, testImage());
   assertEnded(f, st, FlashOutcome::Cancelled, FlashPhase::Idle);
   TEST_ASSERT_EQUAL(0, f.count(Frame::Erase));
+  TEST_ASSERT_TRUE(st.startedInBootloader);
+  TEST_ASSERT_EQUAL(2, st.startWhy);
+  TEST_ASSERT_EQUAL(0, st.startTimeoutS);
+  TEST_ASSERT_FALSE(applicationIntact(st));
+  TEST_ASSERT_EQUAL_STRING(
+      "Stopped: cancelled. The iHeater stays in its bootloader with no valid firmware, waiting for an update.",
+      flashStatusMessage(st));
+}
+
+// A bootloader whose timer has stopped (why 1, timeout 0, after an erase) has
+// no valid app either.
+void test_cancel_in_erased_bootloader() {
+  FakeIheater f;
+  f.state = State::Bootloader;
+  f.why = 1;
+  f.timeoutS = 0;
+  f.blState = 3;
+  f.cancel = true;
+  const FlashStatus st = run(f, testImage());
+  assertEnded(f, st, FlashOutcome::Cancelled, FlashPhase::Idle);
+  TEST_ASSERT_EQUAL(1, st.startWhy);
+  TEST_ASSERT_EQUAL(0, st.startTimeoutS);
+  TEST_ASSERT_FALSE(applicationIntact(st));
+  TEST_ASSERT_TRUE(strstr(flashStatusMessage(st), "no valid firmware") != nullptr);
+}
+
+// A bootloader still counting down (why 1, timeout above 0) returns to the
+// app, which is untouched.
+void test_cancel_in_bootloader_that_returns_to_app() {
+  FakeIheater f;
+  f.state = State::Bootloader;
+  f.why = 1;
+  f.timeoutS = 24;
+  f.blState = 1;
+  f.cancel = true;
+  const FlashStatus st = run(f, testImage());
+  assertEnded(f, st, FlashOutcome::Cancelled, FlashPhase::Idle);
+  TEST_ASSERT_TRUE(st.startedInBootloader);
+  TEST_ASSERT_EQUAL(24, st.startTimeoutS);
+  TEST_ASSERT_TRUE(applicationIntact(st));
+  TEST_ASSERT_EQUAL_STRING("Stopped: cancelled before the erase. The iHeater keeps its firmware.",
+                           flashStatusMessage(st));
+}
+
+void test_bootloader_inputs_no_reply() {
+  FakeIheater f;
+  f.state = State::Bootloader;
+  f.inject(Frame::ReadOther, Fault::DropRequest, 1, 0);
+  const FlashStatus st = run(f, testImage());
+  assertEnded(f, st, FlashOutcome::NoReply, FlashPhase::Idle);
+  TEST_ASSERT_EQUAL(0, f.count(Frame::Erase));
+  TEST_ASSERT_EQUAL(kFlashTries, f.count(Frame::ReadOther));
+  TEST_ASSERT_EQUAL_STRING("bootloader inputs 0x03-0x06: no reply", st.detail);
+  TEST_ASSERT_TRUE(st.startedInBootloader);
+  TEST_ASSERT_FALSE(applicationIntact(st));  // unknown, so not claimed
+  TEST_ASSERT_TRUE(retryAllowed(st.outcome));
+}
+
+// A job that fails after its erase leaves the bootloader at why 1 with its
+// timer stopped. After a Remote restart (no last outcome, so no Retry) the
+// page must still offer Update, and that job needs no 0xB007.
+void test_failed_job_leaves_a_bootloader_that_takes_update() {
+  FakeIheater f;
+  f.chunkExceptionAt = 3;
+  f.chunkExceptionCode = 2;
+  const FlashStatus first = run(f, testImage());
+  assertEnded(f, first, FlashOutcome::WriteRefused, FlashPhase::Writing);
+  TEST_ASSERT_FALSE(applicationIntact(first));
+  TEST_ASSERT_TRUE(f.state == State::Bootloader);
+  TEST_ASSERT_EQUAL(1, f.why);
+  TEST_ASSERT_EQUAL(0, f.timeoutS);
+
+  FlashStartInputs in;
+  in.uartOutput = true;
+  in.imageOk = true;
+  in.link = LinkStatus::Updating;
+  in.inBootloader = true;
+  in.bootloaderWhy = f.why;
+  in.bootloaderTimeoutS = f.timeoutS;
+  TEST_ASSERT_TRUE(decideFlashStart(in, false) == FlashRefusal::None);
+
+  f.chunkExceptionAt = -1;
+  f.published.clear();
+  const FlashStatus st = updated(f, testImage());
+  TEST_ASSERT_EQUAL(1, f.count(Frame::Entry));  // only the first job's
+  TEST_ASSERT_TRUE(st.startedInBootloader);
+  TEST_ASSERT_EQUAL(1, st.startWhy);
+  TEST_ASSERT_EQUAL(0, st.startTimeoutS);
+  TEST_ASSERT_TRUE(applicationIntact(st));
 }
 
 void test_cancel_ignored_after_erase() {
@@ -322,6 +412,7 @@ void test_erase_refused_reports_last_error() {
   assertEnded(f, st, FlashOutcome::EraseRefused, FlashPhase::Erasing);
   TEST_ASSERT_EQUAL(2, st.lastError);
   TEST_ASSERT_EQUAL_STRING("erase refused: last_error 2", st.detail);
+  TEST_ASSERT_EQUAL(0, f.timeoutS);  // the bootloader stops its timer before it erases
   TEST_ASSERT_EQUAL(1, f.count(Frame::Erase));  // an exception is never resent
   TEST_ASSERT_EQUAL(0, f.count(Frame::Chunk));
   TEST_ASSERT_FALSE(applicationIntact(st));
@@ -681,13 +772,15 @@ void test_decide_flash_start() {
   in.link = LinkStatus::Up;
   TEST_ASSERT_TRUE(decideFlashStart(in, false) == FlashRefusal::None);
 
-  // In the bootloader: no valid app (why 2) may be flashed; asked (why 1) is leaving.
+  // In the bootloader: no valid app (why 2) may be flashed; asked (why 1) with time left is leaving.
   in.link = LinkStatus::Updating;
   in.inBootloader = true;
   in.bootloaderWhy = 2;
   TEST_ASSERT_TRUE(decideFlashStart(in, false) == FlashRefusal::None);
   in.bootloaderWhy = 1;
+  in.bootloaderTimeoutS = 30;
   TEST_ASSERT_TRUE(decideFlashStart(in, false) == FlashRefusal::BootloaderLeaving);
+  in.bootloaderTimeoutS = 0;
   in.bootloaderWhy = 0;
   TEST_ASSERT_TRUE(decideFlashStart(in, false) == FlashRefusal::LinkDown);
   in.inBootloader = false;
@@ -752,6 +845,33 @@ void test_restart_pending_refuses_every_start() {
   TEST_ASSERT_TRUE(decideFlashStart(all, true) == FlashRefusal::RestartPending);
 }
 
+// Why 1 with the timer stopped (after an erase) waits forever, like why 2.
+void test_bootloader_with_stopped_timer_may_update() {
+  FlashStartInputs in;
+  in.uartOutput = true;
+  in.imageOk = true;
+  in.link = LinkStatus::Updating;
+  in.inBootloader = true;
+  in.bootloaderWhy = 1;
+  in.bootloaderTimeoutS = 30;
+  TEST_ASSERT_TRUE(decideFlashStart(in, false) == FlashRefusal::BootloaderLeaving);
+  in.bootloaderTimeoutS = 1;
+  TEST_ASSERT_TRUE(decideFlashStart(in, false) == FlashRefusal::BootloaderLeaving);
+  in.bootloaderTimeoutS = 0;
+  TEST_ASSERT_TRUE(decideFlashStart(in, false) == FlashRefusal::None);
+  in.bootloaderWhy = 2;
+  TEST_ASSERT_TRUE(decideFlashStart(in, false) == FlashRefusal::None);
+  in.bootloaderWhy = 0;
+  TEST_ASSERT_TRUE(decideFlashStart(in, false) == FlashRefusal::LinkDown);
+
+  TEST_ASSERT_TRUE(bootloaderReturnsToApp(1, 30));
+  TEST_ASSERT_TRUE(bootloaderReturnsToApp(1, 1));
+  TEST_ASSERT_FALSE(bootloaderReturnsToApp(1, 0));
+  TEST_ASSERT_FALSE(bootloaderReturnsToApp(2, 0));
+  TEST_ASSERT_FALSE(bootloaderReturnsToApp(2, 30));
+  TEST_ASSERT_FALSE(bootloaderReturnsToApp(0, 30));
+}
+
 void test_refusal_messages() {
   TEST_ASSERT_EQUAL_STRING("", flashRefusalMessage(FlashRefusal::None));
   TEST_ASSERT_EQUAL_STRING("Switch the output to UART first.", flashRefusalMessage(FlashRefusal::NotUart));
@@ -800,6 +920,43 @@ void test_application_intact() {
     s.failedPhase = p;
     TEST_ASSERT_FALSE(applicationIntact(s));
   }
+
+  // A job that started in the bootloader: intact only if that bootloader was
+  // going back to a valid app (why 1, timer running), or the job updated it.
+  s.outcome = FlashOutcome::Cancelled;
+  s.failedPhase = FlashPhase::Idle;
+  s.startedInBootloader = true;
+  s.startWhy = 2;
+  s.startTimeoutS = 0;
+  TEST_ASSERT_FALSE(applicationIntact(s));
+  s.startWhy = 1;
+  TEST_ASSERT_FALSE(applicationIntact(s));
+  s.startWhy = 0;  // never read
+  TEST_ASSERT_FALSE(applicationIntact(s));
+  s.startWhy = 1;
+  s.startTimeoutS = 30;
+  TEST_ASSERT_TRUE(applicationIntact(s));
+  s.startWhy = 2;
+  s.startTimeoutS = 0;
+  s.outcome = FlashOutcome::Updated;
+  TEST_ASSERT_TRUE(applicationIntact(s));
+}
+
+void test_status_message() {
+  FlashStatus s;
+  s.phase = FlashPhase::Finished;
+  for (size_t i = 0; i <= (size_t)FlashOutcome::NoAppAfterUpdate; i++) {
+    s.outcome = (FlashOutcome)i;
+    TEST_ASSERT_EQUAL_STRING(flashOutcomeMessage(s.outcome), flashStatusMessage(s));
+  }
+  s.outcome = FlashOutcome::Cancelled;
+  s.startedInBootloader = true;
+  s.startWhy = 2;
+  TEST_ASSERT_EQUAL_STRING(
+      "Stopped: cancelled. The iHeater stays in its bootloader with no valid firmware, waiting for an update.",
+      flashStatusMessage(s));
+  s.outcome = FlashOutcome::NoReply;  // only the cancel's wording changes
+  TEST_ASSERT_EQUAL_STRING(flashOutcomeMessage(FlashOutcome::NoReply), flashStatusMessage(s));
 }
 
 // ---- The fake itself ----
@@ -849,6 +1006,10 @@ int main(int, char **) {
   RUN_TEST(test_cancel_after_entry_before_erase);
   RUN_TEST(test_cancel_while_polling_for_bootloader);
   RUN_TEST(test_cancel_in_bootloader_before_erase);
+  RUN_TEST(test_cancel_in_erased_bootloader);
+  RUN_TEST(test_cancel_in_bootloader_that_returns_to_app);
+  RUN_TEST(test_bootloader_inputs_no_reply);
+  RUN_TEST(test_failed_job_leaves_a_bootloader_that_takes_update);
   RUN_TEST(test_cancel_ignored_after_erase);
   RUN_TEST(test_erase_waits_2s);
   RUN_TEST(test_boot_waits_2s);
@@ -886,9 +1047,11 @@ int main(int, char **) {
   RUN_TEST(test_heat_wanted_rule);
   RUN_TEST(test_decide_flash_start);
   RUN_TEST(test_restart_pending_refuses_every_start);
+  RUN_TEST(test_bootloader_with_stopped_timer_may_update);
   RUN_TEST(test_refusal_messages);
   RUN_TEST(test_retry_allowed);
   RUN_TEST(test_application_intact);
+  RUN_TEST(test_status_message);
   RUN_TEST(test_fake_flags_bad_frames);
   return UNITY_END();
 }

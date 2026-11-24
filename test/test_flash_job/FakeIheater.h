@@ -67,8 +67,12 @@ class FakeIheater : public FlashLink {
   uint16_t appProto = 1;               // the app's input 0x00
   uint16_t bootloaderVersion = 0x0100;  // input 0x16; 0 = old firmware
   bool refuse16 = false;               // old firmware: 0x16 answers exception 0x02
-  bool refuseEntry = false;            // 0xB007 always gets exception 0x04
+  bool refuseEntry = false;            // 0xB007 always refused, as the app's gate does: exception 0x02
   uint16_t why = 2, appCheck = 0, lastError = 0;
+  // The bootloader's input 0x06 and input 0x02, as lb_session.c keeps them:
+  // 30 s and 1 (waiting, app valid) after 0xB007; 0 and 2 (no valid app) for
+  // why 2; an erase stops the timer for good (0) and sets 3, a chunk 4.
+  uint16_t timeoutS = 0, blState = 2;
   uint16_t eraseRefuseLastError = 0;   // non-zero: erase gets exception 4 with this last_error
   int chunkExceptionAt = -1;           // that chunk gets exception chunkExceptionCode
   uint8_t chunkExceptionCode = 2;
@@ -336,6 +340,8 @@ class FakeIheater : public FlashLink {
           registers(f, regs + addr, value);
           state = State::Bootloader;
           why = 1;
+          timeoutS = 30;
+          blState = 1;
           return;
         }
       }
@@ -352,13 +358,17 @@ class FakeIheater : public FlashLink {
       if (!versionReadNonZero) breach("0xB007 sent before input 0x16 read non-zero");
       if (bootloaderVersion == 0) breach("0xB007 sent to firmware without the link bootloader");
       // The iHeater's own gate: air target 0 and heater at or below 50.0 C.
-      if (refuseEntry || airTargetT10 != 0 || currentHeaterT10() > kSafeHeaterT10) return exception(f, 0x04);
+      // link_regs.c refuses it with 0x02, as it does an unknown register.
+      if (refuseEntry || airTargetT10 != 0 || currentHeaterT10() > kSafeHeaterT10) return exception(f, 0x02);
       echo(f);  // the reply goes out, then the board resets into the bootloader
       state = State::Bootloader;
       why = 1;
+      timeoutS = 30;
+      blState = 1;
       lastError = 0;
       return;
     }
+    if (addr == kRegBootloader) return exception(f, 0x03);  // any other value
     exception(f, 0x02);
   }
 
@@ -369,11 +379,11 @@ class FakeIheater : public FlashLink {
       uint16_t regs[0x20] = {};
       regs[0] = kBootloaderProtocol;
       regs[1] = 0x0100;
-      regs[2] = why == 2 ? 2 : 1;
+      regs[2] = blState;
       regs[kBlWhy] = why;
       regs[kBlAppCheck] = appCheck;
       regs[kBlLastError] = lastError;
-      regs[kBlTimeoutS] = why == 1 ? 30 : 0;
+      regs[kBlTimeoutS] = timeoutS;
       regs[7] = chunksWritten_;
       if (addr <= kBlAppCheck && kBlAppCheck < addr + value) appCheckReads++;
       return registers(f, regs + addr, value);
@@ -381,12 +391,14 @@ class FakeIheater : public FlashLink {
     if (f[1] == kFcWriteSingle) {
       if (addr != kRegCommand) return exception(f, 0x02);
       if (value == kCmdErase) {
+        timeoutS = 0;  // before the erase itself: some pages may be gone, no going back on a timer
         if (eraseRefuseLastError != 0) {
           lastError = eraseRefuseLastError;
           return exception(f, 0x04);
         }
         setBlank();
         chunksWritten_ = 0;
+        blState = 3;
         lastError = 0;
         return echo(f);
       }
@@ -432,6 +444,7 @@ class FakeIheater : public FlashLink {
       }
       memcpy(at, data, kChunkBytes);
       chunksWritten_++;
+      blState = 4;
       lastError = 0;
       return echo(f);
     }

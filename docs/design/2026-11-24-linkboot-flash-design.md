@@ -70,7 +70,9 @@ what it means.
    2, length at most 28,672 B, CRC-32 right. Pad to a multiple of 128 bytes
    with 0xFF.
 2. **Read input 0x00.**
-   - It reads `0x8001`: the board is in the bootloader. Skip to step 4.
+   - It reads `0x8001`: the board is in the bootloader. Read `why` (0x03)
+     and `timeout_s` (0x06), which say whether a valid app is still there,
+     then skip to step 4.
    - It reads 1: the app. Read input 0x16. If it's refused or reads 0, stop
      with "no link bootloader" and never send 0xB007.
    - Anything else: stop.
@@ -117,7 +119,10 @@ stops the job.
   says the iHeater is in its bootloader.
   - With `why` 2 (no valid app), the page offers **Update iHeater**. That
     starts at step 4.
-  - With `why` 1, the bootloader goes back to the app by itself within 30 s.
+  - With `why` 1 and `timeout_s` above 0, the bootloader goes back to the app
+    by itself within 30 s.
+  - An erase sets `timeout_s` to 0 for good and leaves `why` at 1. That
+    bootloader waits for firmware like `why` 2, and the page treats it so.
 - **Retry** after a failed job runs the whole job again. Step 2 finds out
   where the board is.
 

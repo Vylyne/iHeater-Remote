@@ -798,7 +798,7 @@ $('ihGo').disabled=!u.canUpdate||up;$('ihCancel').disabled=!u.canCancel;$('ihRet
 $('ihBar').hidden=!r||p==='cooling'||p==='idle';$('ihBar').value=u.progress||0;
 say('ihPhase',r?(p==='cooling'?'Cooling down'+(typeof u.heaterC==='number'?': heater at '+u.heaterC.toFixed(1)+' °C':''):p==='idle'?'Starting…':p[0].toUpperCase()+p.slice(1)+' ('+(u.progress||0)+'%)'):'');
 $('ihReplace').hidden=!(r&&['erasing','writing','starting'].includes(p));
-const b=u.bootloader,bt=b?(b.why===2?"The iHeater is in its bootloader with no valid firmware. Upload the app build and press Update iHeater.":b.why===1?"The iHeater is in its bootloader and returns to its firmware within "+b.timeoutS+" s.":"The iHeater is in its bootloader."):'';
+const b=r?null:u.bootloader,bt=b?(b.why===2||b.why===1&&!b.timeoutS?"The iHeater is in its bootloader with no valid firmware. Upload the app build and press Update iHeater.":b.why===1?"The iHeater is in its bootloader and returns to its firmware within "+b.timeoutS+" s.":"The iHeater is in its bootloader."):'';
 $('ihBoot').textContent=bt;$('ihBoot').hidden=!bt;
 const bad=!r&&u.outcome&&u.outcome!=='none'&&u.outcome!=='updated'&&u.outcome!=='cancelled';
 {const w=[];if(bad&&u.entryUnconfirmed)w.push("The iHeater didn't confirm the bootloader request.");if(bad&&u.appIntact===false)w.push("The iHeater is in its bootloader with the heater and fan off, waiting for firmware. Press Retry.");$('ihWarn').textContent=w.join(' ');$('ihWarn').hidden=!w.length}
@@ -868,6 +868,7 @@ policy::FlashRefusal ihStartDecision(const UartLinkView &view, bool retry) {
   in.link = view.link;
   in.inBootloader = view.inBootloader;
   in.bootloaderWhy = view.boot.why;
+  in.bootloaderTimeoutS = view.boot.timeoutS;
   in.lastOutcome = view.flash.outcome;
   return policy::decideFlashStart(in, retry);
 }
@@ -889,7 +890,7 @@ void fillUpdateJson(JsonObject out) {
   out["phase"] = policy::flashPhaseName(fs.phase);
   out["outcome"] = policy::flashOutcomeName(fs.outcome);
   if (fs.phase == policy::FlashPhase::Finished)
-    out["message"] = policy::flashOutcomeMessage(fs.outcome);
+    out["message"] = policy::flashStatusMessage(fs);
   out["failedPhase"] = policy::flashPhaseName(fs.failedPhase);
   out["detail"] = String(fs.detail);  // a const char array would be stored by pointer; fs dies on return
   out["progress"] = static_cast<int>(fs.progressPermille / 10);

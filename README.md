@@ -469,8 +469,12 @@ shows both.
 power loss or a link loss, shows on the page: "The iHeater is in its
 bootloader with no valid firmware". Upload the app build and press **Update
 iHeater**; the job starts from the bootloader and skips the cool-down. A
-board that was only asked to enter (why 1) returns to its firmware by itself
-within the time the page shows, so wait for that before starting.
+board that was only asked to enter (why 1) and not yet erased returns to its
+firmware by itself within the time the page shows, so wait for that before
+starting. Once an erase has been sent, the bootloader stops that timer and
+waits for firmware for as long as it takes, even if the Remote restarts in
+between; the page then shows the "no valid firmware" text and offers
+**Update iHeater**.
 
 While an update runs, the Remote reports the link as `updating`, and Klipper
 shows it. Update the host's Klipper and Moonraker parts first (run

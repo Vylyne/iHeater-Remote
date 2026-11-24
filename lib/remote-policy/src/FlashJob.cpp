@@ -41,6 +41,8 @@ class Job {
       if (!hasLinkBootloader() || !cool() || !enterBootloader()) return st;
     } else if (state != kBootloaderProtocol) {
       return failf(FlashOutcome::UnexpectedState, "input 0x00 reads 0x%04X", (unsigned)state);
+    } else if (!readBootloaderStart()) {
+      return st;
     }
     // The last point a cancel is honoured: nothing is erased yet, and a
     // bootloader entered with 0xB007 returns to the app by itself when no
@@ -204,6 +206,28 @@ class Job {
     if (version != 0) return true;
     failf(FlashOutcome::NoLinkBootloader, "input 0x16 reads 0");
     return false;
+  }
+
+  // A job that finds the bootloader reads its why (0x03) and timeout_s (0x06)
+  // in one frame: they say whether a valid app is still there to go back to.
+  // False when the job has ended.
+  bool readBootloaderStart() {
+    st.startedInBootloader = true;
+    constexpr uint16_t count = kBlTimeoutS - kBlWhy + 1;
+    uint8_t frame[kRequestLen];
+    buildReadRequest(kFcReadInput, kBlWhy, count, frame);
+    Reply reply;
+    uint8_t exc = 0;
+    switch (judge(tries(frame, sizeof frame, kJobReplyMs, reply), reply, exc)) {
+      case Got::NoReply: failf(FlashOutcome::NoReply, "bootloader inputs 0x03-0x06: no reply"); return false;
+      case Got::Exception:
+        failf(FlashOutcome::UnexpectedState, "bootloader inputs 0x03-0x06: exception 0x%02X", (unsigned)exc);
+        return false;
+      case Got::Ok: break;
+    }
+    st.startWhy = reply.regs[0];
+    st.startTimeoutS = reply.regs[kBlTimeoutS - kBlWhy];
+    return true;
   }
 
   // Waits for the heater to cool, with the air target at 0. True when it is
@@ -408,8 +432,10 @@ FlashRefusal decideFlashStart(const FlashStartInputs &in, bool retry) {
   if (in.heatWanted) return FlashRefusal::HeatWanted;
   if (retry) return retryAllowed(in.lastOutcome) ? FlashRefusal::None : FlashRefusal::NothingToRetry;
   if (in.link == LinkStatus::Up) return FlashRefusal::None;
-  if (in.inBootloader && in.bootloaderWhy == 2) return FlashRefusal::None;
-  if (in.inBootloader && in.bootloaderWhy == 1) return FlashRefusal::BootloaderLeaving;
+  if (in.inBootloader && bootloaderReturnsToApp(in.bootloaderWhy, in.bootloaderTimeoutS))
+    return FlashRefusal::BootloaderLeaving;
+  // Why 2, or why 1 with its timer stopped by an erase: it waits for firmware.
+  if (in.inBootloader && (in.bootloaderWhy == 1 || in.bootloaderWhy == 2)) return FlashRefusal::None;
   return FlashRefusal::LinkDown;
 }
 
@@ -441,8 +467,12 @@ bool retryAllowed(FlashOutcome o) {
   }
 }
 
+bool bootloaderReturnsToApp(uint16_t why, uint16_t timeoutS) { return why == 1 && timeoutS > 0; }
+
 bool applicationIntact(const FlashStatus &s) {
   if (s.outcome == FlashOutcome::Updated) return true;
+  // Started in a bootloader with no valid app (or one not read): nothing to keep.
+  if (s.startedInBootloader && !bootloaderReturnsToApp(s.startWhy, s.startTimeoutS)) return false;
   return s.failedPhase == FlashPhase::Idle || s.failedPhase == FlashPhase::Cooling ||
          s.failedPhase == FlashPhase::Entering;
 }
@@ -517,6 +547,12 @@ const char *flashOutcomeMessage(FlashOutcome o) {
       return "The iHeater didn't answer as its firmware after the update. Check it, then retry the update.";
   }
   return "";
+}
+
+const char *flashStatusMessage(const FlashStatus &s) {
+  if (s.outcome == FlashOutcome::Cancelled && !applicationIntact(s))
+    return "Stopped: cancelled. The iHeater stays in its bootloader with no valid firmware, waiting for an update.";
+  return flashOutcomeMessage(s.outcome);
 }
 
 }  // namespace iheaterlink::policy

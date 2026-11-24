@@ -52,6 +52,10 @@ struct FlashStatus {
   uint16_t lastError = 0;          // the bootloader's last_error, when read
   uint16_t appCheck = 0;           // the bootloader's app_check, when read
   char detail[48] = "";            // e.g. "chunk 12: no reply"
+  // The job found the bootloader at its start, with this why and timeout_s
+  // (inputs 0x03 and 0x06; both 0 when that read failed).
+  bool startedInBootloader = false;
+  uint16_t startWhy = 0, startTimeoutS = 0;
 };
 
 class FlashLink {
@@ -69,8 +73,9 @@ class FlashLink {
 
 // Runs one job and returns the final status (phase Finished), which it also
 // publishes. Input 0x00 decides where it starts: 1 (the app) cools and enters
-// the bootloader first; 0x8001 (the bootloader) goes straight to the erase.
-// A cancel is honoured until the first erase is sent.
+// the bootloader first; 0x8001 (the bootloader) reads its why and timeout_s,
+// then goes straight to the erase. A cancel is honoured until the first erase
+// is sent.
 FlashStatus runFlashJob(FlashLink &link, const uint8_t *image, size_t len);
 
 // Heat is wanted when the source holds a positive target.
@@ -82,6 +87,7 @@ struct FlashStartInputs {
   LinkStatus link = LinkStatus::Waiting;
   bool inBootloader = false;     // the poll last read 0x8001 at input 0x00
   uint16_t bootloaderWhy = 0;    // its input 0x03: 1 asked, 2 no valid app
+  uint16_t bootloaderTimeoutS = 0;  // its input 0x06: seconds until it returns to the app
   FlashOutcome lastOutcome = FlashOutcome::None;
 };
 enum class FlashRefusal : uint8_t {
@@ -90,20 +96,32 @@ enum class FlashRefusal : uint8_t {
 // RestartPending is checked first, for every start: a restart already
 // scheduled would cut a job off mid-erase. The rest are checked in the order
 // NotUart, JobRunning, NoImage, HeatWanted. Then a normal start needs the
-// link Up, or the bootloader with why 2 (why 1 gives BootloaderLeaving,
-// anything else LinkDown); a retry ignores the link and needs a last outcome
-// that retryAllowed() accepts (else NothingToRetry).
+// link Up, or a bootloader waiting for firmware: why 2, or why 1 with its
+// timer stopped (timeout 0, after an erase). Why 1 with time left gives
+// BootloaderLeaving, anything else LinkDown. A retry ignores the link and
+// needs a last outcome that retryAllowed() accepts (else NothingToRetry).
 FlashRefusal decideFlashStart(const FlashStartInputs &in, bool retry);
 const char *flashRefusalMessage(FlashRefusal refusal);
 
 // False for None, Updated, Cancelled, HeatRequested, ImageRejected and
 // NoLinkBootloader: a rerun would end the same way, or nothing failed.
 bool retryAllowed(FlashOutcome outcome);
-// True when the job updated the app, or stopped before sending the erase.
+// True when the job updated the app, or stopped before sending the erase
+// with a valid app still there: false for any job that started in a
+// bootloader that doesn't return to its app (see bootloaderReturnsToApp).
 bool applicationIntact(const FlashStatus &status);
+
+// True when a bootloader with this why (input 0x03) and timeout_s (0x06)
+// goes back to a valid app by itself: only one entered with 0xB007 (why 1)
+// over a valid app, whose timer still runs. An erase stops the timer for
+// good, and why 2 never had one; both wait for firmware.
+bool bootloaderReturnsToApp(uint16_t why, uint16_t timeoutS);
 
 const char *flashPhaseName(FlashPhase phase);
 const char *flashOutcomeName(FlashOutcome outcome);
 const char *flashOutcomeMessage(FlashOutcome outcome);
+// The finished job's message: flashOutcomeMessage, except for a cancel that
+// leaves the iHeater in a bootloader with no valid app.
+const char *flashStatusMessage(const FlashStatus &status);
 
 }  // namespace iheaterlink::policy
