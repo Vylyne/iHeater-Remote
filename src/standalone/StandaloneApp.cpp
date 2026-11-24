@@ -555,8 +555,9 @@ void logUartFlash(const policy::FlashStatus &flash) {
   if (flash.outcome != s_lastOutcome) {
     s_lastOutcome = flash.outcome;
     if (flash.outcome != policy::FlashOutcome::None)
-      Serial.printf("[UART] flash outcome=%s%s%s\n", policy::flashOutcomeName(flash.outcome),
-                    flash.detail[0] ? " " : "", flash.detail);
+      Serial.printf("[UART] flash outcome=%s phase=%s retries=%u%s%s\n",
+                    policy::flashOutcomeName(flash.outcome), policy::flashPhaseName(flash.failedPhase),
+                    static_cast<unsigned>(flash.retries), flash.detail[0] ? " " : "", flash.detail);
   }
 }
 
@@ -789,17 +790,21 @@ void handleSetupPage() {
 
 // The iHeater update card for /fw (UART output only). It follows the status
 // WebSocket and posts the image as multipart field "firmware".
-const char kIheaterCard[] = R"HTML(<section class=card id=ih data-auth=out><style>#ih[data-auth=out] .ctl{display:none}#ih h2{font-size:16px;margin:0 0 6px}#ih button:disabled{opacity:.45;cursor:default}#ih .row{display:flex;gap:8px}#ih progress{width:100%}</style><h2>iHeater firmware</h2><p class=note id=ihVer>Running: not read yet</p><p class="note warning" id=ihRom hidden>iHeater is in its bootloader: upload firmware to recover</p><input class=ctl id=ihFile accept=".bin,application/octet-stream" type=file><p class=note id=ihImg>Choose the iHeater UART build .bin.</p><div class="row ctl"><button id=ihGo disabled>Update iHeater</button><button id=ihCancel disabled>Cancel</button><button id=ihRetry disabled>Retry</button></div><progress id=ihBar max=100 value=0 hidden></progress><p class=note id=ihPhase></p><p class="note warning" id=ihErase hidden>The iHeater's application is erased. Do not power off the iHeater or the Remote.</p><p class="note warning" id=ihWarn hidden></p><p class=note id=ihMsg></p><script>(()=>{const $=i=>document.getElementById(i),I='/api/iheater/',busyP=['entering','syncing','erasing','writing','starting','restarting'];let u={},up=false;function say(id,t,w){$(id).textContent=t||'';$(id).classList.toggle('warning',!!w)}
+const char kIheaterCard[] = R"HTML(<section class=card id=ih data-auth=out><style>#ih[data-auth=out] .ctl{display:none}#ih h2{font-size:16px;margin:0 0 6px}#ih button:disabled{opacity:.45;cursor:default}#ih .row{display:flex;gap:8px}#ih progress{width:100%}</style><h2>iHeater firmware</h2><p class=note id=ihVer>Running: not read yet</p><p class="note warning" id=ihBoot hidden></p><input class=ctl id=ihFile accept=".bin,application/octet-stream" type=file><p class=note id=ihImg>Choose the iHeater UART build .bin.</p><div class="row ctl"><button id=ihGo disabled>Update iHeater</button><button id=ihCancel disabled>Cancel</button><button id=ihRetry disabled>Retry</button></div><progress id=ihBar max=100 value=0 hidden></progress><p class=note id=ihPhase></p><p class="note warning" id=ihReplace hidden>The iHeater's firmware is being replaced. Keep the Remote and the iHeater powered.</p><p class="note warning" id=ihWarn hidden></p><p class=note id=ihMsg></p><script>(()=>{const $=i=>document.getElementById(i),I='/api/iheater/',busyP=['entering','erasing','writing','starting','restarting'];let u={},up=false;function say(id,t,w){$(id).textContent=t||'';$(id).classList.toggle('warning',!!w)}
 function show(s){const i=s.iheater||{};u=s.iheaterUpdate||{};if(!s.iheaterUpdate)return;const im=u.image||{},r=u.running,p=u.phase;
 say('ihVer',i.fw?'Running: v'+i.fw+', protocol '+i.proto:'Running: not read yet');
 if(!up){say('ihImg',im.error||im.line||'Choose the iHeater app build .bin (build_type 2).',im.error)}
 $('ihGo').disabled=!u.canUpdate||up;$('ihCancel').disabled=!u.canCancel;$('ihRetry').disabled=!u.canRetry||up;$('ihFile').disabled=!!r||up;
 $('ihBar').hidden=!r||p==='cooling'||p==='idle';$('ihBar').value=u.progress||0;
 say('ihPhase',r?(p==='cooling'?'Cooling down'+(typeof u.heaterC==='number'?': heater at '+u.heaterC.toFixed(1)+' °C':''):p==='idle'?'Starting…':p[0].toUpperCase()+p.slice(1)+' ('+(u.progress||0)+'%)'):'');
-$('ihErase').hidden=!(r&&busyP.includes(p));
-{const w=[];if(u.unexpectedPid)w.push("Unexpected chip ID "+(u.pid?"0x"+u.pid.toString(16).toUpperCase():"(unknown)")+"; expected 0x445.");if(u.entryUnconfirmed)w.push("The iHeater didn't confirm the bootloader request.");$('ihWarn').textContent=w.join(' ');$('ihWarn').hidden=!w.length}
-say('ihMsg',r?'':u.message||u.hint||'',!r&&u.outcome&&u.outcome!=='none'&&u.outcome!=='updated'&&u.outcome!=='cancelled');
-if(!r&&u.detail)$('ihMsg').textContent+=' ('+u.detail+')'}
+$('ihReplace').hidden=!(r&&['erasing','writing','starting'].includes(p));
+const b=u.bootloader,bt=b?(b.why===2?"The iHeater is in its bootloader with no valid firmware. Upload the app build and press Update iHeater.":b.why===1?"The iHeater is in its bootloader and returns to its firmware within "+b.timeoutS+" s.":"The iHeater is in its bootloader."):'';
+$('ihBoot').textContent=bt;$('ihBoot').hidden=!bt;
+const bad=!r&&u.outcome&&u.outcome!=='none'&&u.outcome!=='updated'&&u.outcome!=='cancelled';
+{const w=[];if(bad&&u.entryUnconfirmed)w.push("The iHeater didn't confirm the bootloader request.");if(bad&&u.appIntact===false)w.push("The iHeater is in its bootloader with the heater and fan off, waiting for firmware. Press Retry.");$('ihWarn').textContent=w.join(' ');$('ihWarn').hidden=!w.length}
+say('ihMsg',r?'':u.message||u.hint||'',bad);
+if(!r&&u.detail)$('ihMsg').textContent+=' ('+u.detail+')';
+if(bad&&(u.lastError||u.appCheck))$('ihMsg').textContent+=' [bootloader error '+(u.lastError||0)+', app check '+(u.appCheck||0)+']'}
 function au(){fetch('/api/auth/me',{cache:'no-store'}).then(r=>r.json()).then(d=>d.loggedIn===true,()=>false).then(v=>{$('ih').dataset.auth=v?'in':'out'})}au();
 function post(path,done){const x=new XMLHttpRequest();x.open('POST',I+path);x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status===401||x.status===403)au();if(x.status>=300)say('ihMsg',r.error||'Request failed.',1);else if(r.iheaterUpdate)show(r);if(done)done()};x.onerror=()=>say('ihMsg','Request failed.',1);x.send()}
 $('ihFile').onchange=()=>{const file=$('ihFile').files[0];if(!file)return;up=true;say('ihImg','Uploading…');$('ihGo').disabled=true;const x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST',I+'image');x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}up=false;if(x.status===401||x.status===403)au();if(x.status>=300)say('ihImg',r.error||'Upload failed.',1);else say('ihImg',r.line);$('ihFile').value=''};x.onerror=()=>{up=false;say('ihImg','Upload failed.',1)};x.send(d)};
@@ -890,6 +895,16 @@ void fillUpdateJson(JsonObject out) {
   out["progress"] = static_cast<int>(fs.progressPermille / 10);
   setTempC(out, "heaterC", fs.heaterT10);
   out["entryUnconfirmed"] = fs.entryUnconfirmed;
+  out["retries"] = fs.retries;
+  out["lastError"] = fs.lastError;
+  out["appCheck"] = fs.appCheck;
+  out["appIntact"] = policy::applicationIntact(fs);
+  if (view.inBootloader) {
+    JsonObject boot = out.createNestedObject("bootloader");
+    boot["why"] = view.boot.why;
+    boot["appCheck"] = view.boot.appCheck;
+    boot["timeoutS"] = view.boot.timeoutS;
+  }
   out["running"] = busy;
   out["canCancel"] = busy && !stale && ihCanCancel(fs.phase);
   const policy::FlashRefusal refusal = ihStartDecision(view, false);
