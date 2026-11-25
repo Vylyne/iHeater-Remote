@@ -3,6 +3,8 @@
 #include <Arduino.h>
 #include <WebSocketsServer.h>
 
+#include "standalone/StatusSocket.h"
+
 #include <EventLog.h>
 #include <TempHistory.h>
 #include <UartConsole.h>
@@ -18,7 +20,7 @@ class UartLink;
 // handlers and the socket callbacks both run there, so the console tickets
 // need no lock.
 
-void feedBegin(WebSocketsServer &socket);
+void feedBegin(StatusSocket &socket);
 
 // The UART link whose exchanges the console shows; nullptr with pulse output
 // (a subscription then gets "state":"pulse").

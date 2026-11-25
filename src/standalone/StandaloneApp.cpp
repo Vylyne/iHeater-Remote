@@ -7,6 +7,7 @@
 #include "standalone/MoonrakerLink.h"
 #include "standalone/RemoteDashboard.h"
 #include "standalone/RemoteSettings.h"
+#include "standalone/StatusSocket.h"
 #include "standalone/UartLink.h"
 
 #include <Arduino.h>
@@ -95,7 +96,16 @@ const float kModeTempsC[] = {
 
 DNSServer s_dnsServer;
 WebServer s_server(80);
-WebSocketsServer s_statusSocket(81);
+StatusSocket s_statusSocket(81);
+
+// Headers from each socket's handshake, kept until it connects: login is
+// judged from them once, at WStype_CONNECTED.
+struct SocketHandshake {
+  String cookie;
+  String user;
+  String groups;
+};
+SocketHandshake s_socketHandshake[StatusSocket::kMaxClients];
 // The adapter's own window is widened to the full pulse range; the target
 // range policy (s_range) does the clamping.
 RmtOutputConfig remoteOutputConfig() {
@@ -847,7 +857,7 @@ function au(){fetch('/api/auth/me',{cache:'no-store'}).then(r=>r.json()).then(d=
 function post(path,done){const x=new XMLHttpRequest();x.open('POST',I+path);x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}if(x.status===401||x.status===403)au();if(x.status>=300)say('ihMsg',r.error||'Request failed.',1);else if(r.iheaterUpdate)show(r);if(done)done()};x.onerror=()=>say('ihMsg','Request failed.',1);x.send()}
 $('ihFile').onchange=()=>{const file=$('ihFile').files[0];if(!file)return;up=true;say('ihImg','Uploading…');$('ihGo').disabled=true;const x=new XMLHttpRequest(),d=new FormData();d.append('firmware',file,file.name);x.open('POST',I+'image');x.onload=()=>{let r={};try{r=JSON.parse(x.responseText)}catch(_){}up=false;if(x.status===401||x.status===403)au();if(x.status>=300)say('ihImg',r.error||'Upload failed.',1);else say('ihImg',r.line);$('ihFile').value=''};x.onerror=()=>{up=false;say('ihImg','Upload failed.',1)};x.send(d)};
 $('ihGo').onclick=()=>post('update');$('ihRetry').onclick=()=>post('retry');$('ihCancel').onclick=()=>post('cancel');
-let ws;function conn(){ws=new WebSocket(location.protocol==='https:'?'wss://'+location.host+'/ws':'ws://'+location.hostname+':81/');ws.onmessage=e=>{try{const m=JSON.parse(e.data);if(m&&typeof m==='object'&&m.t===undefined)show(m)}catch(_){}};ws.onclose=()=>setTimeout(conn,2000)}conn()})()</script></section>)HTML";
+let ws;function conn(){ws=new WebSocket(location.protocol==='https:'?'wss://'+location.host+'/ws':'ws://'+location.hostname+':81/');ws.onmessage=e=>{try{const m=JSON.parse(e.data);if(m&&typeof m==='object'&&m.t===undefined)show(m)}catch(_){}};ws.onclose=e=>setTimeout(conn,e.code===4001?10000:2000)}conn()})()</script></section>)HTML";
 
 void handleFirmwarePage() {
   if (captiveRedirectIfNeeded())
@@ -1142,16 +1152,39 @@ void pushStatusIfChanged(bool force = false) {
   lastCheckMs = now;
 
   String status = statusJson();
-  if (force || status != lastStatus) {
-    s_statusSocket.broadcastTXT(status);
-    lastStatus = status;
-  }
+  const bool changed = force || status != lastStatus;
+  s_statusSocket.broadcastStatus(status, changed);
+  if (changed) lastStatus = status;
+}
+
+bool socketLoggedIn(uint8_t client);
+
+// Header values longer than this are not a session cookie or a user name.
+constexpr size_t kMaxSocketHeaderBytes = 512;
+
+void onStatusSocketHeader(uint8_t client, const String &name, const String &value) {
+  if (client >= StatusSocket::kMaxClients || value.length() > kMaxSocketHeaderBytes) return;
+  SocketHandshake &h = s_socketHandshake[client];
+  if (name.equalsIgnoreCase("Cookie"))
+    h.cookie = value;
+  else if (s_auth.userHeader.length() > 0 && name.equalsIgnoreCase(s_auth.userHeader))
+    h.user = value;
+  else if (s_auth.groupsHeader.length() > 0 && name.equalsIgnoreCase(s_auth.groupsHeader))
+    h.groups = value;
 }
 
 void onStatusSocketEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t len) {
   if (type == WStype_CONNECTED) {
+    const bool loggedIn = socketLoggedIn(client);
+    if (client < StatusSocket::kMaxClients) s_socketHandshake[client] = SocketHandshake{};
+    // Closed to keep a slot free for a login: it gets nothing.
+    if (!s_statusSocket.admit(client, loggedIn)) return;
     String status = statusJson();
-    s_statusSocket.sendTXT(client, status);
+    s_statusSocket.sendFrame(client, status, policy::FrameKind::Status);
+  } else if (type == WStype_DISCONNECTED) {
+    if (client < StatusSocket::kMaxClients) s_socketHandshake[client] = SocketHandshake{};
+  } else if (!s_statusSocket.clientIsOpen(client)) {
+    return;  // a client being closed: its messages are ignored
   }
   feedOnSocketEvent(client, type, payload, len);
 }
@@ -1783,13 +1816,43 @@ RequestAuth s_req{};
 RequestAuth s_uploadAuth{};
 const char *s_uploadRoute = nullptr;
 
-RequestAuth checkRequest() {
-  RequestAuth a{};
-  const uint32_t peer = ipValue(s_server.client().remoteIP());
+bool peerTrusted(uint32_t peer) {
   // The automatic entry is the Moonraker host, and only while following Klipper.
   const uint32_t automatic =
       (klipperSource() && s_auth.autoProxy) ? s_moonraker.connectedAddress() : 0;
-  const bool trusted = policy::isTrustedProxy(peer, s_auth.proxies, s_auth.proxyCount, automatic);
+  return policy::isTrustedProxy(peer, s_auth.proxies, s_auth.proxyCount, automatic);
+}
+
+bool sessionCookieValid(const char *cookie) {
+  uint8_t token[policy::kSessionTokenLen];
+  if (!policy::sessionTokenFromCookie(cookie, token)) return false;
+  const policy::SessionTable::Check check = s_sessions.check(token, s_hours.hours());
+  if (check == policy::SessionTable::Check::Expired) saveSessions(s_sessions);
+  return check == policy::SessionTable::Check::Valid;
+}
+
+// The socket counts as logged in by the same rules as an HTTP request: a
+// valid session cookie, or an accepted proxy login from a trusted peer. With
+// no password and no header login there is no login to tell pages apart, so
+// every socket counts.
+bool socketLoggedIn(uint8_t client) {
+  if (!s_auth.passwordSet && !s_auth.headerLogin) return true;
+  if (client >= StatusSocket::kMaxClients) return false;
+  const SocketHandshake &h = s_socketHandshake[client];
+  if (sessionCookieValid(h.cookie.c_str())) return true;
+  const bool trusted = peerTrusted(ipValue(s_statusSocket.remoteIP(client)));
+  if (!trusted || !s_auth.headerLogin) return false;
+  String user = h.user;
+  user.trim();
+  return policy::headerLoginOk(s_auth.headerLogin, trusted, user.c_str(),
+                               s_auth.allowedUsers.c_str(), h.groups.c_str(),
+                               s_auth.allowedGroups.c_str());
+}
+
+RequestAuth checkRequest() {
+  RequestAuth a{};
+  const uint32_t peer = ipValue(s_server.client().remoteIP());
+  const bool trusted = peerTrusted(peer);
 
   // Forwarded values count only from a trusted peer.
   String fwdProto, fwdHost, fwdFor;
@@ -1805,16 +1868,7 @@ RequestAuth checkRequest() {
   const bool isPost = s_server.method() == HTTP_POST;
   a.cls = policy::classifyRequest(uri.c_str(), isPost, s_auth.passwordSet);
 
-  bool cookieValid = false;
-  uint8_t token[policy::kSessionTokenLen];
-  const String cookie = s_server.header("Cookie");
-  if (policy::sessionTokenFromCookie(cookie.c_str(), token)) {
-    const policy::SessionTable::Check check = s_sessions.check(token, s_hours.hours());
-    if (check == policy::SessionTable::Check::Valid)
-      cookieValid = true;
-    else if (check == policy::SessionTable::Check::Expired)
-      saveSessions(s_sessions);
-  }
+  const bool cookieValid = sessionCookieValid(s_server.header("Cookie").c_str());
 
   String user;
   bool headerOk = false;
@@ -2737,6 +2791,7 @@ void setup() {
   configureRoutes();
   registerAuthHeaders();
   s_server.begin();
+  s_statusSocket.onHandshakeHeader(onStatusSocketHeader);
   s_statusSocket.begin();
   s_statusSocket.onEvent(onStatusSocketEvent);
   Serial.printf("[REMOTE] Web UI: http://%s/\n",

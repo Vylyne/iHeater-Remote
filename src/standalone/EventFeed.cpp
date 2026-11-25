@@ -35,7 +35,7 @@ struct Backlog {
   uint32_t histNextMs = 0;  // time of the next sample to send
 };
 
-WebSocketsServer *s_socket = nullptr;
+StatusSocket *s_socket = nullptr;
 policy::EventLog s_log;
 policy::TempHistory s_hist;
 Backlog s_queue[kMaxClients];
@@ -72,7 +72,7 @@ bool anySubscribed() {
 // True when at least one connected client is not still in its backlog.
 bool anyLiveClient() {
   for (uint8_t c = 0; c < kMaxClients; c++)
-    if (s_socket->clientIsConnected(c) && !queued(c)) return true;
+    if (s_socket->clientIsOpen(c) && !queued(c)) return true;
   return false;
 }
 
@@ -82,8 +82,8 @@ bool anyLiveClient() {
 // serialization below) are stored by pointer, so the document needs only its
 // slots.
 bool sendEvents(int client, const policy::Event *const *list, size_t n, bool first) {
-  if (client < 0 ? s_socket->connectedClients() == 0
-                 : !s_socket->clientIsConnected(static_cast<uint8_t>(client)))
+  if (client < 0 ? !s_socket->anyOpen()
+                 : !s_socket->clientIsOpen(static_cast<uint8_t>(client)))
     return false;
   DynamicJsonDocument doc(JSON_OBJECT_SIZE(4) + JSON_ARRAY_SIZE(n) + n * JSON_ARRAY_SIZE(5));
   if (doc.capacity() == 0) return false;  // out of heap: skip rather than send "null"
@@ -104,11 +104,11 @@ bool sendEvents(int client, const policy::Event *const *list, size_t n, bool fir
   String out;
   serializeJson(doc, out);
   if (out.length() == 0) return false;
-  if (client < 0)
-    s_socket->broadcastTXT(out);
-  else
-    s_socket->sendTXT(static_cast<uint8_t>(client), out);
-  return true;
+  if (client < 0) {
+    s_socket->broadcastFrame(out, policy::FrameKind::Stream);
+    return true;
+  }
+  return s_socket->sendFrame(static_cast<uint8_t>(client), out, policy::FrameKind::Stream);
 }
 
 void appendSample(String &out, int16_t v) {
@@ -154,7 +154,7 @@ String histFrame(size_t from, size_t n, uint32_t ms, bool first) {
 void sendBacklogFrame() {
   Backlog &b = s_queue[0];
   const uint8_t client = b.client;
-  if (!s_socket->clientIsConnected(client)) {
+  if (!s_socket->clientIsOpen(client)) {
     dropQueued(client);
     return;
   }
@@ -171,7 +171,8 @@ void sendBacklogFrame() {
       else
         remaining++;
     }
-    // Short of heap: this client's frame is tried again on the next loop.
+    // Short of heap: this client's frame is tried again on the next loop. A
+    // client that is closing is dropped from the queue on the next loop.
     if (!sendEvents(client, list, n, !b.evFirstSent)) return;
     b.evFirstSent = true;
     if (n > 0) b.evSeq = list[n - 1]->seq;
@@ -182,7 +183,7 @@ void sendBacklogFrame() {
   const size_t size = s_hist.size();
   if (size == 0) {
     String out = histFrame(0, 0, 0, true);
-    s_socket->sendTXT(client, out);
+    s_socket->sendFrame(client, out, policy::FrameKind::Stream);
     dropQueued(client);
     return;
   }
@@ -206,7 +207,9 @@ void sendBacklogFrame() {
   if (n > kSamplesPerFrame) n = kSamplesPerFrame;
   const uint32_t lastMs = b.histNextMs + static_cast<uint32_t>(n - 1) * step;
   String out = histFrame(from, n, lastMs, !b.histFirstSent);
-  s_socket->sendTXT(client, out);
+  // Not sent: the client is closing, or went (its disconnect may already have
+  // moved the queue under `b`).
+  if (!s_socket->sendFrame(client, out, policy::FrameKind::Stream)) return;
   b.histFirstSent = true;
   b.histNextMs = lastMs + step;
   if (static_cast<int32_t>(newest - b.histNextMs) < 0) dropQueued(client);
@@ -217,7 +220,7 @@ void sendConsoleState(uint8_t client, const char *state) {
   char out[80];
   snprintf(out, sizeof out, "{\"t\":\"uart\",\"now\":%lu,\"state\":\"%s\"}",
            static_cast<unsigned long>(millis()), state);
-  s_socket->sendTXT(client, out);
+  s_socket->sendFrame(client, out, strlen(out), policy::FrameKind::Stream);
 }
 
 void stopConsole() {
@@ -333,12 +336,13 @@ void sendConsoleLines() {
   }
   s_consoleLost = 0;
   for (uint8_t c = 0; c < kMaxClients; c++)
-    if (s_subscribed[c] && s_socket->clientIsConnected(c)) s_socket->sendTXT(c, out);
+    if (s_subscribed[c] && s_socket->clientIsOpen(c))
+      s_socket->sendFrame(c, out, policy::FrameKind::Stream);
 }
 
 }  // namespace
 
-void feedBegin(WebSocketsServer &socket) { s_socket = &socket; }
+void feedBegin(StatusSocket &socket) { s_socket = &socket; }
 
 void feedBeginConsole(UartLink *uart) { s_uart = uart; }
 
@@ -395,13 +399,14 @@ void feedLoop(uint32_t nowMs, const policy::HistSample &current) {
     if (added > kSamplesPerFrame) added = kSamplesPerFrame;
     String out = histFrame(size - added, added, s_hist.newestMs(), false);
     for (uint8_t c = 0; c < kMaxClients; c++)
-      if (s_socket->clientIsConnected(c) && !queued(c)) s_socket->sendTXT(c, out);
+      if (s_socket->clientIsOpen(c) && !queued(c))
+        s_socket->sendFrame(c, out, policy::FrameKind::Stream);
   }
 
   if (!anySubscribed()) return;
   // A client that went without a disconnect event still lets the ring go.
   for (uint8_t c = 0; c < kMaxClients; c++)
-    if (s_subscribed[c] && !s_socket->clientIsConnected(c)) unsubscribe(c);
+    if (s_subscribed[c] && !s_socket->clientIsOpen(c)) unsubscribe(c);
   if (s_uart && anySubscribed()) sendConsoleLines();
 }
 

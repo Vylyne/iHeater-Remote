@@ -195,6 +195,11 @@ Web UI:
   compact cards and a navigation rail inspired by DragonBreath's local SPA.
 - Live dashboard state is pushed over a local WebSocket at
   `ws://<device-ip>:81/`; the dashboard does not poll a status HTTP endpoint.
+  The socket has 5 slots. Logged-out pages may hold at most 4, so a
+  logged-in page (judged by its session cookie or proxy login when it
+  connects) can always get in; a page closed to make room shows "Too many
+  open pages". A page that stops taking data (a sleeping phone, a dropped
+  Wi-Fi link) is skipped and then closed, so it cannot stall the Remote.
 - **Setup** has a **Control source** choice: Manual or Klipper (Moonraker).
   For Klipper, enter the host and port, and tick **TLS** to use a secure
   connection (the port switches between 7125 and 443; TLS on port 7125 is
