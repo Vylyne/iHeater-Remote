@@ -11,24 +11,41 @@ namespace iheaterlink::policy {
 
 // Longest one write may wait for room before the connection is stopped.
 constexpr uint32_t kSocketWriteBudgetMs = 250;
-// Longest a client may go without taking a status frame before it is closed.
+// Longest a client may go with no room for any frame before it is closed.
 constexpr uint32_t kSocketStuckMs = 3000;
+// Longest a client may take over its handshake before it is closed.
+constexpr uint32_t kSocketHandshakeMs = 5000;
 
-// Status frames are whole snapshots (the next one replaces a skipped one).
-// Stream frames ("ev", "hist", "uart") must all arrive, in order.
-enum class FrameKind : uint8_t { Status, Stream };
 enum class SendAction : uint8_t { Send, Skip, Close };
 
-// One per client; reset when a client connects.
+// One per client; reset when a client connects. A frame that finds no room
+// is skipped, not cut: a page slow to acknowledge (a phone saving power)
+// keeps its socket. The caller makes up a skipped frame: the next status
+// replaces a status frame, and the feed resends "ev" and "hist" from the
+// client's cursor.
 class SocketGate {
  public:
   void reset() { stuck_ = false; }
   // `writable`: the socket has room now (a zero-wait check).
-  SendAction decide(FrameKind kind, bool writable, uint32_t nowMs);
+  SendAction decide(bool writable, uint32_t nowMs);
 
  private:
   bool stuck_ = false;
   uint32_t stuckSinceMs_ = 0;
+};
+
+// One per client slot: a client that opens a connection and never finishes
+// its handshake would hold the slot for good (the library has no deadline).
+class HandshakeTimer {
+ public:
+  void reset() { started_ = false; }
+  // Call each loop. True once the slot has been in its handshake for
+  // kSocketHandshakeMs; leaving the handshake starts the next one afresh.
+  bool expired(bool inHandshake, uint32_t nowMs);
+
+ private:
+  bool started_ = false;
+  uint32_t sinceMs_ = 0;
 };
 
 // Milliseconds left of a write's budget; 0 once it is spent. Wrap-safe.

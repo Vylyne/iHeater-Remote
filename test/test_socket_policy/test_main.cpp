@@ -11,55 +11,84 @@ void tearDown() {}
 
 void test_gate_sends_when_writable() {
   SocketGate g;
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Status, true, 0) == SendAction::Send);
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Stream, true, 0) == SendAction::Send);
+  TEST_ASSERT_TRUE(g.decide(true, 0) == SendAction::Send);
 }
 
-void test_gate_skips_status_when_blocked() {
+void test_gate_skips_when_blocked() {
+  // Any frame waits for room: a page slow to acknowledge keeps its socket.
   SocketGate g;
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Status, false, 1000) == SendAction::Skip);
-}
-
-void test_gate_closes_on_blocked_stream() {
-  SocketGate g;
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Stream, false, 1000) == SendAction::Close);
+  TEST_ASSERT_TRUE(g.decide(false, 1000) == SendAction::Skip);
+  TEST_ASSERT_TRUE(g.decide(false, 1001) == SendAction::Skip);
 }
 
 void test_gate_closes_after_stuck_time() {
   SocketGate g;
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Status, false, 1000) == SendAction::Skip);
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Status, false, 1000 + kSocketStuckMs - 1) ==
-                   SendAction::Skip);
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Status, false, 1000 + kSocketStuckMs) ==
-                   SendAction::Close);
+  TEST_ASSERT_TRUE(g.decide(false, 1000) == SendAction::Skip);
+  TEST_ASSERT_TRUE(g.decide(false, 1000 + kSocketStuckMs - 1) == SendAction::Skip);
+  TEST_ASSERT_TRUE(g.decide(false, 1000 + kSocketStuckMs) == SendAction::Close);
 }
 
 void test_gate_send_clears_stuck_time() {
   SocketGate g;
-  g.decide(FrameKind::Status, false, 0);
-  g.decide(FrameKind::Status, true, 2000);
-  g.decide(FrameKind::Status, false, 2500);
+  g.decide(false, 0);
+  g.decide(true, 2000);
+  g.decide(false, 2500);
   // 2500 ms since the new stall began, not 4500 since the first.
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Status, false, 5000) == SendAction::Skip);
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Status, false, 2500 + kSocketStuckMs) ==
-                   SendAction::Close);
+  TEST_ASSERT_TRUE(g.decide(false, 5000) == SendAction::Skip);
+  TEST_ASSERT_TRUE(g.decide(false, 2500 + kSocketStuckMs) == SendAction::Close);
 }
 
 void test_gate_stuck_time_across_millis_wrap() {
   SocketGate g;
   const uint32_t start = 0xFFFFFF00u;
-  g.decide(FrameKind::Status, false, start);
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Status, false, start + 1000) == SendAction::Skip);
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Status, false, start + kSocketStuckMs) ==
-                   SendAction::Close);
+  g.decide(false, start);
+  TEST_ASSERT_TRUE(g.decide(false, start + 1000) == SendAction::Skip);
+  TEST_ASSERT_TRUE(g.decide(false, start + kSocketStuckMs) == SendAction::Close);
 }
 
 void test_gate_reset_forgets_stall() {
   SocketGate g;
-  g.decide(FrameKind::Status, false, 0);
+  g.decide(false, 0);
   g.reset();
-  TEST_ASSERT_TRUE(g.decide(FrameKind::Status, false, kSocketStuckMs + 10) ==
-                   SendAction::Skip);
+  TEST_ASSERT_TRUE(g.decide(false, kSocketStuckMs + 10) == SendAction::Skip);
+}
+
+// --- HandshakeTimer ---
+
+void test_handshake_not_in_handshake_never_expires() {
+  HandshakeTimer t;
+  TEST_ASSERT_FALSE(t.expired(false, 0));
+  TEST_ASSERT_FALSE(t.expired(false, 10 * kSocketHandshakeMs));
+}
+
+void test_handshake_expires_after_deadline() {
+  HandshakeTimer t;
+  TEST_ASSERT_FALSE(t.expired(true, 500));
+  TEST_ASSERT_FALSE(t.expired(true, 500 + kSocketHandshakeMs - 1));
+  TEST_ASSERT_TRUE(t.expired(true, 500 + kSocketHandshakeMs));
+}
+
+void test_handshake_restarts_after_leaving() {
+  HandshakeTimer t;
+  t.expired(true, 0);
+  t.expired(false, 100);  // connected (or gone): the next handshake starts afresh
+  TEST_ASSERT_FALSE(t.expired(true, kSocketHandshakeMs + 50));
+  TEST_ASSERT_TRUE(t.expired(true, 2 * kSocketHandshakeMs + 50));
+}
+
+void test_handshake_reset_forgets_start() {
+  HandshakeTimer t;
+  t.expired(true, 0);
+  t.reset();  // the slot was reused within one loop pass
+  TEST_ASSERT_FALSE(t.expired(true, kSocketHandshakeMs));
+}
+
+void test_handshake_across_millis_wrap() {
+  HandshakeTimer t;
+  const uint32_t start = 0xFFFFFF00u;
+  t.expired(true, start);
+  TEST_ASSERT_FALSE(t.expired(true, start + kSocketHandshakeMs - 1));
+  TEST_ASSERT_TRUE(t.expired(true, start + kSocketHandshakeMs));
 }
 
 // --- write budget ---
@@ -132,12 +161,16 @@ void test_slot_newcomer_out_of_range() {
 int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_gate_sends_when_writable);
-  RUN_TEST(test_gate_skips_status_when_blocked);
-  RUN_TEST(test_gate_closes_on_blocked_stream);
+  RUN_TEST(test_gate_skips_when_blocked);
   RUN_TEST(test_gate_closes_after_stuck_time);
   RUN_TEST(test_gate_send_clears_stuck_time);
   RUN_TEST(test_gate_stuck_time_across_millis_wrap);
   RUN_TEST(test_gate_reset_forgets_stall);
+  RUN_TEST(test_handshake_not_in_handshake_never_expires);
+  RUN_TEST(test_handshake_expires_after_deadline);
+  RUN_TEST(test_handshake_restarts_after_leaving);
+  RUN_TEST(test_handshake_reset_forgets_start);
+  RUN_TEST(test_handshake_across_millis_wrap);
   RUN_TEST(test_write_budget_remaining);
   RUN_TEST(test_write_budget_across_millis_wrap);
   RUN_TEST(test_slot_free_slot_left_closes_none);

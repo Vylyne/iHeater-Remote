@@ -2,17 +2,28 @@
 
 namespace iheaterlink::policy {
 
-SendAction SocketGate::decide(FrameKind kind, bool writable, uint32_t nowMs) {
+SendAction SocketGate::decide(bool writable, uint32_t nowMs) {
   if (writable) {
     stuck_ = false;
     return SendAction::Send;
   }
-  if (kind == FrameKind::Stream) return SendAction::Close;
   if (!stuck_) {
     stuck_ = true;
     stuckSinceMs_ = nowMs;
   }
   return nowMs - stuckSinceMs_ >= kSocketStuckMs ? SendAction::Close : SendAction::Skip;
+}
+
+bool HandshakeTimer::expired(bool inHandshake, uint32_t nowMs) {
+  if (!inHandshake) {
+    started_ = false;
+    return false;
+  }
+  if (!started_) {
+    started_ = true;
+    sinceMs_ = nowMs;
+  }
+  return nowMs - sinceMs_ >= kSocketHandshakeMs;
 }
 
 uint32_t writeBudgetRemaining(uint32_t startMs, uint32_t nowMs) {
