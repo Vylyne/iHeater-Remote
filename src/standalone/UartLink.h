@@ -7,6 +7,7 @@
 
 #include <FlashJob.h>
 #include <RemotePolicy.h>
+#include <UartConsole.h>
 #include <UartFrames.h>
 #include <UartPollPolicy.h>
 #include <UartRegisters.h>
@@ -53,6 +54,11 @@ struct UartLinkView {
 // guards those hand-offs and is held only while copying small structs.
 // startFlash() queues an iHeater flash job, which the task runs in place of
 // polling until it finishes.
+//
+// The console tap: while a console ring is published (consoleStart() to
+// consoleStop(), both on the main loop), every exchange the task makes, poll
+// and flash job alike, is copied into the ring as one fixed-size record. The
+// task only copies bytes: it never formats or allocates for the console.
 class UartLink : public OutputPort {
  public:
   void begin() override;  // installs the UART1 driver and starts the task
@@ -72,6 +78,18 @@ class UartLink : public OutputPort {
   bool startFlash(const uint8_t *image, size_t len);
   void cancelFlash();      // only takes effect until the job sends the erase
   bool flashBusy() const;  // queued or running
+
+  // The console, main loop only. consoleStart() allocates kConsoleLines
+  // records and starts recording (true if already recording); false when
+  // the heap check fails or the allocation does. consoleStop() stops and
+  // frees the ring. consoleDrain() copies at most kConsoleDrainMax records the
+  // caller has not seen, oldest first; `dropped` counts records overwritten
+  // before they were drained. It returns 0 with dropped 0 for max 0, or
+  // when no ring exists.
+  static constexpr size_t kConsoleDrainMax = 8;
+  bool consoleStart();
+  void consoleStop();
+  size_t consoleDrain(policy::ConsoleRecord *out, size_t max, uint32_t &dropped);
 
  private:
   // policy::FlashLink on UART1, for the flash job. Used only from the task.
@@ -97,6 +115,12 @@ class UartLink : public OutputPort {
   // True when a complete reply arrived (Ok, Exception or Invalid); false when
   // nothing usable arrived within timeoutMs. Feeds the watchdog while it waits.
   bool exchangeFrame(const uint8_t *frame, size_t len, policy::Reply &reply, uint32_t timeoutMs);
+  // Copies one exchange into the console ring, if one is still published.
+  // Kept out of line so its record sits on the task stack only during the
+  // call, never in exchangeFrame's own frame.
+  __attribute__((noinline)) void consoleCapture(const uint8_t *frame, size_t len,
+                                                const uint8_t *reply, size_t replyLen,
+                                                policy::ConsoleResult result, uint8_t code);
   void runRequest(const policy::PollRequest &req, bool &gotOk);
   // Runs a queued flash job, if there is one, to its end.
   void runQueuedFlash(FlashPort &port);
@@ -127,6 +151,16 @@ class UartLink : public OutputPort {
   const uint8_t *flashImage_ = nullptr;
   size_t flashLen_ = 0;
   policy::FlashStatus flashStatus_{};  // the running job's, or the last one's
+  // The console ring. Written only by the main loop, always under mux_; the
+  // task reads console_ only under mux_. consoleRing_ is reset on each start.
+  policy::ConsoleRing consoleRing_{nullptr, 0};
+  policy::ConsoleRing *console_ = nullptr;  // &consoleRing_ while recording
+  policy::ConsoleRecord *consoleStorage_ = nullptr;
+
+  // A hint, read by the task without the lock, so that it skips the capture
+  // when nobody is recording. The lock and console_ decide whether a record
+  // is kept.
+  volatile bool consoleOn_ = false;
 };
 
 }  // namespace iheaterlink::standalone

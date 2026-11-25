@@ -51,6 +51,11 @@ void test_classify_protected_pages() {
                         (int)classifyRequest("/fw", false, false));
 }
 
+void test_classify_diag_is_protected() {
+  TEST_ASSERT_EQUAL_INT((int)RequestClass::ProtectedPage,
+                        (int)classifyRequest("/diag", false, true));
+}
+
 void test_classify_actions() {
   const char *paths[] = {"/api/mode", "/api/auth/logout", "/api/override/end",
                          "/api/ota", "/nope"};
@@ -554,6 +559,7 @@ int main(int, char **) {
   RUN_TEST(test_classify_login_endpoints);
   RUN_TEST(test_classify_password_post_once_set_is_action);
   RUN_TEST(test_classify_protected_pages);
+  RUN_TEST(test_classify_diag_is_protected);
   RUN_TEST(test_classify_actions);
   RUN_TEST(test_origin_matches_host);
   RUN_TEST(test_origin_default_port_normalised);

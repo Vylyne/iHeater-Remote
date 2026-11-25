@@ -166,7 +166,8 @@ RequestClass classifyRequest(const char *path, bool isPost, bool passwordSet) {
   if (strcmp(path, "/api/auth/challenge") == 0) {
     return RequestClass::LoginEndpoint;
   }
-  if (strcmp(path, "/setup") == 0 || strcmp(path, "/fw") == 0) {
+  if (strcmp(path, "/setup") == 0 || strcmp(path, "/fw") == 0 ||
+      strcmp(path, "/diag") == 0) {
     return RequestClass::ProtectedPage;
   }
   return RequestClass::Public;
