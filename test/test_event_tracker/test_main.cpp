@@ -289,10 +289,10 @@ void test_target_text_boot_skipped() {
   TEST_ASSERT_FALSE(targetEventText("boot", 0, out));
 }
 
-void test_unpair_reason_hides_token() {
+void test_unpair_reason_not_paired() {
   const char *r = unpairReasonText(
-      "not paired: add remote_token: ABCD-EFGH to your [heater_iheater_remote] section");
-  TEST_ASSERT_NULL(strstr(r, "ABCD"));
+      "not paired: add the token from the Setup page as remote_token in your "
+      "[heater_iheater_remote] section");
   TEST_ASSERT_EQUAL_STRING("Not paired: no heater has this Remote's token", r);
 }
 
@@ -338,7 +338,7 @@ int main(int, char **) {
   RUN_TEST(test_target_text_off_timer);
   RUN_TEST(test_target_text_unknown_source);
   RUN_TEST(test_target_text_boot_skipped);
-  RUN_TEST(test_unpair_reason_hides_token);
+  RUN_TEST(test_unpair_reason_not_paired);
   RUN_TEST(test_unpair_reason_other);
   return UNITY_END();
 }

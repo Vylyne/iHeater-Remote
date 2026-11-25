@@ -306,8 +306,10 @@ class HeaterIheaterRemoteTest(unittest.TestCase):
         config = FakeConfig(self.printer, 'heater_iheater_remote chamber2',
                             {'sensor': 'temperature_sensor chamber_hexa',
                              'remote_token': '7k3p9qxm'})
-        with self.assertRaises(ConfigError):
+        with self.assertRaises(ConfigError) as ctx:
             heater_iheater_remote.load_config_prefix(config)
+        self.assertIn('chamber', str(ctx.exception))
+        self.assertNotIn('7K3P', str(ctx.exception))
 
     def test_mirror_macro_not_read(self):
         self.make(mirror_macro='VIRTUAL_CHAMBER')
@@ -358,7 +360,8 @@ class HeaterIheaterRemoteTest(unittest.TestCase):
         self.make_connected(remote_token='7K3P9QXM')
         with self.assertRaises(CommandError) as ctx:
             self.post(remote_token='7K3P9QXX')
-        self.assertIn('7K3P-9QXX', str(ctx.exception))
+        self.assertIn('no heater_iheater_remote', str(ctx.exception))
+        self.assertNotIn('7K3P', str(ctx.exception))
 
     def test_report_sets_temperature_power_linked(self):
         hv = self.make_connected(remote_token='7K3P9QXM')

@@ -184,7 +184,7 @@ class IheaterRemoteTest(unittest.TestCase):
         self.assertEqual(self.conn.requests, [])
 
     def test_klippy_error_passes_through(self):
-        err = ServerError("no heater_iheater_remote has remote_token 7K3P-9QXM", 400)
+        err = ServerError("no heater_iheater_remote has this remote_token", 400)
         comp = self.make(error=err)
         with self.assertRaises(ServerError) as cm:
             self.call(comp, good())

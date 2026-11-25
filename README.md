@@ -205,9 +205,9 @@ Web UI:
   ([klipper/README.md](klipper/README.md)); the Remote follows only the
   heater with that token. **Generate a new token on save** replaces it. To
   keep an old token after a wipe, enter it manually in the Pairing card.
-  Until a heater carries the token, the dashboard shows "not paired" with
-  the token, the Remote never heats from Klipper, and manual heat still
-  works.
+  Until a heater carries the token, the dashboard shows "not paired", the
+  Remote never heats from Klipper, and manual heat still works. The token
+  appears only on the Setup page, never in errors or logs.
 - **Status:** the status JSON on the WebSocket includes `source`,
   `moonrakerState` (`disconnected`, `connecting`, `klippy-not-ready` or
   `ready`), `heaterObject` and `moonrakerError` (what failed, such as a TLS

@@ -49,7 +49,7 @@ class EventTracker {
 bool targetEventText(const char *source, float targetC, char out[kEventTextMax + 1]);
 
 // A fixed text for MoonrakerLink::lastError() at unpair time. Never copies the
-// input: the "not paired" reason contains the pairing token.
+// input, so no reason can carry the pairing token into the event log.
 const char *unpairReasonText(const char *error);
 
 }  // namespace iheaterlink::policy

@@ -91,7 +91,6 @@ class MoonrakerLink {
   WebSocketsClient ws_;
   MoonrakerSettings settings_;
   char token_[policy::kPairTokenLen + 1] = {};
-  String rawToken_;
   String extraHeaders_;
   TargetCallback targetCb_ = nullptr;
   UnpairedCallback unpairedCb_ = nullptr;

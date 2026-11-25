@@ -98,7 +98,6 @@ void MoonrakerLink::configure(const MoonrakerSettings &s,
   if (s.host != settings_.host || s.port != settings_.port || s.tls != settings_.tls)
     connectedAddress_ = 0;
   settings_ = s;
-  rawToken_ = pairToken != nullptr ? pairToken : "";
   if (!policy::normalizePairToken(pairToken, token_)) token_[0] = '\0';
 
   if (settings_.host.isEmpty()) {
@@ -418,16 +417,10 @@ void MoonrakerLink::handleResult(Pending kind, JsonVariantConst result) {
       }
       const int idx = policy::matchPairedHeater(tokens, n, token_);
       if (idx == policy::kHeaterNone) {
-        String shown = rawToken_;
-        if (token_[0] != '\0') {
-          char formatted[policy::kPairTokenLen + 2];
-          policy::formatPairToken(token_, formatted);
-          shown = formatted;
-        }
-        Serial.printf("[MOON] no heater_iheater_remote has remote_token %s\n",
-                      shown.c_str());
-        goUnpaired(("not paired: add remote_token: " + shown +
-                    " to your [heater_iheater_remote] section").c_str());
+        // The token stays out of the error and the log; the Setup page
+        // shows it.
+        goUnpaired("not paired: add the token from the Setup page as "
+                   "remote_token in your [heater_iheater_remote] section");
         break;
       }
       if (idx == policy::kHeaterDuplicate) {

@@ -87,7 +87,7 @@ Each item matches a Review Focus scenario in
    - The Remote never heats from Klipper. If it was heating from the
      printer (for example after you changed the token and restarted the
      fake), it commands the target off as soon as discovery finds no match.
-   - The dashboard shows the "not paired" text with the token.
+   - The dashboard shows the "not paired" text, without the token.
    - Manual heat still works.
 4. **Noise and a large list.** Run with the defaults.
    - `notify_proc_stat_update` arrives at about 1 Hz and is skipped.

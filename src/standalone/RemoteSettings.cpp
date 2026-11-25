@@ -134,9 +134,7 @@ void loadRemoteSettings(RemoteSettings &out) {
   if (!policy::normalizePairToken(out.pairToken.c_str(), norm)) {
     out.pairToken = generatePairToken();
     savePairToken(out.pairToken.c_str());
-    char shown[policy::kPairTokenLen + 2];
-    policy::formatPairToken(out.pairToken.c_str(), shown);
-    Serial.printf("[REMOTE] generated pairing token %s\n", shown);
+    Serial.println("[REMOTE] generated a pairing token");
   } else {
     out.pairToken = norm;
   }

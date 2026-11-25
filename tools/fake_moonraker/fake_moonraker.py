@@ -140,7 +140,7 @@ def report_reply(params, reply: dict):
     token = normalize_token(str(params.get("remote_token") or ""))
     if not any(h["token"] and h["token"] == token for h in heaters.values()):
         reply["error"] = {"code": 400,
-                          "message": f"no heater_iheater_remote has remote_token {token}"}
+                          "message": "no heater_iheater_remote has this remote_token"}
         return
     log.info(f"report link={params.get('link')} air={fmt_num(params.get('air'))} "
              f"element={fmt_num(params.get('element'))} power={fmt_num(params.get('power'))} "

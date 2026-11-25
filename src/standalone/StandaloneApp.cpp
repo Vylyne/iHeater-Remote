@@ -1360,9 +1360,7 @@ bool applySetupForm(String &error) {
       return false;
     }
     s_settings.pairToken = next.pairToken;
-    char shown[policy::kPairTokenLen + 2];
-    policy::formatPairToken(s_settings.pairToken.c_str(), shown);
-    Serial.printf("[REMOTE] pairing token set to %s\n", shown);
+    Serial.println("[REMOTE] pairing token changed");
     if (klipperSource())  // follow the link with the newly saved token
       s_moonraker.configure(s_settings.moon, s_settings.pairToken.c_str());
   }

@@ -112,9 +112,9 @@ class _ReportRouter:
                     heater = candidate
                     break
         if heater is None:
+            # The token stays out of the message: it is not an error detail.
             raise web_request.error(
-                "no heater_iheater_remote has remote_token %s-%s"
-                % (token[:4], token[4:]))
+                "no heater_iheater_remote has this remote_token")
         now = self.printer.get_reactor().monotonic()
         try:
             heater.apply_report(args, now)
@@ -164,10 +164,9 @@ class HeaterIheaterRemote:
                 if (isinstance(other, HeaterIheaterRemote)
                         and other.remote_token == token):
                     raise config.error(
-                        "[%s] remote_token %s-%s is already used by "
+                        "[%s] remote_token is already used by "
                         "heater_iheater_remote %s"
-                        % (self.full_name, token[:4], token[4:],
-                           other.short_name))
+                        % (self.full_name, other.short_name))
         self.pheaters.heaters[self.short_name] = self
         self.pheaters.available_heaters.append(self.full_name)
         self.pheaters.register_sensor(config, self)
