@@ -199,7 +199,9 @@ Web UI:
   logged-in page (judged by its session cookie or proxy login when it
   connects) can always get in; a page closed to make room shows "Too many
   open pages". A page that stops taking data (a sleeping phone, a dropped
-  Wi-Fi link) is skipped and then closed, so it cannot stall the Remote.
+  Wi-Fi link) is held back, then closed after 3 s, so it cannot stall the
+  Remote; a page that is only slow catches up on what it missed. A
+  connection that does not finish its handshake within 5 s is closed.
 - **Setup** has a **Control source** choice: Manual or Klipper (Moonraker).
   For Klipper, enter the host and port, and tick **TLS** to use a secure
   connection (the port switches between 7125 and 443; TLS on port 7125 is

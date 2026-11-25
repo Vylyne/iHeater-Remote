@@ -99,9 +99,12 @@ WebServer s_server(80);
 StatusSocket s_statusSocket(81);
 
 // Headers from each socket's handshake, kept until it connects: login is
-// judged from them once, at WStype_CONNECTED.
+// judged from them once, at WStype_CONNECTED. Only the session token is kept
+// from the Cookie header (other cookies can make it long). A secret: never
+// log it.
 struct SocketHandshake {
-  String cookie;
+  bool hasToken = false;
+  uint8_t token[policy::kSessionTokenLen] = {};
   String user;
   String groups;
 };
@@ -1159,15 +1162,23 @@ void pushStatusIfChanged(bool force = false) {
 
 bool socketLoggedIn(uint8_t client);
 
-// Header values longer than this are not a session cookie or a user name.
+// Login header values longer than this are not a user name or groups.
 constexpr size_t kMaxSocketHeaderBytes = 512;
 
 void onStatusSocketHeader(uint8_t client, const String &name, const String &value) {
-  if (client >= StatusSocket::kMaxClients || value.length() > kMaxSocketHeaderBytes) return;
+  if (client >= StatusSocket::kMaxClients) return;
   SocketHandshake &h = s_socketHandshake[client];
-  if (name.equalsIgnoreCase("Cookie"))
-    h.cookie = value;
-  else if (s_auth.userHeader.length() > 0 && name.equalsIgnoreCase(s_auth.userHeader))
+  if (name.equalsIgnoreCase("Cookie")) {
+    uint8_t token[policy::kSessionTokenLen];
+    if (policy::sessionTokenFromCookie(value.c_str(), token)) {
+      memcpy(h.token, token, sizeof token);
+      h.hasToken = true;
+    }
+    memset(token, 0, sizeof token);
+    return;
+  }
+  if (value.length() > kMaxSocketHeaderBytes) return;
+  if (s_auth.userHeader.length() > 0 && name.equalsIgnoreCase(s_auth.userHeader))
     h.user = value;
   else if (s_auth.groupsHeader.length() > 0 && name.equalsIgnoreCase(s_auth.groupsHeader))
     h.groups = value;
@@ -1179,8 +1190,7 @@ void onStatusSocketEvent(uint8_t client, WStype_t type, uint8_t *payload, size_t
     if (client < StatusSocket::kMaxClients) s_socketHandshake[client] = SocketHandshake{};
     // Closed to keep a slot free for a login: it gets nothing.
     if (!s_statusSocket.admit(client, loggedIn)) return;
-    String status = statusJson();
-    s_statusSocket.sendFrame(client, status, policy::FrameKind::Status);
+    s_statusSocket.sendStatus(client, statusJson());
   } else if (type == WStype_DISCONNECTED) {
     if (client < StatusSocket::kMaxClients) s_socketHandshake[client] = SocketHandshake{};
   } else if (!s_statusSocket.clientIsOpen(client)) {
@@ -1823,12 +1833,18 @@ bool peerTrusted(uint32_t peer) {
   return policy::isTrustedProxy(peer, s_auth.proxies, s_auth.proxyCount, automatic);
 }
 
-bool sessionCookieValid(const char *cookie) {
-  uint8_t token[policy::kSessionTokenLen];
-  if (!policy::sessionTokenFromCookie(cookie, token)) return false;
+bool sessionTokenValid(const uint8_t token[policy::kSessionTokenLen]) {
   const policy::SessionTable::Check check = s_sessions.check(token, s_hours.hours());
   if (check == policy::SessionTable::Check::Expired) saveSessions(s_sessions);
   return check == policy::SessionTable::Check::Valid;
+}
+
+bool sessionCookieValid(const char *cookie) {
+  uint8_t token[policy::kSessionTokenLen];
+  if (!policy::sessionTokenFromCookie(cookie, token)) return false;
+  const bool valid = sessionTokenValid(token);
+  memset(token, 0, sizeof token);
+  return valid;
 }
 
 // The socket counts as logged in by the same rules as an HTTP request: a
@@ -1839,7 +1855,7 @@ bool socketLoggedIn(uint8_t client) {
   if (!s_auth.passwordSet && !s_auth.headerLogin) return true;
   if (client >= StatusSocket::kMaxClients) return false;
   const SocketHandshake &h = s_socketHandshake[client];
-  if (sessionCookieValid(h.cookie.c_str())) return true;
+  if (h.hasToken && sessionTokenValid(h.token)) return true;
   const bool trusted = peerTrusted(ipValue(s_statusSocket.remoteIP(client)));
   if (!trusted || !s_auth.headerLogin) return false;
   String user = h.user;
@@ -2782,7 +2798,7 @@ void setup() {
   s_moonraker.onTarget(onKlipperTarget);
   s_moonraker.onUnpaired([]() {
     resetOverride("unpaired");
-    // A fixed text: lastError() can carry the pairing token.
+    // A fixed text for the error's kind, not the error itself.
     feedRecord(policy::EventKind::Warn, "%s",
                policy::unpairReasonText(s_moonraker.lastError().c_str()));
   });

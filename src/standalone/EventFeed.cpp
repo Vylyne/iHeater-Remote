@@ -2,6 +2,7 @@
 
 #include <ArduinoJson.h>
 #include <AuthCrypto.h>
+#include <FeedCursor.h>
 #include <esp_random.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -23,16 +24,13 @@ constexpr size_t kConsoleTextBytes = 192;
 // A subscribe message is about 55 bytes; anything much longer is not one.
 constexpr size_t kMaxSubscribeBytes = 128;
 
-// Per-client backlog progress. Later features (the console) add their own
-// per-client state next to this, keyed by the same client number.
-struct Backlog {
+using SendResult = StatusSocket::SendResult;
+
+// Per-client backlog progress. A client also comes back here when it misses
+// a live "ev" or "hist" frame (its socket had no room). The console keeps
+// its own per-client state, keyed by the same client number.
+struct Backlog : policy::FeedCursor {
   uint8_t client = 0;
-  bool histStage = false;  // events first, then history
-  bool evFirstSent = false;
-  uint32_t evSeq = 0;  // last event seq sent
-  bool histFirstSent = false;
-  bool histStarted = false;
-  uint32_t histNextMs = 0;  // time of the next sample to send
 };
 
 StatusSocket *s_socket = nullptr;
@@ -47,11 +45,49 @@ UartLink *s_uart = nullptr;
 policy::ConsoleTickets s_tickets;
 bool s_subscribed[kMaxClients] = {};
 uint32_t s_consoleLost = 0;  // drained lines that could not be sent
+// Lines a subscriber missed (its socket had no room); it is told before its
+// next lines.
+uint32_t s_consoleMissed[kMaxClients] = {};
 
-bool queued(uint8_t client) {
+Backlog *findQueued(uint8_t client) {
   for (size_t i = 0; i < s_queued; i++)
-    if (s_queue[i].client == client) return true;
-  return false;
+    if (s_queue[i].client == client) return &s_queue[i];
+  return nullptr;
+}
+
+bool queued(uint8_t client) { return findQueued(client) != nullptr; }
+
+// The head had no room: the others' backlogs go first.
+void rotateQueue() {
+  if (s_queued < 2) return;
+  const Backlog head = s_queue[0];
+  for (size_t i = 1; i < s_queued; i++) s_queue[i - 1] = s_queue[i];
+  s_queue[s_queued - 1] = head;
+}
+
+void enqueue(uint8_t client, const policy::FeedCursor &cursor) {
+  if (queued(client) || s_queued >= kMaxClients) return;
+  Backlog b;
+  static_cast<policy::FeedCursor &>(b) = cursor;
+  b.client = client;
+  s_queue[s_queued++] = b;
+}
+
+uint32_t lastEventSeq() { return s_log.size() > 0 ? s_log.at(s_log.size() - 1).seq : 0; }
+
+// The client missed live event `seq`: it catches up through its backlog.
+void resyncEvent(uint8_t client, uint32_t seq) {
+  if (Backlog *b = findQueued(client)) {
+    policy::rewindForEvent(*b, seq);
+    return;
+  }
+  enqueue(client, policy::cursorAfterMissedEvent(seq, s_hist.size(), s_hist.newestMs(),
+                                                 policy::TempHistory::kPeriodMs));
+}
+
+// The client (live, not in its backlog) missed the samples from `fromMs` on.
+void resyncHist(uint8_t client, uint32_t fromMs) {
+  enqueue(client, policy::cursorAfterMissedHist(lastEventSeq(), fromMs));
 }
 
 void dropQueued(uint8_t client) {
@@ -76,17 +112,14 @@ bool anyLiveClient() {
   return false;
 }
 
-// Sends the events in `list` (already in order) as one "ev" frame. A negative
-// client broadcasts. False when nothing was sent (no client, or short of
-// heap). The keys, the kind names and the event texts (the ring outlives the
-// serialization below) are stored by pointer, so the document needs only its
-// slots.
-bool sendEvents(int client, const policy::Event *const *list, size_t n, bool first) {
-  if (client < 0 ? !s_socket->anyOpen()
-                 : !s_socket->clientIsOpen(static_cast<uint8_t>(client)))
-    return false;
+// The events in `list` (already in order) as one "ev" frame; empty when
+// short of heap. The keys, the kind names and the event texts (the ring
+// outlives the serialization below) are stored by pointer, so the document
+// needs only its slots.
+String eventsFrame(const policy::Event *const *list, size_t n, bool first) {
+  String out;
   DynamicJsonDocument doc(JSON_OBJECT_SIZE(4) + JSON_ARRAY_SIZE(n) + n * JSON_ARRAY_SIZE(5));
-  if (doc.capacity() == 0) return false;  // out of heap: skip rather than send "null"
+  if (doc.capacity() == 0) return out;  // out of heap: skip rather than send "null"
   doc["t"] = "ev";
   doc["now"] = millis();
   if (first) doc["first"] = true;
@@ -100,15 +133,8 @@ bool sendEvents(int client, const policy::Event *const *list, size_t n, bool fir
     row.add(e.count);
     row.add(static_cast<const char *>(e.text));
   }
-  if (doc.overflowed()) return false;
-  String out;
-  serializeJson(doc, out);
-  if (out.length() == 0) return false;
-  if (client < 0) {
-    s_socket->broadcastFrame(out, policy::FrameKind::Stream);
-    return true;
-  }
-  return s_socket->sendFrame(static_cast<uint8_t>(client), out, policy::FrameKind::Stream);
+  if (!doc.overflowed()) serializeJson(doc, out);
+  return out;
 }
 
 void appendSample(String &out, int16_t v) {
@@ -171,9 +197,17 @@ void sendBacklogFrame() {
       else
         remaining++;
     }
-    // Short of heap: this client's frame is tried again on the next loop. A
-    // client that is closing is dropped from the queue on the next loop.
-    if (!sendEvents(client, list, n, !b.evFirstSent)) return;
+    // Not sent (short of heap, no room yet, or the client went: its
+    // disconnect may already have moved the queue under `b`): the cursor
+    // stays and the frame is tried again on the next loop. A client that is
+    // closing is dropped from the queue on the next loop.
+    const String out = eventsFrame(list, n, !b.evFirstSent);
+    if (out.length() == 0) return;
+    const SendResult r = s_socket->sendFrame(client, out);
+    if (r != SendResult::Sent) {
+      if (r == SendResult::Deferred) rotateQueue();
+      return;
+    }
     b.evFirstSent = true;
     if (n > 0) b.evSeq = list[n - 1]->seq;
     if (remaining == 0) b.histStage = true;
@@ -183,35 +217,35 @@ void sendBacklogFrame() {
   const size_t size = s_hist.size();
   if (size == 0) {
     String out = histFrame(0, 0, 0, true);
-    s_socket->sendFrame(client, out, policy::FrameKind::Stream);
+    if (s_socket->sendFrame(client, out) == SendResult::Deferred) {
+      rotateQueue();
+      return;
+    }
     dropQueued(client);
     return;
   }
   const uint32_t step = policy::TempHistory::kPeriodMs;
   const uint32_t newest = s_hist.newestMs();
-  const uint32_t oldest = newest - static_cast<uint32_t>(size - 1) * step;
   // Samples keep arriving while the backlog runs, so the cursor is a time,
   // not an index.
   if (!b.histStarted) {
     b.histStarted = true;
-    b.histNextMs = oldest;
+    b.histNextMs = newest - static_cast<uint32_t>(size - 1) * step;
   }
-  size_t from = 0;
-  const uint32_t back = (newest - b.histNextMs) / step;
-  if (back < size) {
-    from = size - 1 - back;
-  } else {  // the cursor's samples have scrolled out of the ring
-    b.histNextMs = oldest;
+  const policy::HistWindow w = policy::histWindow(b.histNextMs, newest, size, step, kSamplesPerFrame);
+  if (w.done) {
+    dropQueued(client);
+    return;
   }
-  size_t n = size - from;
-  if (n > kSamplesPerFrame) n = kSamplesPerFrame;
-  const uint32_t lastMs = b.histNextMs + static_cast<uint32_t>(n - 1) * step;
-  String out = histFrame(from, n, lastMs, !b.histFirstSent);
-  // Not sent: the client is closing, or went (its disconnect may already have
-  // moved the queue under `b`).
-  if (!s_socket->sendFrame(client, out, policy::FrameKind::Stream)) return;
+  String out = histFrame(w.from, w.n, w.lastMs, !b.histFirstSent);
+  // Not sent: as for events above.
+  const SendResult r = s_socket->sendFrame(client, out);
+  if (r != SendResult::Sent) {
+    if (r == SendResult::Deferred) rotateQueue();
+    return;
+  }
   b.histFirstSent = true;
-  b.histNextMs = lastMs + step;
+  b.histNextMs = w.lastMs + step;
   if (static_cast<int32_t>(newest - b.histNextMs) < 0) dropQueued(client);
 }
 
@@ -220,7 +254,15 @@ void sendConsoleState(uint8_t client, const char *state) {
   char out[80];
   snprintf(out, sizeof out, "{\"t\":\"uart\",\"now\":%lu,\"state\":\"%s\"}",
            static_cast<unsigned long>(millis()), state);
-  s_socket->sendFrame(client, out, strlen(out), policy::FrameKind::Stream);
+  s_socket->sendFrame(client, out, strlen(out));
+}
+
+// {"t":"uart","now":N,"drop":D,"l":[]}: the lines this client missed.
+SendResult sendConsoleDrop(uint8_t client, uint32_t dropped) {
+  char out[80];
+  snprintf(out, sizeof out, "{\"t\":\"uart\",\"now\":%lu,\"drop\":%lu,\"l\":[]}",
+           static_cast<unsigned long>(millis()), static_cast<unsigned long>(dropped));
+  return s_socket->sendFrame(client, out, strlen(out));
 }
 
 void stopConsole() {
@@ -231,6 +273,7 @@ void stopConsole() {
 void unsubscribe(uint8_t client) {
   if (client >= kMaxClients || !s_subscribed[client]) return;
   s_subscribed[client] = false;
+  s_consoleMissed[client] = 0;
   if (!anySubscribed()) stopConsole();
 }
 
@@ -259,6 +302,7 @@ void subscribe(uint8_t client, const char *ticketHex) {
       }
     }
     s_subscribed[client] = true;
+    s_consoleMissed[client] = 0;
   }
   sendConsoleState(client, "on");
 }
@@ -284,18 +328,13 @@ void captureHex(const uint8_t *bytes, uint16_t fullLen, size_t cap, char *out) {
   policy::toHex(bytes, capturedLen(fullLen, cap), out);
 }
 
-// One "uart" message with up to kConsoleDrainMax new lines, to every
-// subscriber:
+// One "uart" frame for `n` drained lines (up to kConsoleDrainMax), empty when
+// short of heap:
 // {"t":"uart","now":N,"drop":D,"l":[[seq,ms,"text","reqHex","replyHex",reqLen,replyLen],...]}
 // The texts and hex strings are copied into a document sized for exactly
 // these lines (each text is decoded twice: once to size, once to add).
-void sendConsoleLines() {
-  policy::ConsoleRecord recs[UartLink::kConsoleDrainMax];
-  uint32_t dropped = 0;
-  const size_t n = s_uart->consoleDrain(recs, UartLink::kConsoleDrainMax, dropped);
-  dropped += s_consoleLost;
-  if (n == 0 && dropped == 0) return;
-
+String consoleFrame(const policy::ConsoleRecord *recs, size_t n, uint32_t dropped) {
+  String out;
   char text[kConsoleTextBytes];
   size_t cap = JSON_OBJECT_SIZE(4) + JSON_ARRAY_SIZE(n);
   for (size_t i = 0; i < n; i++) {
@@ -305,10 +344,7 @@ void sendConsoleLines() {
            JSON_STRING_SIZE(2 * capturedLen(recs[i].replyLen, policy::kConsoleReplyBytes));
   }
   DynamicJsonDocument doc(cap);
-  if (doc.capacity() == 0) {  // out of heap: count these lines as dropped
-    s_consoleLost = dropped + n;
-    return;
-  }
+  if (doc.capacity() == 0) return out;
   doc["t"] = "uart";
   doc["now"] = millis();
   if (dropped > 0) doc["drop"] = dropped;
@@ -328,16 +364,44 @@ void sendConsoleLines() {
     row.add(r.reqLen);
     row.add(r.replyLen);
   }
-  String out;
   if (!doc.overflowed()) serializeJson(doc, out);
-  if (out.length() == 0) {
-    s_consoleLost = dropped + n;
-    return;
+  return out;
+}
+
+// A subscriber whose socket has no room misses the frame; it gets a "drop"
+// count for those lines before its next ones.
+void sendConsoleLines() {
+  bool anyMissed = false;
+  for (size_t c = 0; c < kMaxClients; c++)
+    if (s_subscribed[c] && s_consoleMissed[c] > 0) anyMissed = true;
+  policy::ConsoleRecord recs[UartLink::kConsoleDrainMax];
+  uint32_t dropped = 0;
+  const size_t n = s_uart->consoleDrain(recs, UartLink::kConsoleDrainMax, dropped);
+  dropped += s_consoleLost;
+  if (n == 0 && dropped == 0 && !anyMissed) return;
+  String out;
+  if (n > 0 || dropped > 0) {
+    out = consoleFrame(recs, n, dropped);
+    if (out.length() == 0) {  // out of heap: count these lines as dropped
+      s_consoleLost = dropped + n;
+      return;
+    }
+    s_consoleLost = 0;
   }
-  s_consoleLost = 0;
-  for (uint8_t c = 0; c < kMaxClients; c++)
-    if (s_subscribed[c] && s_socket->clientIsOpen(c))
-      s_socket->sendFrame(c, out, policy::FrameKind::Stream);
+  const uint32_t lines = dropped + n;  // what a client that misses `out` misses
+  for (uint8_t c = 0; c < kMaxClients; c++) {
+    if (!s_subscribed[c] || !s_socket->clientIsOpen(c)) continue;
+    if (s_consoleMissed[c] > 0) {
+      const SendResult r = sendConsoleDrop(c, s_consoleMissed[c]);
+      if (r != SendResult::Sent) {
+        if (r == SendResult::Deferred) s_consoleMissed[c] += lines;
+        continue;
+      }
+      s_consoleMissed[c] = 0;
+    }
+    if (out.length() > 0 && s_socket->sendFrame(c, out) == SendResult::Deferred)
+      s_consoleMissed[c] += lines;
+  }
 }
 
 }  // namespace
@@ -364,9 +428,15 @@ void feedRecord(policy::EventKind kind, const char *fmt, ...) {
   va_end(args);
 
   const policy::Event &e = s_log.add(kind, text, millis());
-  if (s_socket == nullptr) return;
+  if (s_socket == nullptr || !s_socket->anyOpen()) return;
+  const uint32_t seq = e.seq;
   const policy::Event *list[1] = {&e};
-  sendEvents(-1, list, 1, false);
+  const String out = eventsFrame(list, 1, false);
+  if (out.length() == 0) return;
+  // A client in its backlog gets it too: its backlog may be past the events.
+  for (uint8_t c = 0; c < kMaxClients; c++)
+    if (s_socket->clientIsOpen(c) && s_socket->sendFrame(c, out) == SendResult::Deferred)
+      resyncEvent(c, seq);
 }
 
 void feedOnSocketEvent(uint8_t client, WStype_t type, const uint8_t *payload, size_t len) {
@@ -397,10 +467,14 @@ void feedLoop(uint32_t nowMs, const policy::HistSample &current) {
     const size_t size = s_hist.size();
     if (added > size) added = size;
     if (added > kSamplesPerFrame) added = kSamplesPerFrame;
-    String out = histFrame(size - added, added, s_hist.newestMs(), false);
+    const uint32_t newest = s_hist.newestMs();
+    String out = histFrame(size - added, added, newest, false);
+    const uint32_t firstMs =
+        newest - static_cast<uint32_t>(added - 1) * policy::TempHistory::kPeriodMs;
     for (uint8_t c = 0; c < kMaxClients; c++)
-      if (s_socket->clientIsOpen(c) && !queued(c))
-        s_socket->sendFrame(c, out, policy::FrameKind::Stream);
+      if (s_socket->clientIsOpen(c) && !queued(c) &&
+          s_socket->sendFrame(c, out) == SendResult::Deferred)
+        resyncHist(c, firstMs);
   }
 
   if (!anySubscribed()) return;

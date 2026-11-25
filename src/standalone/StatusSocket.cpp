@@ -23,6 +23,14 @@ bool waitWritable(int fd, uint32_t waitMs) {
 void StatusSocket::loop() {
   WebSocketsServer::loop();
   current_ = nullptr;
+  const uint32_t now = millis();
+  for (uint8_t num = 0; num < kMaxClients; num++) {
+    const WSclient_t &c = _clients[num];
+    if (handshakes_[num].expired(c.tcp != nullptr && c.status == WSC_HEADER, now)) {
+      Serial.printf("[WS] client %d did not finish its handshake: closing it\n", num);
+      queueClose(num, Close::Abort);
+    }
+  }
   for (uint8_t num = 0; num < kMaxClients; num++) {
     const Close how = close_[num];
     if (how == Close::None) continue;
@@ -41,7 +49,11 @@ void StatusSocket::loop() {
 }
 
 bool StatusSocket::admit(uint8_t num, bool loggedIn) {
-  if (num >= kMaxClients) return false;
+  // The client can have gone during the CONNECTED callback (remoteIP checks
+  // the connection): a slot that is no longer open is not admitted.
+  if (num >= kMaxClients || _clients[num].tcp == nullptr ||
+      _clients[num].status != WSC_CONNECTED)
+    return false;
   admitted_[num] = true;
   loggedIn_[num] = loggedIn;
   order_[num] = ++nextOrder_;
@@ -77,32 +89,33 @@ bool StatusSocket::anyOpen() {
   return false;
 }
 
-bool StatusSocket::sendFrame(uint8_t num, const char *text, size_t len,
-                             policy::FrameKind kind) {
-  if (text == nullptr || !clientIsOpen(num)) return false;
-  const bool status = kind == policy::FrameKind::Status;
-  switch (gates_[num].decide(kind, writable(num), millis())) {
+StatusSocket::SendResult StatusSocket::sendFrame(uint8_t num, const char *text, size_t len) {
+  if (text == nullptr || !clientIsOpen(num)) return SendResult::Failed;
+  switch (gates_[num].decide(writable(num), millis())) {
     case policy::SendAction::Send:
-      if (status) statusMissed_[num] = false;
-      return sendTXT(num, text, len);
+      return sendTXT(num, text, len) ? SendResult::Sent : SendResult::Failed;
     case policy::SendAction::Skip:
-      if (status) statusMissed_[num] = true;
-      return false;
+      return SendResult::Deferred;
     case policy::SendAction::Close:
       Serial.printf("[WS] client %d is not taking data: closing it\n", num);
       queueClose(num, Close::Abort);
-      return false;
+      return SendResult::Failed;
   }
-  return false;
+  return SendResult::Failed;
 }
 
-void StatusSocket::broadcastFrame(const String &text, policy::FrameKind kind) {
-  for (uint8_t num = 0; num < kMaxClients; num++) sendFrame(num, text, kind);
+void StatusSocket::sendStatus(uint8_t num, const String &text) {
+  if (num >= kMaxClients) return;
+  const SendResult r = sendFrame(num, text);
+  if (r == SendResult::Sent)
+    statusMissed_[num] = false;
+  else if (r == SendResult::Deferred)
+    statusMissed_[num] = true;
 }
 
 void StatusSocket::broadcastStatus(const String &text, bool changed) {
   for (uint8_t num = 0; num < kMaxClients; num++)
-    if (changed || statusMissed_[num]) sendFrame(num, text, policy::FrameKind::Status);
+    if (changed || statusMissed_[num]) sendStatus(num, text);
 }
 
 size_t StatusSocket::write(WSclient_t *client, uint8_t *out, size_t n) {
@@ -145,6 +158,7 @@ void StatusSocket::clientDisconnect(WSclient_t *client) {
     statusMissed_[client->num] = false;
     close_[client->num] = Close::None;
     gates_[client->num].reset();
+    handshakes_[client->num].reset();
   }
   if (current_ == client) current_ = nullptr;
   WebSocketsServerCore::clientDisconnect(client);
