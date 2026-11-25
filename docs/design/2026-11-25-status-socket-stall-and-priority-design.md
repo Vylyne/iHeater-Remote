@@ -1,0 +1,96 @@
+# Status socket: no stall on dead clients, slots kept for logged-in pages
+
+Approved by the owner on 2026-11-24 (short design: a small change).
+
+## Why
+
+- **Stall:** a client that vanishes without closing (a phone that sleeps,
+  Wi-Fi that drops) leaves a half-open TCP connection. Once its send buffer
+  (5744 bytes) fills, every frame to it blocks loopTask. The core's
+  `NetworkClient::write` retries a full buffer 10 times with a 1 s `select`,
+  so one frame can block for about 10 s. Frames go to the clients in turn, so
+  one dead client delays every page and the whole loop each second, until
+  lwIP gives up on the connection (minutes).
+- **Slots:** the status socket (port 81, and `/ws` through the nginx proxy)
+  has 5 client slots and needs no login. Five logged-out pages, or anyone on
+  the network, can take them all and lock a logged-in owner out of live
+  status and the UART console.
+
+## Goals
+
+- A dead client costs loopTask at most one short wait, then it is closed.
+- A live but briefly slow client keeps its connection.
+- A logged-in page can always connect, even when logged-out pages hold the
+  other slots.
+
+Non-goals: more slots, login for the status socket itself (it stays public),
+and demoting a socket when its session logs out (checked once, at connect).
+
+## Approaches
+
+1. **A zero-wait check before each frame:** lwIP reports a socket writable
+   only when about half its buffer (2873 bytes) is free. It is cheap, but a
+   console frame can reach about 3.3 KB, so a frame could still block.
+2. **Bound every write (chosen, together with 1):** the library sends every
+   byte through the virtual `WebSockets::write`. A subclass replaces it with
+   a non-blocking `send` and a fixed time budget, whatever the frame size.
+   The zero-wait check stays in front of it, so a status frame to a slow
+   client is skipped instead of cut off.
+3. **Heartbeat pings only:** the library's heartbeat can detect dead
+   clients, but each ping is itself a write that blocks, so it does not
+   bound the stall.
+
+For the slots, the session cookie is host-scoped, so the browser sends it
+with the socket handshake on port 81 as well. The proxy's user and groups
+headers reach `/ws` through nginx. Reading those headers at handshake time
+needs no page change. A one-time ticket sent after connecting (as the
+console does) was rejected: the socket would have to connect as logged-out
+first, and on a full server that is exactly the socket that gets closed.
+
+## Design
+
+- **`StatusSocket`** (`src/standalone/StatusSocket.*`) subclasses
+  `WebSocketsServer`:
+  - **Bounded write:** `write()` uses `send(..., MSG_DONTWAIT)` with
+    `select`, for at most `kSocketWriteBudgetMs` (250 ms) per write. Past the
+    budget it stops the TCP connection, and the library then reports the
+    client as disconnected. A polite close frame would block as well.
+  - **Gated sends:** `sendFrame(num, text, kind)` and
+    `broadcastFrame(text, kind)` check writability with zero wait, then ask
+    the per-client `SocketGate`:
+    - **Status frames:** skipped while the socket cannot take data, since the
+      next status replaces them.
+    - **Stream frames** (`ev`, `hist`, `uart`): these must arrive in order,
+      so the client is closed. Its page reconnects and gets the backlog
+      again.
+    - A client skipped for `kSocketStuckMs` (3 s) is closed.
+  - **Handshake headers:** each header line reaches a callback with the
+    client number. `clientIsConnected(WSclient_t *)` is overridden to note
+    the client that `handleClientData` is about to read.
+  - **Deferred closes:** the slot rule's closes run after the library's
+    loop, not inside its callbacks.
+- **Policy** (`lib/remote-policy/src/SocketPolicy.*`, native tests):
+  - `SocketGate::decide(kind, writable, nowMs)` returns Send, Skip or Close.
+  - `slotToClose(slots, n, newcomer)` takes each slot's state: connected,
+    logged in, closing, and connect order.
+    - It acts only when the newcomer fills the last free slot. Closing slots
+      count as free.
+    - A logged-out newcomer is closed itself.
+    - For a logged-in newcomer, the oldest logged-out socket is closed. If
+      every other socket is logged in, none is closed.
+    - So logged-out pages hold at most 4 of the 5 slots, and one slot stays
+      free for a login.
+- **Logged in:** the same rule as HTTP requests: a valid session cookie or
+  an accepted proxy header login, from the handshake's headers and peer
+  address. With no password and no header login configured, every socket
+  counts as logged in, so 5 pages still fit.
+- **Pages:** a page closed for room gets close code 4001. The dashboard
+  and `/diag` show "Too many open pages: close one or log in" and retry
+  after 10 s. The update page retries after 10 s with no message.
+
+## Left to the builder
+
+The exact budget and stuck values may be tuned on the bench. A connection
+stopped while lwIP still holds unsent data lingers in lwIP (about 5.7 KB of
+buffers) until its retries run out, because `SO_LINGER` is off in this
+build; that cost is accepted.
